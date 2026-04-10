@@ -322,7 +322,9 @@ export function register(server) {
                 }
 
                 // Apply cumulative line delta to nearLine if provided
-                const adjustedNearLine = edit.nearLine ? edit.nearLine + lineDelta : undefined;
+                const adjustedNearLine = typeof edit.nearLine === 'number'
+                    ? edit.nearLine + lineDelta
+                    : undefined;
 
                 const symbolMatches = await findSymbol(workingContent, langName, edit.symbol, {
                     kindFilter: 'def',
@@ -363,12 +365,19 @@ export function register(server) {
             }
 
             // Apply cumulative line delta to nearLine if provided
-            const adjustedNearLine = edit.nearLine ? edit.nearLine + lineDelta : undefined;
+            const adjustedNearLine = typeof edit.nearLine === 'number'
+                ? edit.nearLine + lineDelta
+                : undefined;
 
             const match = findMatch(workingContent, edit.oldText, adjustedNearLine);
 
             if (!match) {
                 errors.push(generateDiagnostic(workingContent, edit.oldText, i, isBatch));
+                continue;
+            }
+
+            if (resolvedNewText === undefined) {
+                errors.push(`${tag}newText required.`);
                 continue;
             }
 
