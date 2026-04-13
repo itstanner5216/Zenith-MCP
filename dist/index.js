@@ -76,7 +76,7 @@ function registerAllTools(server, ctx) {
 
 // ── Create a fully wired filesystem MCP server bound to a context ─────────────
 export function createFilesystemServer(ctx) {
-    const server = new McpServer({ name: "secure-filesystem-server", version: "0.3.0" });
+    const server = new McpServer({ name: "zenith-mcp", version: "0.3.0" });
     registerAllTools(server, ctx);
     return server;
 }
@@ -142,7 +142,7 @@ async function runStdio() {
     const dirArgs = args.filter(a => !a.startsWith('--'));
 
     if (dirArgs.length === 0) {
-        console.error("Usage: mcp-server-filesystem [allowed-directory] [additional-directories...]");
+        console.error("Usage: zenith-mcp [allowed-directory] [additional-directories...]");
         console.error("Note: Allowed directories can be provided via:");
         console.error("  1. Command-line arguments (shown above)");
         console.error("  2. MCP roots protocol (if client supports it)");
@@ -164,7 +164,7 @@ async function runStdio() {
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Secure MCP Filesystem Server running on stdio");
+    console.error("Zenith-MCP running on stdio");
     ripgrepAvailable().then(ok =>
         console.error(ok ? `Ripgrep available at /usr/bin/rg` : 'Ripgrep not found — using JS fallback for search')
     );

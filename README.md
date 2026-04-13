@@ -1,4 +1,4 @@
-# Filesystem MCP Server
+# Zenith-MCP
 
 Node.js server implementing Model Context Protocol (MCP) for filesystem operations.
 
@@ -18,7 +18,7 @@ The server uses a flexible directory access control system. Directories can be s
 ### Method 1: Command-line Arguments
 Specify Allowed directories when starting the server:
 ```bash
-mcp-server-filesystem /path/to/dir1 /path/to/dir2
+zenith-mcp /path/to/dir1 /path/to/dir2
 ```
 
 ### Method 2: MCP Roots (Recommended)
@@ -241,7 +241,7 @@ Note: all directories must be mounted to `/projects` by default.
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-filesystem",
+        "zenith-mcp",
         "/Users/username/Desktop",
         "/path/to/other/allowed/dir"
       ]
@@ -300,7 +300,7 @@ Note: all directories must be mounted to `/projects` by default.
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-filesystem",
+        "zenith-mcp",
         "${workspaceFolder}"
       ]
     }

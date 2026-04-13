@@ -35,10 +35,10 @@ const args = process.argv.slice(2);
 let port = 3100;
 let host = '0.0.0.0';
 const dirArgs = [];
-const API_KEY = process.env.MCP_BRIDGE_API_KEY || process.env.COMMANDER_API_KEY;
+const API_KEY = process.env.ZENITH_MCP_API_KEY || process.env.MCP_BRIDGE_API_KEY || process.env.COMMANDER_API_KEY;
 
 if (!API_KEY) {
-    console.error('FATAL: MCP_BRIDGE_API_KEY or COMMANDER_API_KEY must be set');
+    console.error('FATAL: ZENITH_MCP_API_KEY, MCP_BRIDGE_API_KEY, or COMMANDER_API_KEY must be set');
     process.exit(1);
 }
 
@@ -287,7 +287,7 @@ app.all('/mcp', (_req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 app.listen(port, host, () => {
-    console.error(`Secure MCP Filesystem HTTP Server listening on http://${host}:${port}`);
+    console.error(`Zenith-MCP HTTP Server listening on http://${host}:${port}`);
     console.error(`  Streamable HTTP: POST/GET/DELETE /mcp`);
     console.error(`  Legacy SSE:      GET /sse  +  POST /messages`);
     console.error(`  Health:          GET /health`);
