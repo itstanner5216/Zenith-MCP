@@ -414,19 +414,28 @@ export { _batchSession, getOrCreateSession, parseEditPayload, loadDiff, resolveR
 export function register(server, ctx) {
     server.registerTool("edit_file", {
         title: "Edit File",
-        description: "Edit a text file by block, content match, or symbol name.",
+        description: "Edit a text file. Each edit uses one mode: block (match first/last lines of a range), content (find and replace exact text), or symbol (replace by name).",
         inputSchema: {
             path: z.string().describe("File to edit."),
-            edits: z.array(z.object({
-                block_start: z.string().optional().describe("First line of the block to replace. Use with block_end + replacement_block."),
-                block_end: z.string().optional().describe("Last line of the block to replace."),
-                replacement_block: z.string().optional().describe("Replacement for the matched block."),
-                oldContent: z.string().optional().describe("Exact text to find. Use with newContent."),
-                newContent: z.string().optional().describe("Replacement text."),
-                symbol: z.string().optional().describe("Symbol name. Dot-qualified for methods. Use with newText."),
-                newText: z.string().optional().describe("Replacement for the symbol."),
-                nearLine: z.number().optional().describe("Approximate line. Symbol disambiguation only."),
-            })),
+            edits: z.array(z.discriminatedUnion("mode", [
+                z.object({
+                    mode: z.literal("block").describe("Replace a block identified by its first and last lines."),
+                    block_start: z.string().describe("Trimmed content of the first line of the block."),
+                    block_end: z.string().describe("Trimmed content of the last line of the block."),
+                    replacement_block: z.string().describe("Text that replaces the entire block."),
+                }),
+                z.object({
+                    mode: z.literal("content").describe("Find exact text and replace it."),
+                    oldContent: z.string().describe("Exact text to find."),
+                    newContent: z.string().describe("Text that replaces oldContent."),
+                }),
+                z.object({
+                    mode: z.literal("symbol").describe("Replace a symbol by name."),
+                    symbol: z.string().describe("Symbol name. Dot-qualified for methods."),
+                    newText: z.string().describe("Text that replaces the symbol."),
+                    nearLine: z.number().optional().describe("Approximate line number if multiple matches."),
+                }),
+            ])),
             dryRun: z.boolean().default(false).describe("Preview without writing."),
         },
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
@@ -446,9 +455,7 @@ export function register(server, ctx) {
             const tag = isBatch ? `#${i + 1}: ` : '';
 
             // ---- BLOCK REPLACE MODE ----
-            if (edit.block_start || edit.block_end) {
-                if (!edit.block_start || !edit.block_end) { errors.push({ i, msg: `${tag}Both block_start and block_end required.` }); continue; }
-                if (edit.replacement_block === undefined) { errors.push({ i, msg: `${tag}replacement_block required.` }); continue; }
+            if (edit.mode === 'block') {
 
                 const lines = workingContent.split('\n');
                 const expectedStart = edit.block_start.trim();
@@ -487,7 +494,7 @@ export function register(server, ctx) {
             }
 
             // ---- SYMBOL-BASED EDIT MODE ----
-            if (edit.symbol) {
+            if (edit.mode === 'symbol') {
                 if (edit.oldContent) { errors.push({ i, msg: `${tag}symbol mode is exclusive.` }); continue; }
                 if (edit.newText === undefined) { errors.push({ i, msg: `${tag}newText required.` }); continue; }
 
@@ -509,27 +516,28 @@ export function register(server, ctx) {
             }
 
             // ---- CONTENT MATCH MODE ----
-            if (!edit.oldContent) { errors.push({ i, msg: `${tag}Provide block_start/block_end, oldContent, or symbol.` }); continue; }
+            if (edit.mode === 'content') {
+                const match = findMatch(workingContent, edit.oldContent, edit.nearLine);
+                if (!match) { errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent, i, isBatch) }); continue; }
+                if (edit.newContent === undefined) { errors.push({ i, msg: `${tag}newContent required.` }); continue; }
 
-            const match = findMatch(workingContent, edit.oldContent, edit.nearLine);
-            if (!match) { errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent, i, isBatch) }); continue; }
-            if (edit.newContent === undefined) { errors.push({ i, msg: `${tag}newContent required.` }); continue; }
-
-            const normalizedNew = normalizeLineEndings(edit.newContent);
-            if (match.strategy === 'indent-stripped') {
-                const matchedLines = match.matchedText.split('\n');
-                const newLines = normalizedNew.split('\n');
-                const originalIndent = matchedLines[0].match(/^\s*/)?.[0] || '';
-                const oldIndent = normalizeLineEndings(edit.oldContent).split('\n')[0].match(/^\s*/)?.[0] || '';
-                const reindentedNew = newLines.map((line, j) => {
-                    if (j === 0) return originalIndent + line.trimStart();
-                    const lineIndent = line.match(/^\s*/)?.[0] || '';
-                    const relIndent = lineIndent.length - (oldIndent?.length || 0);
-                    return originalIndent + ' '.repeat(Math.max(0, relIndent)) + line.trimStart();
-                }).join('\n');
-                workingContent = workingContent.slice(0, match.index) + reindentedNew + workingContent.slice(match.index + match.matchedText.length);
-            } else {
-                workingContent = workingContent.slice(0, match.index) + normalizedNew + workingContent.slice(match.index + match.matchedText.length);
+                const normalizedNew = normalizeLineEndings(edit.newContent);
+                if (match.strategy === 'indent-stripped') {
+                    const matchedLines = match.matchedText.split('\n');
+                    const newLines = normalizedNew.split('\n');
+                    const originalIndent = matchedLines[0].match(/^\s*/)?.[0] || '';
+                    const oldIndent = normalizeLineEndings(edit.oldContent).split('\n')[0].match(/^\s*/)?.[0] || '';
+                    const reindentedNew = newLines.map((line, j) => {
+                        if (j === 0) return originalIndent + line.trimStart();
+                        const lineIndent = line.match(/^\s*/)?.[0] || '';
+                        const relIndent = lineIndent.length - (oldIndent?.length || 0);
+                        return originalIndent + ' '.repeat(Math.max(0, relIndent)) + line.trimStart();
+                    }).join('\n');
+                    workingContent = workingContent.slice(0, match.index) + reindentedNew + workingContent.slice(match.index + match.matchedText.length);
+                } else {
+                    workingContent = workingContent.slice(0, match.index) + normalizedNew + workingContent.slice(match.index + match.matchedText.length);
+                }
+                continue;
             }
         }
 
@@ -555,7 +563,7 @@ export function register(server, ctx) {
 
         if (args.dryRun) {
             const patch = createMinimalDiff(originalContent, workingContent, validPath);
-            return { content: [{ type: "text", text: JSON.stringify({ dryRun: true, diff: patch }) }] };
+            return { content: [{ type: "text", text: patch }] };
         }
 
         // Post-edit AST error detection

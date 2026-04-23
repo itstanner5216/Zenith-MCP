@@ -16,23 +16,39 @@ export function register(server, ctx) {
     server.registerTool("stashRestore", {
         title: "Stash Restore",
         description: "Retry failed edits/writes, restore previous versions, or browse cached entries.",
-        inputSchema: {
-            mode: z.enum(['apply', 'restore', 'list', 'read', 'init']),
-            stashId: z.number().optional().describe("Stash ID. Required for apply, read, and stash rollback."),
-            corrections: z.array(z.object({
-                index: z.number().describe("1-based edit index to disambiguate."),
-                startLine: z.number().optional().describe("Line number for ambiguous block edits."),
-                nearLine: z.number().optional().describe("Approximate line for ambiguous symbol edits."),
-            })).optional().describe("apply mode. Disambiguation for ambiguous edits."),
-            newPath: z.string().optional().describe("apply mode. Corrected path for a failed write."),
-            dryRun: z.boolean().optional().default(false).describe("apply mode. Preview without writing."),
-            symbol: z.string().optional().describe("restore mode. Symbol name to restore."),
-            version: z.number().optional().describe("restore mode. Version number."),
-            file: z.string().optional().describe("restore mode. File containing the symbol."),
-            type: z.enum(['edit', 'write', 'symbol']).optional().describe("list mode. Filter by type."),
-            projectRoot: z.string().optional().describe("init mode. Directory to register as project root."),
-            projectName: z.string().optional().describe("init mode. Project name."),
-        },
+        inputSchema: z.discriminatedUnion("mode", [
+            z.object({
+                mode: z.literal("apply").describe("Retry a stashed failed edit or write."),
+                stashId: z.number().describe("Stash entry ID."),
+                corrections: z.array(z.object({
+                    index: z.number().describe("1-based edit index to disambiguate."),
+                    startLine: z.number().optional().describe("Exact line for ambiguous block edits."),
+                    nearLine: z.number().optional().describe("Approximate line for ambiguous symbol edits."),
+                })).optional().describe("Disambiguation for failed edits."),
+                newPath: z.string().optional().describe("Redirect a failed write to a different path."),
+                dryRun: z.boolean().optional().default(false).describe("Preview without writing."),
+            }),
+            z.object({
+                mode: z.literal("restore").describe("Restore a symbol to a previous version, or clear a stash entry."),
+                stashId: z.number().optional().describe("Stash ID to clear."),
+                symbol: z.string().optional().describe("Symbol name to restore."),
+                version: z.number().optional().describe("Version number from history."),
+                file: z.string().optional().describe("File containing the symbol."),
+            }),
+            z.object({
+                mode: z.literal("list").describe("Show all stash entries."),
+                type: z.enum(['edit', 'write', 'symbol']).optional().describe("Filter by entry type."),
+            }),
+            z.object({
+                mode: z.literal("read").describe("View contents of a stash entry."),
+                stashId: z.number().describe("Stash entry ID."),
+            }),
+            z.object({
+                mode: z.literal("init").describe("Register a non-git directory as a project root."),
+                projectRoot: z.string().describe("Directory to register."),
+                projectName: z.string().optional().describe("Optional project name."),
+            }),
+        ]),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args) => {
 
@@ -44,7 +60,7 @@ export function register(server, ctx) {
         if (args.mode === 'init') {
             if (!args.projectRoot) throw new Error('projectRoot required.');
             const abs = pc.initProject(args.projectRoot, args.projectName);
-            return { content: [{ type: 'text', text: `Project registered: ${abs}${args.projectName ? ` (${args.projectName})` : ''}` }] };
+            return { content: [{ type: 'text', text: `Registered.` }] };
         }
 
         // =================================================================
@@ -266,7 +282,7 @@ export function register(server, ctx) {
 
                 if (args.dryRun) {
                     const patch = createMinimalDiff(originalContent, workingContent, validPath);
-                    return { content: [{ type: 'text', text: JSON.stringify({ dryRun: true, diff: patch }) }] };
+                    return { content: [{ type: 'text', text: patch }] };
                 }
 
                 const tempPath = `${validPath}.${randomBytes(16).toString('hex')}.tmp`;
@@ -307,7 +323,7 @@ export function register(server, ctx) {
                 }
 
                 if (args.dryRun) {
-                    return { content: [{ type: 'text', text: JSON.stringify({ dryRun: true, path: validPath, bytes: Buffer.byteLength(content, 'utf-8') }) }] };
+                    return { content: [{ type: 'text', text: `${Buffer.byteLength(content, 'utf-8')} bytes` }] };
                 }
 
                 const tempPath = `${validPath}.${randomBytes(16).toString('hex')}.tmp`;
