@@ -4,7 +4,6 @@ import path from "path";
 import { randomBytes } from 'crypto';
 import { normalizeLineEndings } from '../core/lib.js';
 import { stashWrite } from '../core/stash.js';
-import { findRepoRoot } from '../core/symbol-index.js';
 
 function findResumeOffset(existingTailLines, incomingLines) {
     if (!existingTailLines.length || !incomingLines.length) return 0;
@@ -44,7 +43,6 @@ export function register(server, ctx) {
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args) => {
         const validPath = await ctx.validatePath(args.path);
-        const repoRoot = findRepoRoot(validPath) || path.dirname(validPath);
 
         const normalizedContent = normalizeLineEndings(args.content);
 
@@ -55,8 +53,7 @@ export function register(server, ctx) {
         } catch { /* file doesn't exist */ }
 
         if (args.createOnly && existed) {
-            const stashId = stashWrite(repoRoot, validPath, normalizedContent, args.append ? 'append' : 'write');
-            throw new Error(`File already exists. stash:${stashId}`);
+            throw new Error(`File already exists (createOnly). Use a different path or remove createOnly.`);
         }
 
         const parentDir = path.dirname(validPath);
@@ -107,7 +104,7 @@ export function register(server, ctx) {
             await fs.rename(tempPath, validPath);
         } catch (error) {
             try { await fs.unlink(tempPath); } catch { /* ignore cleanup failure */ }
-            const stashId = stashWrite(repoRoot, validPath, normalizedContent, args.append ? 'append' : 'write');
+            const stashId = stashWrite(ctx, validPath, normalizedContent, args.append ? 'append' : 'write');
             throw new Error(`Write failed: ${error.message}. stash:${stashId}`);
         }
         let message;

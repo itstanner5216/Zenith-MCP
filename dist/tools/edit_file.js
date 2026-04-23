@@ -391,7 +391,7 @@ function generateDiagnostic(content, oldText, editIndex, isBatch) {
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].trim().includes(firstOldLine) || // nosemgrep
             (lines[i].trim().length > 5 && firstOldLine.includes(lines[i].trim()))) { // nosemgrep
-            return `${tag}oldText not found. Near line ${i + 1}.`;
+            return `${tag}oldContent not found. Near line ${i + 1}.`;
         }
     }
 
@@ -400,12 +400,12 @@ function generateDiagnostic(content, oldText, editIndex, isBatch) {
         if (!trimmed) continue;
         for (let i = 0; i < lines.length; i++) {
             if (lines[i].includes(trimmed)) { // nosemgrep
-                return `${tag}oldText not found. Near line ${i + 1}.`;
+                return `${tag}oldContent not found. Near line ${i + 1}.`;
             }
         }
     }
 
-    return `${tag}oldText not found.`;
+    return `${tag}oldContent not found.`;
 }
 
 // Export batch helpers for stashApply tool
@@ -414,20 +414,20 @@ export { _batchSession, getOrCreateSession, parseEditPayload, loadDiff, resolveR
 export function register(server, ctx) {
     server.registerTool("edit_file", {
         title: "Edit File",
-        description: "Edit a text file. Three modes: content match (oldText), line range (startLine/endLine + verify), or symbol. All-or-nothing: if any edit in a multi-edit batch fails, none are applied and all are stashed for retry via stashApply.",
+        description: "Edit a text file by block, content match, or symbol name.",
         inputSchema: {
-            path: z.string(),
+            path: z.string().describe("File to edit."),
             edits: z.array(z.object({
-                newText: z.string().optional().describe("Replacement text."),
-                oldText: z.string().optional().describe("Text to find and replace."),
-                startLine: z.number().optional().describe("First line of range to replace."),
-                endLine: z.number().optional().describe("Last line of range (inclusive)."),
-                verifyStart: z.string().optional().describe("Trimmed content of startLine. Required for range mode."),
-                verifyEnd: z.string().optional().describe("Trimmed content of endLine. Required for range mode."),
-                symbol: z.string().optional().describe("Symbol name to replace. Dot-qualified for methods."),
-                nearLine: z.number().optional().describe("Disambiguate multiple matches."),
+                block_start: z.string().optional().describe("First line of the block to replace. Use with block_end + replacement_block."),
+                block_end: z.string().optional().describe("Last line of the block to replace."),
+                replacement_block: z.string().optional().describe("Replacement for the matched block."),
+                oldContent: z.string().optional().describe("Exact text to find. Use with newContent."),
+                newContent: z.string().optional().describe("Replacement text."),
+                symbol: z.string().optional().describe("Symbol name. Dot-qualified for methods. Use with newText."),
+                newText: z.string().optional().describe("Replacement for the symbol."),
+                nearLine: z.number().optional().describe("Approximate line. Symbol disambiguation only."),
             })),
-            dryRun: z.boolean().default(false).describe("Preview diff without writing."),
+            dryRun: z.boolean().default(false).describe("Preview without writing."),
         },
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args) => {
@@ -445,36 +445,50 @@ export function register(server, ctx) {
             const edit = args.edits[i]; // nosemgrep
             const tag = isBatch ? `#${i + 1}: ` : '';
 
-            // ---- RANGE-BASED EDIT MODE ----
-            if (typeof edit.startLine === 'number' && typeof edit.endLine === 'number') {
+            // ---- BLOCK REPLACE MODE ----
+            if (edit.block_start || edit.block_end) {
+                if (!edit.block_start || !edit.block_end) { errors.push({ i, msg: `${tag}Both block_start and block_end required.` }); continue; }
+                if (edit.replacement_block === undefined) { errors.push({ i, msg: `${tag}replacement_block required.` }); continue; }
+
                 const lines = workingContent.split('\n');
-                const start = edit.startLine - 1;
-                const end = edit.endLine;
+                const expectedStart = edit.block_start.trim();
+                const expectedEnd = edit.block_end.trim();
 
-                if (edit.newText === undefined) { errors.push({ i, msg: `${tag}newText required.` }); continue; }
-                if (start < 0 || end > lines.length || start >= end) { errors.push({ i, msg: `${tag}Invalid range.` }); continue; }
-                if (!edit.verifyStart) { errors.push({ i, msg: `${tag}verifyStart required.` }); continue; }
+                // Find all matching start/end pairs
+                const candidates = [];
+                for (let s = 0; s < lines.length; s++) {
+                    if (lines[s].trim() !== expectedStart) continue;
+                    for (let e = s; e < lines.length; e++) {
+                        if (lines[e].trim() !== expectedEnd) continue;
+                        candidates.push({ start: s, end: e });
+                        break; // first end match per start
+                    }
+                }
 
-                const actualStart = lines[start].trim();
-                const expectedStart = edit.verifyStart.trim();
-                if (actualStart === '' && expectedStart === '') { errors.push({ i, msg: `${tag}startLine ${edit.startLine} is empty.` }); continue; }
-                if (actualStart !== expectedStart) { errors.push({ i, msg: `${tag}verifyStart mismatch line ${edit.startLine}.` }); continue; }
-                if (!edit.verifyEnd) { errors.push({ i, msg: `${tag}verifyEnd required.` }); continue; }
+                if (candidates.length === 0) {
+                    errors.push({ i, msg: `${tag}block_start not found in file.` }); continue;
+                }
 
-                const actualEnd = lines[end - 1].trim(); // nosemgrep
-                const expectedEnd = edit.verifyEnd.trim();
-                if (actualEnd === '') { errors.push({ i, msg: `${tag}endLine ${edit.endLine} is empty.` }); continue; }
-                if (actualEnd !== expectedEnd) { errors.push({ i, msg: `${tag}verifyEnd mismatch line ${edit.endLine}.` }); continue; }
+                let chosen;
+                if (candidates.length === 1) {
+                    chosen = candidates[0];
+                } else {
+                    // Ambiguous — stash and return candidates with line numbers
+                    const failedIndices = [i];
+                    const stashId = stashEdits(ctx, validPath, args.edits, failedIndices);
+                    const locs = candidates.map(c => `lines ${c.start + 1}-${c.end + 1}`).join(', ');
+                    throw new Error(`${tag}Multiple matches: ${locs}. stash:${stashId}\nUse stashRestore with startLine to disambiguate.`);
+                }
 
-                const normalizedNew = normalizeLineEndings(edit.newText);
-                lines.splice(start, end - start, ...normalizedNew.split('\n'));
+                const normalizedNew = normalizeLineEndings(edit.replacement_block);
+                lines.splice(chosen.start, chosen.end - chosen.start + 1, ...normalizedNew.split('\n'));
                 workingContent = lines.join('\n');
                 continue;
             }
 
             // ---- SYMBOL-BASED EDIT MODE ----
             if (edit.symbol) {
-                if (edit.oldText || edit.startLine !== undefined) { errors.push({ i, msg: `${tag}symbol mode is exclusive.` }); continue; }
+                if (edit.oldContent) { errors.push({ i, msg: `${tag}symbol mode is exclusive.` }); continue; }
                 if (edit.newText === undefined) { errors.push({ i, msg: `${tag}newText required.` }); continue; }
 
                 const langName = getLangForFile(validPath);
@@ -494,19 +508,19 @@ export function register(server, ctx) {
                 continue;
             }
 
-            // ---- CONTENT-BASED EDIT MODE ----
-            if (!edit.oldText) { errors.push({ i, msg: `${tag}Provide oldText, startLine/endLine, or symbol.` }); continue; }
+            // ---- CONTENT MATCH MODE ----
+            if (!edit.oldContent) { errors.push({ i, msg: `${tag}Provide block_start/block_end, oldContent, or symbol.` }); continue; }
 
-            const match = findMatch(workingContent, edit.oldText, edit.nearLine);
-            if (!match) { errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldText, i, isBatch) }); continue; }
-            if (edit.newText === undefined) { errors.push({ i, msg: `${tag}newText required.` }); continue; }
+            const match = findMatch(workingContent, edit.oldContent, edit.nearLine);
+            if (!match) { errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent, i, isBatch) }); continue; }
+            if (edit.newContent === undefined) { errors.push({ i, msg: `${tag}newContent required.` }); continue; }
 
-            const normalizedNew = normalizeLineEndings(edit.newText);
+            const normalizedNew = normalizeLineEndings(edit.newContent);
             if (match.strategy === 'indent-stripped') {
                 const matchedLines = match.matchedText.split('\n');
                 const newLines = normalizedNew.split('\n');
                 const originalIndent = matchedLines[0].match(/^\s*/)?.[0] || '';
-                const oldIndent = normalizeLineEndings(edit.oldText).split('\n')[0].match(/^\s*/)?.[0] || '';
+                const oldIndent = normalizeLineEndings(edit.oldContent).split('\n')[0].match(/^\s*/)?.[0] || '';
                 const reindentedNew = newLines.map((line, j) => {
                     if (j === 0) return originalIndent + line.trimStart();
                     const lineIndent = line.match(/^\s*/)?.[0] || '';
@@ -522,7 +536,7 @@ export function register(server, ctx) {
         // All-or-nothing: if any failed, stash everything and commit nothing
         if (errors.length > 0) {
             const failedIndices = errors.map(e => e.i);
-            const stashId = stashEdits(repoRoot, validPath, args.edits, failedIndices);
+            const stashId = stashEdits(ctx, validPath, args.edits, failedIndices);
             const failMsg = errors.map(e => `#${e.i + 1}: ${e.msg}`).join('\n');
             throw new Error(`${errors.length} failed, 0 applied. stash:${stashId}\n${failMsg}`);
         }

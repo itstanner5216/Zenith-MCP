@@ -19,6 +19,7 @@ import { register as registerSearchFiles } from '../tools/search_files.js';
 import { register as registerFindFiles } from '../tools/find_files.js';
 import { register as registerGetFileInfo } from '../tools/get_file_info.js';
 import { register as registerStashRestore } from '../tools/stash_restore.js';
+import { onRootsChanged } from './project-context.js';
 
 export async function resolveInitialAllowedDirectories(args) {
   return Promise.all(args.map(async (dir) => {
@@ -79,6 +80,7 @@ export function attachRootsHandlers(server, ctx) {
     const validatedRootDirs = await getValidRootDirectories(requestedRoots);
     if (validatedRootDirs.length > 0) {
       ctx.setAllowedDirectories(validatedRootDirs);
+      onRootsChanged(ctx);
       console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
     } else {
       console.error("No valid root directories provided by client");
