@@ -1,6 +1,91 @@
 # Zenith-MCP
 
-Node.js server implementing the Model Context Protocol (MCP) for advanced filesystem operations, code-aware editing, and intelligent search.
+> **The MCP filesystem server built for serious AI-assisted development.** Not just read/write — Zenith gives your AI agent genuine code intelligence: AST-aware editing, impact-graph refactoring, semantic search, and a version-controlled symbol database, all inside a hardened security sandbox.
+
+[![npm](https://img.shields.io/npm/v/zenith-mcp?label=zenith-mcp&color=6366f1)](https://www.npmjs.com/package/zenith-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
+
+---
+
+## Why Zenith over other MCP filesystem servers?
+
+Most MCP filesystem servers are thin wrappers around `fs.readFile` and `fs.writeFile`. Zenith is different at every layer:
+
+| Capability | Typical MCP server | Zenith-MCP |
+|---|---|---|
+| **Edit precision** | Full-file overwrite or text replacement | 3-mode surgical editing: content-match, block-boundary, or **AST symbol** — no line numbers needed |
+| **Code understanding** | None | Tree-sitter AST parsing for **20+ languages**, lazy-loaded WASM, LRU-cached |
+| **Search intelligence** | Grep or basic glob | BM25 pre-filter + ripgrep + BM25 post-rank, structural similarity, definition lookup |
+| **Cross-file refactoring** | Not available | Impact-graph traversal (callers/callees), outlier detection, atomic multi-file apply with rollback |
+| **Edit safety** | Write and hope | All-or-nothing in-memory validation → atomic temp-file swap → SQLite stash on failure |
+| **Symbol versioning** | Not available | Every symbol edit auto-snapshots the original; point-in-time rollback via `stashRestore` |
+| **Security model** | CWD or basic prefix check | `validatePath` with symlink resolution + re-check, exclusive-write `wx` flag, sensitive-file blocking, per-session isolation |
+| **Transport** | stdio only | stdio **and** HTTP (Streamable HTTP + legacy SSE, bearer auth, per-session context, idle reaping) |
+
+---
+
+## What the code actually does
+
+### 🔬 True code-awareness via Tree-sitter
+
+Zenith ships WASM grammars for JavaScript, TypeScript, TSX, Python, Go, Rust, Java, C, C++, C#, Kotlin, PHP, Ruby, Swift, Bash, CSS, JSON, YAML, SQL, Markdown, and more. Grammars are lazy-loaded on first use and permanently cached — zero startup penalty.
+
+This unlocks capabilities that are simply impossible with text search:
+
+- **`edit_file` symbol mode** — "Replace the `AuthService.login` method" without knowing its line number. Zenith finds the AST bounds and replaces exactly the right block, then re-indents the new code to match the file.
+- **`read_text_file` symbol mode** — Read just the body of `BM25Index.score` across a 10 000-line file.
+- **`search_files` structural mode** — Find all functions with the same AST shape (Jaccard similarity over 3-gram node fingerprints) to detect copy-paste patterns or candidates for a common abstraction.
+- **`search_files` definition mode** — Locate every file that *defines* `AuthService.login` using the parse tree, not a fragile regex.
+- **Syntax gate** — After any edit, `checkSyntaxErrors()` walks the new AST and warns if `ERROR` or missing nodes were introduced.
+
+### 🧠 Intelligent two-stage search
+
+Searching a 50 000-file monorepo without drowning the LLM context is a hard problem. Zenith solves it with a pipeline:
+
+1. **BM25 pre-filter** — builds an in-memory BM25 corpus (file paths weighted 3×, first 8 KB of content) and selects the top-100 candidate files.
+2. **ripgrep** — blazing-fast regex search scoped to those 100 files (with `.gitignore` awareness). Falls back to a pure-JS implementation when `rg` isn't available.
+3. **BM25 post-rank** — if results exceed 50 lines, BM25 re-ranks individual result lines and fills the character budget with the most relevant hits.
+
+The BM25 implementation is zero-dependency, inline (~120 lines), and uses entropy weighting (high-entropy terms are downweighted) plus sigmoid TF saturation for better precision than vanilla BM25.
+
+### ⚡ All-or-nothing atomic edits with stash recovery
+
+Edit safety is not an afterthought. Every `edit_file` call:
+
+1. Validates **all** edits against an in-memory copy of the file — exact match, then trimmed-whitespace match, then indent-stripped match within a ±50-line window.
+2. If **any** edit fails, **zero** edits are applied and the file is untouched.
+3. Failed edits are stashed to SQLite with their full payload. The AI retries via `stashRestore apply` with only the correction needed — unchanged edits rehydrate from the stash automatically.
+4. Successful edits write to a temp file, verify the byte size, then `fs.rename()` for an atomic swap.
+
+Block edits (`block_start` / `block_end`) and symbol edits (AST-located) follow the same pipeline.
+
+### 🔗 Cross-file impact refactoring
+
+`refactor_batch` implements a full refactoring workflow:
+
+1. **`query`** — traverses the per-project SQLite symbol graph (`edges` table) to find all callers (`forward`) or callees (`reverse`) of a symbol, up to 5 levels deep.
+2. **`load`** — fetches each symbol's body plus N lines of context. Runs **outlier detection**: computes `getSymbolStructure()` for each occurrence (param shape, return type, decorators, modifiers, parent scope) and flags deviations from the modal pattern.
+3. **`apply`** — parses a diff-style payload, gates on acknowledged outliers and syntax validity, then applies edits atomically per file. Successful patterns are cached for `reapply`.
+4. **`reapply`** — applies a cached edit pattern to new targets without repeating the full workflow.
+
+### 🗄️ Per-project symbol database
+
+Each git repository gets a `.mcp/symbols.db` (auto-gitignored) with:
+- `symbols` — definitions and references from the full Tree-sitter parse
+- `edges` — caller → callee links for impact traversal
+- `versions` — point-in-time snapshots of every symbol body touched by `edit_file` or `refactor_batch`, with a configurable TTL
+
+Rollback is a single tool call: `stashRestore restore symbol:"AuthService.login"`.
+
+### 🔒 Security-first design
+
+- **`validatePath()`** — expands `~`, normalizes, prefix-checks against allowed directories, calls `fs.realpath()` to resolve symlinks, then re-checks the resolved path. Throws before any `fs` call if the check fails.
+- **Exclusive writes** — new file creation uses the `wx` flag. Pre-existing symlinks at the target path cannot be exploited.
+- **Sensitive file blocking** — `isSensitive()` uses `minimatch` globs to block `.env`, `*.pem`, `*.key`, `*credentials*`, `*secret*`, and more from appearing in search results and symbol indexing.
+- **Per-session isolation (HTTP)** — each HTTP client gets its own `FilesystemContext`. MCP root negotiations for one session never affect another.
+
+---
 
 ## Features
 
@@ -14,7 +99,9 @@ Node.js server implementing the Model Context Protocol (MCP) for advanced filesy
 - **Dynamic directory access control** via [MCP Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots)
 - **Dual transport** — stdio (local) and HTTP (remote with Streamable HTTP + legacy SSE)
 
-## Server Modes
+---
+
+## Quick Start
 
 ### stdio (Local)
 Standard MCP stdio transport for local clients like Claude Desktop or VS Code.
