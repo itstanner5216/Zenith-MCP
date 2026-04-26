@@ -15,6 +15,8 @@ import { register as registerSearchFiles } from '../tools/search_files.js';
 import { register as registerFilesystem } from '../tools/filesystem.js';
 import { register as registerStashRestore } from '../tools/stash_restore.js';
 import { register as registerRefactorBatch } from '../tools/refactor_batch.js';
+import { configureRegistry } from '../adapters/index.js';
+import { loadSettings } from '../config/index.js';
 import { onRootsChanged } from './project-context.js';
 
 export async function resolveInitialAllowedDirectories(args) {
@@ -63,6 +65,10 @@ function registerAllTools(server, ctx) {
 
 export function createFilesystemServer(ctx) {
   const server = new McpServer({ name: "zenith-mcp", version: "0.3.0" });
+  const settings = loadSettings();
+  if (settings.enabledAdapters.length > 0) {
+    configureRegistry(settings.backupDir ?? undefined);
+  }
   registerAllTools(server, ctx);
   return server;
 }

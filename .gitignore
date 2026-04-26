@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+*.log
+.DS_Store
+
+# tsc-compiled output (source lives in src/)
+# Do NOT add dist/ — dist/core/ and dist/tools/ are hand-authored source
+dist/adapters/
+dist/config/
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts

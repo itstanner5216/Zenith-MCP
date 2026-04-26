@@ -14,26 +14,30 @@
   "type": "module",
   "bin": {
     "zenith-mcp": "dist/cli/stdio.js",
-    "zenith-mcp-http": "dist/server/http.js"
+    "zenith-mcp-http": "dist/server/http.js",
+    "zenith-mcp-config": "dist/config/adapter-cli.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "shx chmod +x dist/cli/*.js dist/server/*.js",
+    "prebuild": "node -e \"if(!require('fs').existsSync('dist/core/server.js')){console.error('ABORT: dist/ contains hand-authored source. Refusing to build into corrupted dist.');process.exit(1)}\"",
+    "build": "npm run prebuild && tsc && shx chmod +x dist/cli/*.js dist/server/*.js dist/config/adapter-cli.js",
     "prepare": "npm run build",
-    "watch": "node -e \"console.log('Zenith-MCP uses a dist-only layout right now; no TypeScript watch step is configured.')\"",
+    "watch": "tsc --watch",
     "test": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
     "start:http": "node dist/server/http.js"
   },
   "dependencies": {
+    "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "better-sqlite3": "^11.0.0",
     "diff": "^5.1.0",
     "express": "^5.2.1",
     "glob": "^10.5.0",
     "js-yaml": "^4.1.0",
+    "json5": "^2.2.3",
     "minimatch": "^10.0.1",
     "web-tree-sitter": "^0.26.8",
     "zod-to-json-schema": "^3.23.5"

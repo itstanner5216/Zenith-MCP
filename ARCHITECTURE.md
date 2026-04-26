@@ -653,8 +653,28 @@ When modifying tools, guard aggressively against context bloat. If unsure whethe
 ## 11. Testing Considerations
 
 - The project uses **Vitest** with `@vitest/coverage-v8`
-- `dist/` is the source of truth (dist-only layout, no TypeScript compilation step)
+- `dist/core/` and `dist/tools/` are hand-authored source (dist-only layout). `dist/adapters/` and `dist/config/` are compiled from `src/` via `tsc`.
 - Tests in `tests/` reference `dist/` modules
 - Tree-sitter WASM files must be present for symbol-aware tests
 - The `toon` compression bridge requires Python with the `toon` module installed (optional for most tests)
 - SQLite databases are created in `.mcp/` directories and `~/.zenith-mcp/` — clean these between test runs if needed
+
+## 12. Hybrid Source Layout
+
+Zenith-MCP uses a hybrid source layout:
+
+| Directory | Language | Role | Version Controlled |
+|-----------|----------|------|--------------------|
+| `dist/core/` | JavaScript | Hand-authored MCP server core | Yes |
+| `dist/tools/` | JavaScript | Hand-authored MCP tool implementations | Yes |
+| `dist/cli/` | JavaScript | Hand-authored CLI entry points | Yes |
+| `dist/server/` | JavaScript | Hand-authored HTTP entry point | Yes |
+| `dist/grammars/` | WASM + SCM | Tree-sitter grammars and queries | Yes |
+| `src/adapters/` | TypeScript | MCP config adapter integrations | Yes |
+| `src/config/` | TypeScript | Adapter settings + CLI | Yes |
+| `dist/adapters/` | JavaScript | tsc output from `src/adapters/` | No |
+| `dist/config/` | JavaScript | tsc output from `src/config/` | No |
+
+**Important:** Do NOT add `dist/` to `.gitignore`. Only `dist/adapters/` and `dist/config/` are tsc output. All other `dist/` subdirectories contain hand-authored source code.
+
+The build script includes a prebuild safety check that aborts if `dist/core/server.js` is missing, preventing accidental destruction of source via `rm -rf dist`.

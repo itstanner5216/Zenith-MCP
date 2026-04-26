@@ -439,7 +439,7 @@ npm install
 npm run build
 ```
 
-The `dist/` directory contains the compiled output. No TypeScript compilation step is required; the project uses a dist-only JavaScript layout.
+The repository uses a hybrid layout: `dist/core/`, `dist/tools/`, `dist/cli/`, and `dist/server/` remain committed JavaScript source, while `src/` contains the TypeScript adapters and config code compiled by `npm run build` into `dist/adapters/` and `dist/config/`.
 
 ## License
 
