@@ -6,7 +6,7 @@ import {
     runToonBridge,
     isCompressionUseful,
 } from '../dist/core/compression.js';
-import { register as registerReadTextFile } from '../dist/tools/read_text_file.js';
+import { register as registerReadTextFile } from '../dist/tools/read_file.js';
 import { register as registerReadMultipleFiles } from '../dist/tools/read_multiple_files.js';
 
 const ROOT = process.cwd();
@@ -15,7 +15,7 @@ const OUT_DIR = path.join(ROOT, 'tests', 'artifacts', 'compression');
 const FILES = [
     'dist/core/shared.js',
     'dist/tools/search_files.js',
-    'dist/tools/read_text_file.js',
+    'dist/tools/read_file.js',
     'dist/core/tree-sitter.js',
     'dist/core/toon_bridge.js',
     'dist/tools/write_file.js',
@@ -68,7 +68,7 @@ async function main() {
     registerReadTextFile(server, ctx);
     registerReadMultipleFiles(server, ctx);
 
-    const readText = server.tools.get('read_text_file');
+    const readText = server.tools.get('read_file');
     const readMultiple = server.tools.get('read_multiple_files');
 
     const summary = [];

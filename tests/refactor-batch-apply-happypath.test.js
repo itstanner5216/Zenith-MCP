@@ -70,7 +70,7 @@ describe('refactor_batch full happy path', () => {
 
         // 2. Load targetFn explicitly
         const lRes = await handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'targetFn', file: 'hp_a.js' },
                 { symbol: 'targetFn', file: 'hp_b.js' },

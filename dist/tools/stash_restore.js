@@ -9,29 +9,25 @@ import { getProjectContext } from '../core/project-context.js';
 import { findMatch, applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import {
     findRepoRoot, getDb, indexFile,
-    getVersionHistory, getVersionText,
     snapshotSymbol, getSessionId,
 } from '../core/symbol-index.js';
 
 export function register(server, ctx) {
     server.registerTool("stashRestore", {
         title: "Stash Restore",
-        description: "Retry failed edits/writes, restore previous versions, or browse cached entries.",
+        description: "Retry failed edits/writes or browse cached stash entries. For symbol version restore/history, use refactor_batch instead.",
         inputSchema: z.object({
-            mode: z.enum(["apply", "restore", "list", "read", "history"]).describe("Operation mode."),
-            stashId: z.number().optional().describe("Stash entry ID."),
+            mode: z.enum(["apply", "restore", "list", "read"]).describe("apply: retry a stashed edit/write. restore: clear a stash entry. list: browse stash. read: inspect a stash entry."),
+            stashId: z.number().optional().describe("Stash entry ID for apply/read/restore."),
             corrections: z.array(z.object({
                 index: z.number().describe("1-based edit index."),
                 startLine: z.number().optional().describe("Exact line for block edits."),
                 nearLine: z.number().optional().describe("Approximate line for symbol edits."),
-            })).optional().describe("Disambiguation hints."),
-            newPath: z.string().optional().describe("Redirect write to different path."),
-            dryRun: z.boolean().optional().default(false).describe("Preview without writing."),
-            symbol: z.string().optional().describe("Symbol name."),
-            version: z.number().optional().describe("Version number."),
-            file: z.string().optional().describe("File path."),
-            type: z.enum(['edit', 'write']).optional().describe("Filter by entry type."),
-
+            })).optional().describe("apply: disambiguation hints for ambiguous edits."),
+            newPath: z.string().optional().describe("apply: redirect write to a different path."),
+            dryRun: z.boolean().optional().default(false).describe("apply: preview the result without writing."),
+            file: z.string().optional().describe("list/read/restore: filter by file path."),
+            type: z.enum(['edit', 'write']).optional().describe("list: filter entries by type."),
         }),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args) => {
@@ -85,81 +81,10 @@ export function register(server, ctx) {
         }
 
         // =================================================================
-        // HISTORY — list version snapshots for a symbol
-        // =================================================================
-        if (args.mode === 'history') {
-            const filePath = args.file || ctx.getAllowedDirectories()[0];
-            const absPath = await ctx.validatePath(filePath);
-            const repoRoot = findRepoRoot(absPath) || path.dirname(absPath);
-            const db = getDb(repoRoot);
-            const sessionId = ctx.sessionId || getSessionId();
-            const relPath = args.file ? path.relative(repoRoot, absPath) : null;
-            const rows = getVersionHistory(db, args.symbol, sessionId, relPath);
-            if (!rows.length) {
-                return { content: [{ type: 'text', text: 'Empty.' }] };
-            }
-            const lines = rows.map((r, i) => `v${i} ${r.file_path} ${new Date(r.created_at).toISOString()}`);
-            return { content: [{ type: 'text', text: lines.join('\n') }] };
-        }
-
-        // =================================================================
-        // RESTORE — rollback a stash entry or restore a symbol version
+        // RESTORE — clear a stash entry
         // =================================================================
         if (args.mode === 'restore') {
-            // Symbol version restore
-            if (args.symbol) {
-                const filePath = args.file;
-                if (!filePath) throw new Error('file required for symbol restore.');
-                const absPath = await ctx.validatePath(filePath);
-                const repoRoot = findRepoRoot(absPath) || path.dirname(absPath);
-                const db = getDb(repoRoot);
-
-                if (args.version !== undefined) {
-                    const relPath = path.relative(repoRoot, absPath);
-                    const history = getVersionHistory(db, args.symbol, ctx.sessionId || getSessionId(), relPath);
-                    const versionEntry = history?.[args.version];
-                    if (!versionEntry) throw new Error(`${args.symbol}: version ${args.version} not found.`);
-                    const text = getVersionText(db, versionEntry.id);
-                    if (!text) throw new Error(`${args.symbol}: version ${args.version} text not found.`);
-
-                    const content = normalizeLineEndings(await fs.readFile(absPath, 'utf-8'));
-                    const langName = getLangForFile(absPath);
-                    if (!langName) throw new Error(`${args.symbol}: unsupported language.`);
-
-                    const matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' });
-                    if (!matches?.length) throw new Error(`${args.symbol}: not found in file.`);
-                    const sym = matches[0];
-                    const lines = content.split('\n');
-                    lines.splice(sym.line - 1, sym.endLine - (sym.line - 1), ...text.split('\n'));
-                    const newContent = lines.join('\n');
-
-                    if (!args.dryRun) {
-                        try {
-                            const sessionId = ctx.sessionId || getSessionId();
-                            const relPath = path.relative(repoRoot, absPath);
-                            const curLines = content.split('\n');
-                            const curText = curLines.slice(sym.line - 1, sym.endLine).join('\n');
-                            snapshotSymbol(db, args.symbol, relPath, curText, sessionId, sym.line);
-                        } catch { /* best-effort */ }
-                        const tempPath = `${absPath}.${randomBytes(16).toString('hex')}.tmp`;
-                        await fs.writeFile(tempPath, newContent, 'utf-8');
-                        await fs.rename(tempPath, absPath);
-                        await indexFile(db, repoRoot, absPath);
-                    }
-                    return { content: [{ type: 'text', text: `${args.symbol}: restored to v${args.version}.` }] };
-                } else {
-                    const relPath = path.relative(repoRoot, absPath);
-                    const rows = getVersionHistory(db, args.symbol, ctx.sessionId || getSessionId(), relPath);
-                    if (!rows.length) {
-                        return { content: [{ type: 'text', text: 'Empty.' }] };
-                    }
-                    const lines = rows.map((r, i) => `v${i} ${new Date(r.created_at).toISOString()}`);
-                    return { content: [{ type: 'text', text: lines.join('\n') }] };
-                }
-            }
-
-            // Stash entry rollback
-            if (!args.stashId) throw new Error('stashId or symbol required for restore.');
+            if (!args.stashId) throw new Error('stashId required for restore.');
             const entry = getStashEntry(ctx, args.stashId, args.file);
             if (!entry) throw new Error(`Stash #${args.stashId} not found.`);
             clearStash(ctx, args.stashId, args.file);

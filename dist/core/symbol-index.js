@@ -384,7 +384,7 @@ export function snapshotSymbol(db, symbolName, filePath, originalText, sessionId
 
 export function getVersionHistory(db, symbolName, sessionId, filePath) {
     const params = [symbolName, sessionId];
-    let query = 'SELECT id, symbol_name, file_path, created_at FROM versions WHERE symbol_name = ? AND session_id = ?';
+    let query = 'SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ?';
     if (filePath) {
         query += ' AND file_path = ?';
         params.push(filePath);

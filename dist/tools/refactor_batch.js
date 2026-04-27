@@ -1,16 +1,18 @@
 import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { getProjectContext } from '../core/project-context.js';
 import {
-    getDb, indexDirectory, ensureIndexFresh,
+    getDb, indexDirectory, ensureIndexFresh, indexFile,
     impactQuery, getSessionId, findRepoRoot, snapshotSymbol,
+    getVersionHistory, getVersionText,
 } from '../core/symbol-index.js';
 import {
     getLangForFile, findSymbol, getSymbolStructure, checkSyntaxErrors,
 } from '../core/tree-sitter.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
+import { normalizeLineEndings } from '../core/lib.js';
 
 // ---------------------------------------------------------------------------
 // Module-level constants
@@ -113,26 +115,32 @@ function parsePayload(payload) {
 export function register(server, ctx) {
     server.registerTool("refactor_batch", {
         title: "Refactor Batch",
-        description: "Apply one edit pattern across multiple similar symbols, with rollback.",
+        description: "Apply one edit pattern across multiple similar symbols, with rollback. Core pipeline: loadDiff (symbol bodies + context) → apply (write edits). query is optional — you can skip it and call loadDiff directly with explicit {symbol, file} pairs if you already know the targets (e.g. from search_files). After a successful apply: reapply sends the same cached edit to new targets, restore rolls back any symbol to a prior snapshot. Every apply/reapply/restore snapshots pre-edit text automatically. No default mode — mode is always required.",
         inputSchema: z.object({
-            mode: z.enum(["query", "load", "apply", "reapply"]).describe("Mode."),
-            target: z.string().optional().describe("Symbol name."),
-            fileScope: z.string().optional().describe("File path."),
-            direction: z.enum(["forward", "reverse"]).default("forward").describe("forward=callers, reverse=callees."),
-            depth: z.number().int().min(1).max(5).default(1).describe("Transitive depth."),
+            mode: z.enum(["query", "loadDiff", "apply", "reapply", "restore", "history"]).describe(
+                "Required. query: impact analysis — who calls/is called by a symbol. loadDiff: load symbol bodies with surrounding context into a diff you edit and send back. apply: write the edited diff. reapply: apply a previously successful edit pattern to new targets. restore: rollback a symbol to a snapshotted version. history: list available version snapshots for a symbol."
+            ),
+            target: z.string().optional().describe("query: The symbol name to analyze for impact. Returns numbered list of callers (forward) or callees (reverse) grouped by file. Optional step — you can skip query entirely and go straight to loadDiff with explicit {symbol, file} pairs."),
+            fileScope: z.string().optional().describe("query: Repo-relative file path. Required when target has definitions in multiple files — the server will list them and ask you to pick."),
+            direction: z.enum(["forward", "reverse"]).default("forward").describe("query: forward = which symbols call target (blast radius). reverse = what does target call (dependencies)."),
+            depth: z.number().int().min(1).max(5).default(1).describe("query: How many hops to traverse the call graph. 1 = direct callers/callees only."),
             selection: z.array(z.union([
                 z.number().int().min(1),
                 z.object({ symbol: z.string(), file: z.string().optional() }),
-            ])).optional().describe("Indices or {symbol,file}."),
-            contextLines: z.number().int().min(0).max(MAX_CONTEXT_LINES).default(DEFAULT_CONTEXT).describe("Context lines."),
-            loadMore: z.boolean().default(false).describe("Continue truncated load."),
-            payload: z.string().optional().describe("Diff with symbol headers."),
-            dryRun: z.boolean().default(false).describe("Validate without writing."),
-            symbolGroup: z.string().optional().describe("Prior symbol name."),
+            ])).optional().describe("loadDiff: Which symbols to load. Either numeric indices from a prior query result, or explicit {symbol, file?} pairs. You can skip query and go straight to loadDiff with explicit pairs."),
+            contextLines: z.number().int().min(0).max(MAX_CONTEXT_LINES).default(DEFAULT_CONTEXT).describe("loadDiff: How many lines above and below each symbol body to include as read-only context. Context lines are marked with │ so you can distinguish them from the editable body."),
+            loadMore: z.boolean().default(false).describe("loadDiff: When a prior loadDiff was truncated at the char budget, call loadDiff again with loadMore=true to get the next page."),
+            payload: z.string().optional().describe("apply: The edited diff you're sending back. Format: one or more groups, each starting with a header line 'symbolName idx1,idx2 [ack:N]' followed by the new function body on subsequent lines. Example: 'validateCard 1,2,3 ack:3\\nfunction validateCard(card) { ... }'. Indices match the [N] tags from loadDiff output."),
+            dryRun: z.boolean().default(false).describe("apply/reapply/restore: Validate everything (syntax gate, outlier checks, char budget) without writing any files. Returns what would happen."),
+            symbolGroup: z.string().optional().describe("reapply: The symbol name from a prior successful apply. The server caches the edit body and reuses it on newTargets."),
             newTargets: z.array(z.union([
                 z.string(),
                 z.object({ symbol: z.string(), file: z.string().optional() }),
-            ])).optional().describe("Names or {symbol,file}."),
+            ])).optional().describe("reapply: Symbols to apply the cached edit pattern to. Same format as loadDiff selection — names or {symbol, file?} pairs."),
+            ack: z.array(z.number().int().min(1)).optional().describe("reapply: When the server flags structurally different targets as outliers, provide their indices here to acknowledge and proceed anyway."),
+            symbol: z.string().optional().describe("restore/history: The symbol name. restore rolls it back to a prior snapshot; history lists available snapshots."),
+            file: z.string().optional().describe("restore/history: File containing the symbol. Required for restore, optional filter for history."),
+            version: z.number().int().min(0).optional().describe("restore: Which version index to restore (from history output). Omit to list available versions instead of restoring."),
         }),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args) => {
@@ -142,6 +150,9 @@ export function register(server, ctx) {
         // QUERY
         // =================================================================
         if (args.mode === 'query') {
+            if (!args.target) {
+                return { content: [{ type: 'text', text: 'target required for query.' }] };
+            }
             const repoRoot = pc.getRoot(args.fileScope);
             if (!repoRoot) throw new Error("No project root.");
 
@@ -202,7 +213,10 @@ export function register(server, ctx) {
         // =================================================================
         // LOAD
         // =================================================================
-        if (args.mode === 'load') {
+        if (args.mode === 'loadDiff') {
+            if (!args.selection?.length && !args.loadMore) {
+                return { content: [{ type: 'text', text: 'selection required for loadDiff (or use loadMore=true to continue).' }] };
+            }
             const repoRoot = pc.getRoot();
             if (!repoRoot) throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -229,13 +243,31 @@ export function register(server, ctx) {
                         }
                         const r = cached.results[entry - 1];
                         if (!r) continue;
-                        // Reverse results only have `name` — no file. Skip those gracefully.
-                        if (!r.filePath) continue;
+                        if (!r.filePath) {
+                            // Reverse query result — resolve definition file from index.
+                            const defRows = db.prepare(
+                                "SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'"
+                            ).all(r.name);
+                            for (const row of defRows) {
+                                workList.push({ symbol: r.name, filePath: row.file_path });
+                            }
+                            continue;
+                        }
                         workList.push({ symbol: r.name, filePath: r.filePath });
                     } else {
                         let filePath = entry.file;
                         if (filePath && path.isAbsolute(filePath)) {
                             filePath = path.relative(repoRoot, filePath);
+                        }
+                        if (!filePath) {
+                            // No file specified — resolve from index, same as reapply.
+                            const defRows = db.prepare(
+                                "SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'"
+                            ).all(entry.symbol);
+                            for (const row of defRows) {
+                                workList.push({ symbol: entry.symbol, filePath: row.file_path });
+                            }
+                            continue;
                         }
                         workList.push({ symbol: entry.symbol, filePath });
                     }
@@ -283,12 +315,13 @@ export function register(server, ctx) {
             // Outlier flagging: modal structure per symbol-name group.
             // -----------------------------------------------------------------
             const flagByOccurrence = new Map();
+            const modalBySymbol = new Map();
             const bySymbol = new Map();
             for (const occ of occurrences) {
                 if (!bySymbol.has(occ.symbol)) bySymbol.set(occ.symbol, []);
                 bySymbol.get(occ.symbol).push(occ);
             }
-            for (const [, group] of bySymbol) {
+            for (const [symName, group] of bySymbol) {
                 if (group.length < 2) continue;
                 const structs = [];
                 for (const occ of group) {
@@ -301,6 +334,7 @@ export function register(server, ctx) {
                 }
                 const modal = findModal(structs);
                 if (!modal) continue;
+                modalBySymbol.set(symName, modal);
                 for (let i = 0; i < group.length; i++) {
                     const s = structs[i];
                     if (!s) continue;
@@ -321,10 +355,16 @@ export function register(server, ctx) {
 
             for (let i = 0; i < occurrences.length; i++) {
                 const occ = occurrences[i];
-                const startIdx = Math.max(0, occ.line - 1 - contextLines);
-                const endIdx = Math.min(occ.sourceLines.length, occ.endLine + contextLines);
-                const bodyLines = occ.sourceLines.slice(startIdx, endIdx);
-                const body = bodyLines.join('\n');
+                const ctxAboveStart = Math.max(0, occ.line - 1 - contextLines);
+                const bodyStart = occ.line - 1;
+                const bodyEnd = occ.endLine;
+                const ctxBelowEnd = Math.min(occ.sourceLines.length, occ.endLine + contextLines);
+
+                const ctxAbove = occ.sourceLines.slice(ctxAboveStart, bodyStart).map(l => `│ ${l}`);
+                const bodyLines = occ.sourceLines.slice(bodyStart, bodyEnd);
+                const ctxBelow = occ.sourceLines.slice(bodyEnd, ctxBelowEnd).map(l => `│ ${l}`);
+                const allLines = [...ctxAbove, ...bodyLines, ...ctxBelow];
+                const body = allLines.join('\n');
 
                 const flag = flagByOccurrence.get(occ);
                 const globalIndex = startIndex + i + 1;
@@ -367,6 +407,7 @@ export function register(server, ctx) {
                 remaining,
                 contextLines,
                 occurrences: priorOccurrences.concat(emittedOccurrences),
+                modalBySymbol,
             });
 
             if (!blocks.length) {
@@ -379,7 +420,7 @@ export function register(server, ctx) {
             let out = header + '\n' + blocks.join('\n');
 
             if (remaining.length > 0) {
-                out += `\n[truncated] ${remaining.length} remaining. Call load with loadMore=true.`;
+                out += `\n[truncated] ${remaining.length} remaining. Call loadDiff with loadMore=true.`;
             }
 
             return { content: [{ type: 'text', text: out }] };
@@ -389,6 +430,9 @@ export function register(server, ctx) {
         // APPLY
         // =================================================================
         if (args.mode === 'apply') {
+            if (!args.payload) {
+                return { content: [{ type: 'text', text: 'payload required for apply.' }] };
+            }
             const repoRoot = pc.getRoot();
             if (!repoRoot) throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -398,12 +442,12 @@ export function register(server, ctx) {
 
             const groups = parsePayload(args.payload);
             if (!groups.length) {
-                return { content: [{ type: 'text', text: 'No diff loaded. Call load first.' }] };
+                return { content: [{ type: 'text', text: 'No diff loaded. Call loadDiff first.' }] };
             }
 
             // Source of truth: `occurrences` cached by the previous `load` call.
             if (!cached || !Array.isArray(cached.occurrences) || cached.occurrences.length === 0) {
-                return { content: [{ type: 'text', text: 'No diff loaded. Call load first.' }] };
+                return { content: [{ type: 'text', text: 'No diff loaded. Call loadDiff first.' }] };
             }
 
             // Build symbolName -> [occurrence] map, preserving the indices load printed.
@@ -422,7 +466,7 @@ export function register(server, ctx) {
             // Gate: every payload group symbol must exist in the loaded set.
             for (const g of groups) {
                 if (!loadedSymbols.has(g.symbol)) {
-                    return { content: [{ type: 'text', text: `Unknown symbol: ${g.symbol}. Load it first.` }] };
+                    return { content: [{ type: 'text', text: `Unknown symbol: ${g.symbol}. Run loadDiff first.` }] };
                 }
             }
 
@@ -540,13 +584,48 @@ export function register(server, ctx) {
                             failedGroupMessages.set(sym, `Group ${sym} failed: ${errMsg}. Retry once or use edit_file directly.`);
                         }
                     }
+                    // Also mark co-located groups that weren't the direct cause of failure.
+                    for (const { group } of bundle.occMeta) {
+                        if (!failedGroupMessages.has(group.symbol) && !failedSymbolsInFile.has(group.symbol)) {
+                            failedGroupMessages.set(group.symbol, `Group ${group.symbol} skipped: co-located with failed group in same file.`);
+                        }
+                    }
                     // Skip write for this file. Successful groups in OTHER files are still written.
                     continue;
                 }
 
+                // Full-file syntax gate: reject before write if the spliced file has parse errors.
+                try {
+                    const fileLang = getLangForFile(absPath);
+                    if (fileLang) {
+                        const fullFileErrs = await checkSyntaxErrors(result.workingContent, fileLang);
+                        if (fullFileErrs?.length) {
+                            const locs = fullFileErrs.map(e => `${e.line}:${e.column}`).join(', ');
+                            for (const { group } of bundle.occMeta) {
+                                if (!failedGroupMessages.has(group.symbol)) {
+                                    const retryKey = `${repoRoot}::${sessionId}::${group.symbol}`;
+                                    const count = (_retryState.get(retryKey) || 0) + 1;
+                                    _retryState.set(retryKey, count);
+                                    if (count >= 2) {
+                                        failedGroupMessages.set(group.symbol, `Group ${group.symbol} locked. Use edit_file directly.`);
+                                    } else {
+                                        failedGroupMessages.set(group.symbol, `Group ${group.symbol} failed: parse errors at ${locs}. Retry once or use edit_file directly.`);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                } catch { /* best-effort — don't block on parse infra failure */ }
+
                 if (args.dryRun) {
                     successfulFileCount++;
                     for (const { group } of bundle.occMeta) successfulGroupNames.add(group.symbol);
+                    // Collect syntax warnings for dry-run report.
+                    try {
+                        const warn = await syntaxWarn(absPath, result.workingContent);
+                        if (warn) warningSuffix += warn;
+                    } catch { /* best-effort */ }
                     continue;
                 }
 
@@ -596,7 +675,8 @@ export function register(server, ctx) {
             if (!args.dryRun) {
                 for (const g of groups) {
                     if (successfulGroupNames.has(g.symbol) && !failedGroupMessages.has(g.symbol)) {
-                        _payloadCache.set(`${repoRoot}::${sessionId}::${g.symbol}`, { body: g.body, ack: g.ack });
+                        const modal = cached?.modalBySymbol?.get(g.symbol) || null;
+                        _payloadCache.set(`${repoRoot}::${sessionId}::${g.symbol}`, { body: g.body, ack: g.ack, modalStructure: modal });
                     }
                 }
             }
@@ -611,7 +691,17 @@ export function register(server, ctx) {
             }
 
             if (args.dryRun) {
-                return { content: [{ type: 'text', text: `Dry run: ${successfulGroupNames.size} symbols across ${successfulFileCount} files.` }] };
+                const dryLines = [`Dry run: ${successfulGroupNames.size} symbols across ${successfulFileCount} files.`];
+                // Report flagged outliers that were acknowledged.
+                const ackedOutliers = [];
+                for (const g of groups) {
+                    for (const idx of g.ack) {
+                        if (flaggedIndices.has(idx)) ackedOutliers.push(idx);
+                    }
+                }
+                if (ackedOutliers.length) dryLines.push(`Acknowledged outliers: ${ackedOutliers.join(',')}`);
+                if (warningSuffix) dryLines.push(warningSuffix.trim());
+                return { content: [{ type: 'text', text: dryLines.join('\n') }] };
             }
 
             return { content: [{ type: 'text', text: `Applied ${successfulGroupNames.size} symbols across ${successfulFileCount} files.${warningSuffix}` }] };
@@ -621,6 +711,12 @@ export function register(server, ctx) {
         // REAPPLY
         // =================================================================
         if (args.mode === 'reapply') {
+            if (!args.symbolGroup) {
+                return { content: [{ type: 'text', text: 'symbolGroup required for reapply.' }] };
+            }
+            if (!args.newTargets?.length) {
+                return { content: [{ type: 'text', text: 'newTargets required for reapply.' }] };
+            }
             const repoRoot = pc.getRoot();
             if (!repoRoot) throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -683,7 +779,9 @@ export function register(server, ctx) {
                 return { content: [{ type: 'text', text: `Reapplied 0 targets.${suffix}` }] };
             }
 
-            // Outlier flagging across new targets themselves.
+            // Outlier flagging: compare new targets against the ORIGINAL baseline
+            // structure (cached from the initial loadDiff). If no baseline is cached
+            // (single-symbol apply), fall back to comparing targets to each other.
             const structs = [];
             for (const t of targets) {
                 let s = null;
@@ -693,14 +791,16 @@ export function register(server, ctx) {
                 } catch { s = null; }
                 structs.push(s);
             }
-            if (targets.length >= 2) {
-                const modal = findModal(structs);
+            {
+                const baseline = cachedPayload.modalStructure;
+                const modal = baseline || (targets.length >= 2 ? findModal(structs) : null);
                 if (modal) {
+                    const ackSet = new Set(args.ack || []);
                     const flagged = [];
                     for (let i = 0; i < targets.length; i++) {
                         const s = structs[i];
                         if (!s) continue;
-                        if (!deepEqual(s, modal)) flagged.push(i + 1);
+                        if (!deepEqual(s, modal) && !ackSet.has(i + 1)) flagged.push(i + 1);
                     }
                     if (flagged.length) {
                         return { content: [{ type: 'text', text: `Flagged outliers require ack: ${flagged.join(',')}` }] };
@@ -738,17 +838,27 @@ export function register(server, ctx) {
             }
 
             let reappliedCount = 0;
+            let reapplyFailedCount = 0;
             let warningSuffix = '';
 
             for (const [absPath, bundle] of fileBundles) {
                 let content;
-                try { content = await fs.readFile(absPath, 'utf-8'); } catch { continue; }
+                try { content = await fs.readFile(absPath, 'utf-8'); } catch { reapplyFailedCount += bundle.occMeta.length; continue; }
                 const result = await applyEditList(content, bundle.edits, {
                     filePath: absPath,
                     isBatch: bundle.edits.length > 1,
                     disambiguations: bundle.disambiguations,
                 });
-                if (result.errors && result.errors.length) continue;
+                if (result.errors && result.errors.length) { reapplyFailedCount += bundle.occMeta.length; continue; }
+
+                // Full-file syntax gate before write.
+                try {
+                    const fileLang = getLangForFile(absPath);
+                    if (fileLang) {
+                        const fullFileErrs = await checkSyntaxErrors(result.workingContent, fileLang);
+                        if (fullFileErrs?.length) { reapplyFailedCount += bundle.occMeta.length; continue; }
+                    }
+                } catch { /* best-effort */ }
 
                 if (args.dryRun) {
                     reappliedCount += bundle.occMeta.length;
@@ -761,6 +871,7 @@ export function register(server, ctx) {
                     await fs.rename(tempPath, absPath);
                 } catch {
                     try { await fs.unlink(tempPath); } catch {}
+                    reapplyFailedCount += bundle.occMeta.length;
                     continue;
                 }
                 reappliedCount += bundle.occMeta.length;
@@ -779,10 +890,170 @@ export function register(server, ctx) {
             }
 
             const skippedSuffix = skipped.length ? ` (skipped ${skipped.length})` : '';
+            const failedSuffix = reapplyFailedCount ? ` (${reapplyFailedCount} failed)` : '';
             if (args.dryRun) {
-                return { content: [{ type: 'text', text: `Dry run: ${reappliedCount} targets.${skippedSuffix}` }] };
+                return { content: [{ type: 'text', text: `Dry run: ${reappliedCount} targets.${skippedSuffix}${failedSuffix}` }] };
             }
-            return { content: [{ type: 'text', text: `Reapplied ${reappliedCount} targets.${skippedSuffix}${warningSuffix}` }] };
+            return { content: [{ type: 'text', text: `Reapplied ${reappliedCount} targets.${skippedSuffix}${failedSuffix}${warningSuffix}` }] };
+        }
+
+        // =================================================================
+        // HISTORY
+        // =================================================================
+        if (args.mode === 'history') {
+            if (!args.symbol) {
+                return { content: [{ type: 'text', text: 'symbol required for history.' }] };
+            }
+            const repoRoot = pc.getRoot(args.file);
+            if (!repoRoot) throw new Error("No project root.");
+            const db = getDb(repoRoot);
+            const sessionId = ctx.sessionId || getSessionId();
+
+            let relPath = null;
+            if (args.file) {
+                const absPath = await ctx.validatePath(args.file);
+                relPath = path.relative(repoRoot, absPath);
+            }
+
+            const rows = getVersionHistory(db, args.symbol, sessionId, relPath);
+            if (!rows.length) {
+                return { content: [{ type: 'text', text: `No version history for ${args.symbol}.` }] };
+            }
+            const lines = rows.map((r, i) => `v${i} ${r.file_path} ${r.text_hash?.slice(0, 8) || '?'} ${new Date(r.created_at).toISOString()}`);
+            return { content: [{ type: 'text', text: lines.join('\n') }] };
+        }
+
+        // =================================================================
+        // RESTORE
+        // =================================================================
+        if (args.mode === 'restore') {
+            if (!args.symbol) {
+                return { content: [{ type: 'text', text: 'symbol required for restore.' }] };
+            }
+            if (!args.file) {
+                return { content: [{ type: 'text', text: 'file required for restore.' }] };
+            }
+
+            const absPath = await ctx.validatePath(args.file);
+            const repoRoot = findRepoRoot(absPath) || pc.getRoot();
+            if (!repoRoot) throw new Error("No project root.");
+            const db = getDb(repoRoot);
+            const sessionId = ctx.sessionId || getSessionId();
+            const relPath = path.relative(repoRoot, absPath);
+
+            // If no version specified, list available versions.
+            if (args.version === undefined) {
+                const rows = getVersionHistory(db, args.symbol, sessionId, relPath);
+                if (!rows.length) {
+                    return { content: [{ type: 'text', text: `No version history for ${args.symbol} in ${relPath}.` }] };
+                }
+                const lines = rows.map((r, i) => `v${i} ${r.text_hash?.slice(0, 8) || '?'} ${new Date(r.created_at).toISOString()}`);                return { content: [{ type: 'text', text: lines.join('\n') }] };
+            }
+
+            const history = getVersionHistory(db, args.symbol, sessionId, relPath);
+            const versionEntry = history?.[args.version];
+            if (!versionEntry) {
+                return { content: [{ type: 'text', text: `${args.symbol}: version ${args.version} not found. ${history.length} versions available.` }] };
+            }
+            const restoredText = getVersionText(db, versionEntry.id);
+            if (!restoredText) {
+                return { content: [{ type: 'text', text: `${args.symbol}: version ${args.version} text missing.` }] };
+            }
+
+            let content;
+            try {
+                content = normalizeLineEndings(await fs.readFile(absPath, 'utf-8'));
+            } catch {
+                return { content: [{ type: 'text', text: `${args.symbol}: file not found — ${relPath}.` }] };
+            }
+
+            // Staleness check: if the file changed since our last index (e.g. after
+            // a prior apply), warn the model so it can verify compatibility.
+            let fileChanged = false;
+            try {
+                const curHash = createHash('md5').update(content).digest('hex');
+                const stored = db.prepare('SELECT hash FROM files WHERE path = ?').get(relPath);
+                if (stored && stored.hash !== curHash) fileChanged = true;
+            } catch { /* best-effort */ }
+
+            const langName = getLangForFile(absPath);
+            if (!langName) {
+                return { content: [{ type: 'text', text: `${args.symbol}: unsupported language for ${relPath}.` }] };
+            }
+
+            const matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' });
+            if (!matches?.length) {
+                return { content: [{ type: 'text', text: `${args.symbol}: not found in ${relPath}.` }] };
+            }
+
+            // Disambiguate: multiple matches → try stored line, then fall back to
+            // body-similarity (the version text itself is the best fingerprint if the
+            // symbol moved lines but its body hasn't been edited again).
+            let sym = matches[0];
+            if (matches.length > 1) {
+                // First try exact line match from snapshot.
+                if (versionEntry.line) {
+                    const byLine = matches.find(m => m.line === versionEntry.line);
+                    if (byLine) { sym = byLine; }
+                }
+                // If line didn't match (symbol moved), compare current body to
+                // the restored text — the closest match is likely the right target.
+                if (!versionEntry.line || sym === matches[0]) {
+                    const contentLines = content.split('\n');
+                    let bestOverlap = -1;
+                    for (const m of matches) {
+                        const curBody = contentLines.slice(m.line - 1, m.endLine).join('\n');
+                        // Simple: count shared lines between current body and restored text.
+                        const curSet = new Set(curBody.split('\n').map(l => l.trim()));
+                        const resLines = restoredText.split('\n').map(l => l.trim());
+                        let overlap = 0;
+                        for (const rl of resLines) { if (curSet.has(rl)) overlap++; }
+                        if (overlap > bestOverlap) { bestOverlap = overlap; sym = m; }
+                    }
+                }
+            }
+
+            const lines = content.split('\n');
+            const currentText = lines.slice(sym.line - 1, sym.endLine).join('\n');
+            lines.splice(sym.line - 1, sym.endLine - (sym.line - 1), ...restoredText.split('\n'));
+            const newContent = lines.join('\n');
+
+            const staleWarning = fileChanged
+                ? ' ⚠ File modified since last apply — verify surrounding code for compatibility.'
+                : '';
+
+            // Syntax check the result.
+            let syntaxWarning = '';
+            try {
+                const errs = await checkSyntaxErrors(newContent, langName);
+                if (errs?.length) {
+                    syntaxWarning = ` ⚠ Parse errors at ${errs.map(e => `${e.line}:${e.column}`).join(', ')}`;
+                }
+            } catch { /* best-effort */ }
+
+            if (args.dryRun) {
+                return { content: [{ type: 'text', text: `Dry run: would restore ${args.symbol} to v${args.version}.${staleWarning}${syntaxWarning}` }] };
+            }
+
+            // Snapshot current text before overwriting (so this restore is itself restorable).
+            try {
+                snapshotSymbol(db, args.symbol, relPath, currentText, sessionId, sym.line);
+            } catch { /* best-effort */ }
+
+            // Atomic write.
+            const tempPath = `${absPath}.${randomBytes(16).toString('hex')}.tmp`;
+            try {
+                await fs.writeFile(tempPath, newContent, 'utf-8');
+                await fs.rename(tempPath, absPath);
+            } catch (err) {
+                try { await fs.unlink(tempPath); } catch {}
+                return { content: [{ type: 'text', text: `Restore failed: ${err.message}` }] };
+            }
+
+            // Re-index.
+            try { await indexFile(db, repoRoot, absPath); } catch { /* best-effort */ }
+
+            return { content: [{ type: 'text', text: `${args.symbol}: restored to v${args.version}.${staleWarning}${syntaxWarning}` }] };
         }
 
         throw new Error('Invalid mode.');

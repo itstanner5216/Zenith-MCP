@@ -63,23 +63,23 @@ describe('tool compression behavior', () => {
         }
     });
 
-    it('keeps read_text_file uncompressed by default', async () => {
+    it('keeps read_file uncompressed by default', async () => {
         const content = 'const value = 1;\n'.repeat(40);
         await writeFixture(rootDir, 'sample.js', content);
 
-        const handler = await registerTool('../dist/tools/read_text_file.js', 'read_text_file', rootDir);
+        const handler = await registerTool('../dist/tools/read_file.js', 'read_file', rootDir);
         const result = await handler({ path: 'sample.js' });
 
         expect(result.content[0].text).toBe(content);
         expect(compressTextFileMock).not.toHaveBeenCalled();
     });
 
-    it('uses compression for read_text_file only when requested', async () => {
+    it('uses compression for read_file only when requested', async () => {
         const content = 'const value = 1;\n'.repeat(40);
         await writeFixture(rootDir, 'sample.js', content);
         compressTextFileMock.mockResolvedValue({ text: 'COMPRESSED_OUTPUT' });
 
-        const handler = await registerTool('../dist/tools/read_text_file.js', 'read_text_file', rootDir);
+        const handler = await registerTool('../dist/tools/read_file.js', 'read_file', rootDir);
         const result = await handler({ path: 'sample.js', compression: true });
 
         expect(result.content[0].text).toBe('COMPRESSED_OUTPUT');

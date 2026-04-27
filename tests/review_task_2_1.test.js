@@ -69,20 +69,20 @@ function freshHandler(sessionId) {
 }
 
 describe('Task 2.1 — apply gates', () => {
-    it('apply with no prior load returns "No diff loaded. Call load first."', async () => {
+    it('apply with no prior load returns "No diff loaded. Call loadDiff first."', async () => {
         const h = freshHandler('gate-noload-' + Math.random());
         const r = await h({
             mode: 'apply',
             payload: 'fooBar 1,2\nfunction fooBar(card) { return !!card; }\n',
             dryRun: false,
         });
-        expect(r.content[0].text).toBe('No diff loaded. Call load first.');
+        expect(r.content[0].text).toBe('No diff loaded. Call loadDiff first.');
     });
 
-    it('apply with unknown symbol returns "Unknown symbol: X. Load it first."', async () => {
+    it('apply with unknown symbol returns "Unknown symbol: X. Run loadDiff first."', async () => {
         const h = freshHandler('gate-unknown-' + Math.random());
         await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'fooBar', file: 'a.js' }],
             contextLines: 0, loadMore: false,
         });
@@ -91,13 +91,13 @@ describe('Task 2.1 — apply gates', () => {
             payload: 'ghostFn 1\nfunction ghostFn() { return 1; }\n',
             dryRun: false,
         });
-        expect(r.content[0].text).toBe('Unknown symbol: ghostFn. Load it first.');
+        expect(r.content[0].text).toBe('Unknown symbol: ghostFn. Run loadDiff first.');
     });
 
     it('apply over char budget returns char-budget gate', async () => {
         const h = freshHandler('gate-budget-' + Math.random());
         await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'fooBar', file: 'a.js' }],
             contextLines: 0, loadMore: false,
         });
@@ -113,7 +113,7 @@ describe('Task 2.1 — apply gates', () => {
     it('apply with syntax error in body returns "Syntax error in <symbol>: line L:C"', async () => {
         const h = freshHandler('gate-syntax-' + Math.random());
         await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'fooBar', file: 'a.js' }],
             contextLines: 0, loadMore: false,
         });
@@ -129,7 +129,7 @@ describe('Task 2.1 — apply gates', () => {
     it('apply with flagged outlier missing ack returns ack-required gate', async () => {
         const h = freshHandler('gate-ack-' + Math.random());
         const lRes = await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'fooBar', file: 'a.js' },
                 { symbol: 'fooBar', file: 'b.js' },
@@ -171,7 +171,7 @@ describe('Task 2.1 — happy path', () => {
 
         const h = freshHandler('hp-' + Math.random());
         const lRes = await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'hpFn', file: 'hp_a.js' },
                 { symbol: 'hpFn', file: 'hp_b.js' },
@@ -222,7 +222,7 @@ describe('Task 2.1 — happy path', () => {
         const h = s.tool.handler;
 
         const lRes = await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'reFn', file: 're_a.js' },
                 { symbol: 'reFn', file: 're_b.js' },
@@ -258,7 +258,7 @@ describe('Task 2.1 — happy path', () => {
 `);
         const h = freshHandler('vers-' + Math.random());
         await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'versFn', file: 'vers_a.js' }],
             contextLines: 0, loadMore: false,
         });
@@ -292,7 +292,7 @@ describe('Task 2.1 — retry locking', () => {
 
         const h = freshHandler('rt-' + Math.random());
         await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'rtFn', file: 'rt_a.js' }],
             contextLines: 0, loadMore: false,
         });
@@ -344,7 +344,7 @@ describe('Task 2.1 — loadMore index stability', () => {
         // a 4th in a loadMore call. The code path for startIndex uses cached.occurrences.length.
         const h = freshHandler('lm-' + Math.random());
         const r1 = await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'lmFn', file: 'lm_0.js' },
                 { symbol: 'lmFn', file: 'lm_1.js' },
@@ -359,7 +359,7 @@ describe('Task 2.1 — loadMore index stability', () => {
         // loadMore=true path uses startIndex = cached.occurrences.length. Verify the
         // direct code path via another load call with different file:
         const r2 = await h({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [{ symbol: 'lmFn', file: 'lm_2.js' }],
             contextLines: 0, loadMore: false,
         });

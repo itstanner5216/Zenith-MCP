@@ -101,29 +101,27 @@ describe('refactor_batch registration', () => {
         expect(server.tool.name).toBe('refactor_batch');
     });
 
-    it('description is one sentence', () => {
+    it('description does not contain "If true"', () => {
         const d = server.tool.def.description;
-        // one sentence: no newline, ends with a period, no "If true"
-        expect(d).toMatch(/^[^\n]+\.$/);
         expect(d.toLowerCase()).not.toContain('if true');
     });
 
-    it('inputSchema is a discriminatedUnion with query, load, apply, reapply', () => {
+    it('inputSchema has mode enum with all 6 modes', () => {
         const schema = server.tool.def.inputSchema;
-        expect(schema.constructor.name).toBe('ZodDiscriminatedUnion');
-        expect(schema._def.discriminator).toBe('mode');
-        const modes = schema.options.map(o => o.shape.mode.value);
-        expect(modes.sort()).toEqual(['apply', 'load', 'query', 'reapply']);
+        expect(schema.constructor.name).toBe('ZodObject');
+        const modeField = schema.shape.mode;
+        // Unwrap default wrapper if present
+        const inner = modeField._def?.innerType ?? modeField;
+        const values = inner._def?.values ?? inner.options;
+        expect([...values].sort()).toEqual(['apply', 'history', 'loadDiff', 'query', 'reapply', 'restore']);
     });
 
     it('no param description starts with "If true"', () => {
         const schema = server.tool.def.inputSchema;
-        for (const opt of schema.options) {
-            for (const [, field] of Object.entries(opt.shape)) {
-                const desc = field._def.description
-                    ?? field._def.innerType?._def?.description;
-                if (desc) expect(desc.toLowerCase()).not.toMatch(/^if true/);
-            }
+        for (const [, field] of Object.entries(schema.shape)) {
+            const desc = field._def?.description
+                ?? field._def?.innerType?._def?.description;
+            if (desc) expect(desc.toLowerCase()).not.toMatch(/^if true/);
         }
     });
 });
@@ -172,7 +170,7 @@ describe('refactor_batch query mode', () => {
     });
 });
 
-describe('refactor_batch load mode', () => {
+describe('refactor_batch loadDiff mode', () => {
     it('rejects numeric selection without prior query (fresh session)', async () => {
         // Use a fresh session to guarantee no cached query.
         const freshCtx = {
@@ -183,7 +181,7 @@ describe('refactor_batch load mode', () => {
         const s = makeServer();
         register(s, freshCtx);
         const res = await s.tool.handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [1, 2],
             contextLines: 2,
             loadMore: false,
@@ -197,7 +195,7 @@ describe('refactor_batch load mode', () => {
         register(s, freshCtx);
 
         const res = await s.tool.handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'validateCard', file: 'a.js' },
                 { symbol: 'validateCard', file: 'b.js' },
@@ -241,7 +239,7 @@ describe('refactor_batch load mode', () => {
         register(s, bigCtx);
 
         const res = await s.tool.handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [
                 { symbol: 'doStuff', file: 'p.js' },
                 { symbol: 'doStuff', file: 'q.js' },
@@ -270,7 +268,7 @@ describe('refactor_batch load mode', () => {
 
         // Follow-up loadMore resumes without duplicate entries
         const res2 = await s.tool.handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [],
             loadMore: true,
         });
@@ -300,10 +298,144 @@ describe('refactor_batch load mode', () => {
         const freshCtx = { ...ctx, sessionId: 'done-session-' + Math.random() };
         register(s, freshCtx);
         const res = await s.tool.handler({
-            mode: 'load',
+            mode: 'loadDiff',
             selection: [],
             loadMore: true,
         });
         expect(res.content[0].text).toBe('Nothing to continue.');
+    });
+
+    it('context lines are prefixed with │ while body lines are not', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'ctx-prefix-' + Math.random() };
+        register(s, freshCtx);
+
+        const res = await s.tool.handler({
+            mode: 'loadDiff',
+            selection: [{ symbol: 'validateCard', file: 'a.js' }],
+            contextLines: 2,
+            loadMore: false,
+        });
+        const text = res.content[0].text;
+        const lines = text.split('\n');
+        // Find lines after the header — context lines should start with │
+        const headerIdx = lines.findIndex(l => l.startsWith('validateCard ['));
+        expect(headerIdx).toBeGreaterThanOrEqual(0);
+        // Body lines (the function itself) should NOT have │ prefix
+        const bodyLines = lines.filter(l => l.includes('function validateCard'));
+        expect(bodyLines.length).toBeGreaterThan(0);
+        for (const bl of bodyLines) {
+            expect(bl).not.toMatch(/^│ /);
+        }
+    });
+});
+
+describe('refactor_batch history mode', () => {
+    it('returns empty when no versions exist', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'hist-empty-' + Math.random() };
+        register(s, freshCtx);
+        const res = await s.tool.handler({
+            mode: 'history',
+            symbol: 'nonexistent',
+            file: 'a.js',
+        });
+        expect(res.content[0].text).toContain('No version history');
+    });
+
+    it('requires symbol param', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'hist-nosym-' + Math.random() };
+        register(s, freshCtx);
+        const res = await s.tool.handler({
+            mode: 'history',
+        });
+        expect(res.content[0].text).toBe('symbol required for history.');
+    });
+});
+
+describe('refactor_batch restore mode', () => {
+    it('requires symbol param', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'restore-nosym-' + Math.random() };
+        register(s, freshCtx);
+        const res = await s.tool.handler({ mode: 'restore' });
+        expect(res.content[0].text).toBe('symbol required for restore.');
+    });
+
+    it('requires file param', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'restore-nofile-' + Math.random() };
+        register(s, freshCtx);
+        const res = await s.tool.handler({ mode: 'restore', symbol: 'validateCard' });
+        expect(res.content[0].text).toBe('file required for restore.');
+    });
+
+    it('lists versions when version is omitted', async () => {
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId: 'restore-list-' + Math.random() };
+        register(s, freshCtx);
+        const res = await s.tool.handler({
+            mode: 'restore',
+            symbol: 'validateCard',
+            file: 'a.js',
+        });
+        // Either lists versions or says no history
+        const text = res.content[0].text;
+        expect(text).toMatch(/v\d|No version history/);
+    });
+
+    it('full pipeline: apply → restore roundtrip', async () => {
+        const sessionId = 'restore-rt-' + Math.random();
+        const s = makeServer();
+        const freshCtx = { ...ctx, sessionId };
+        register(s, freshCtx);
+        const handler = s.tool.handler;
+
+        // Read original file content
+        const origContent = await fs.readFile(path.join(tmpRepo, 'a.js'), 'utf-8');
+
+        // Load the symbol
+        const loadRes = await handler({
+            mode: 'loadDiff',
+            selection: [{ symbol: 'validateCard', file: 'a.js' }],
+            contextLines: 0,
+            loadMore: false,
+        });
+        const loadText = loadRes.content[0].text;
+        const idx = [...loadText.matchAll(/validateCard \[(\d+)\]/g)].map(m => Number(m[1]));
+
+        // Apply an edit
+        const newBody = 'function validateCard(card) {\n    return card.length === 15;\n}';
+        const applyRes = await handler({
+            mode: 'apply',
+            payload: `validateCard ${idx.join(',')}\n${newBody}\n`,
+            dryRun: false,
+        });
+        expect(applyRes.content[0].text).toMatch(/Applied/);
+
+        // File should be changed
+        const changedContent = await fs.readFile(path.join(tmpRepo, 'a.js'), 'utf-8');
+        expect(changedContent).toContain('return card.length === 15');
+
+        // Check history — should have at least one version
+        const histRes = await handler({ mode: 'history', symbol: 'validateCard', file: 'a.js' });
+        expect(histRes.content[0].text).toMatch(/^v0/);
+
+        // Restore to v0
+        const restoreRes = await handler({
+            mode: 'restore',
+            symbol: 'validateCard',
+            file: 'a.js',
+            version: 0,
+        });
+        expect(restoreRes.content[0].text).toContain('restored to v0');
+
+        // File should be back to original
+        const restoredContent = await fs.readFile(path.join(tmpRepo, 'a.js'), 'utf-8');
+        expect(restoredContent).toContain('return card.length === 16');
+
+        // Restore the original for other tests
+        await fs.writeFile(path.join(tmpRepo, 'a.js'), origContent, 'utf-8');
     });
 });

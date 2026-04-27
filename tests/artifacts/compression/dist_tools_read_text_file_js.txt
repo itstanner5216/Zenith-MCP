@@ -1,4 +1,4 @@
-FILE: dist/tools/read_text_file.js
+FILE: dist/tools/read_file.js
 RAW_CHARS: 14668
 TARGET_70_PERCENT_BUDGET: 10267
 BRIDGE_CHARS: 10266
