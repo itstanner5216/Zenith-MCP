@@ -12,20 +12,21 @@ Zenith-MCP is a Node.js Model Context Protocol (MCP) server that provides filesy
 - **HTTP** — remote transport with Streamable HTTP + legacy SSE, bearer-token auth, and per-session isolation
 
 Key capabilities:
-- Multi-mode file reading (standard, grep, window, symbol-aware)
+- Flexible text reading (`head`, `tail`, `offset`, `aroundLine`, `ranges`, line numbers, and optional compression)
+- Single-file grep and symbol lookup via `search_file`
 - Surgical editing (content-match, block-replace, symbol-replace) with dry-run support
 - Intelligent search (ripgrep + inline BM25 ranking, symbol search, structural similarity)
 - Cross-file batch refactoring with impact analysis and rollback
-- Tree-sitter AST parsing for 20+ languages (lazy-loaded WASM grammars)
+- Tree-sitter AST parsing for 40+ languages (lazy-loaded WASM grammars)
 - Per-project SQLite symbol indexing with version snapshots
 - Stash system for retrying failed edits/writes
-- Structured code compression via external `toon` bridge
+- Structured code compression via the TypeScript `toon` library and Node bridge
 
 ---
 
 ## 2. Entry Points
 
-### `dist/cli/stdio.js`
+### `src/cli/stdio.ts`
 
 The stdio entry point. Parses CLI arguments as baseline allowed directories, creates a single shared `FilesystemContext`, and connects over `StdioServerTransport`.
 
@@ -40,7 +41,7 @@ await server.connect(new StdioServerTransport());
 - If no CLI directories are provided, prints a usage warning but continues; the server will throw during MCP initialization if the client also doesn't support roots
 - Sets both the per-instance context dirs and the global `allowedDirectories` for backward compatibility
 
-### `dist/server/http.js`
+### `src/server/http.ts`
 
 The HTTP entry point. Express app with session-per-client isolation.
 
@@ -74,7 +75,7 @@ function createSessionPair() {
 ## 3. High-Level Architecture
 
 ```
-Entry (stdio.js / http.js)
+Entry (stdio.ts / http.ts)
     │
     ├──► createFilesystemContext(initialDirs)
     │       ├──► getAllowedDirectories()
@@ -82,14 +83,17 @@ Entry (stdio.js / http.js)
     │       └──► validatePath(requestedPath)  ← security boundary
     │
     ├──► createFilesystemServer(ctx)
+    │       ├──► configureRegistry()           ← adapter system init
+    │       ├──► RetrievalPipeline init         ← opt-in tool retrieval
     │       └──► registerAllTools(server, ctx)
-    │               ├──► read_text_file
+    │               ├──► read_file
     │               ├──► read_media_file
     │               ├──► read_multiple_files
     │               ├──► write_file
     │               ├──► edit_file
     │               ├──► directory
     │               ├──► search_files
+    │               ├──► search_file
     │               ├──► file_manager
     │               ├──► stashRestore
     │               └──► refactor_batch
@@ -103,19 +107,22 @@ Entry (stdio.js / http.js)
 
 | Module | Responsibility |
 |--------|----------------|
-| `core/server.js` | Orchestrator: creates `McpServer`, registers tools, wires roots protocol |
-| `core/lib.js` | Security & I/O: `FilesystemContext` factory, `validatePath`, file ops, diff utils |
-| `core/path-utils.js` | Cross-platform path normalization (WSL-aware, UNC-aware) |
-| `core/path-validation.js` | Linux-focused path normalization with caching, `isPathWithinAllowedDirectories` |
-| `core/roots-utils.js` | Parses MCP root URIs (`file://...`) to validated directory paths |
-| `core/shared.js` | Search engine: inline BM25, ripgrep wrappers, media streaming, sensitive file detection |
-| `core/tree-sitter.js` | Semantic parsing: WASM grammar loading, symbol extraction, syntax checking, structural fingerprinting |
-| `core/edit-engine.js` | Pure-function edit verification: content/block/symbol matching, batch application |
-| `core/symbol-index.js` | SQLite schema, file indexing, impact queries, version snapshots |
-| `core/project-context.js` | Project root resolution ladder (MCP roots → git → cwd → registry → global) |
-| `core/stash.js` | Stash persistence API (SQLite, per-project or global) |
-| `core/compression.js` | Compression budget math, `toon` bridge invocation |
-| `core/toon_bridge.js` | Child-process bridge to `python3 -m toon --structured` |
+| `src/core/server.ts` | Orchestrator: creates `McpServer`, registers tools, wires roots protocol, initializes adapter registry and retrieval pipeline |
+| `src/core/lib.ts` | Security & I/O: `FilesystemContext` factory, `validatePath`, file ops, diff utils |
+| `src/core/path-utils.ts` | Cross-platform path normalization (WSL-aware, UNC-aware) |
+| `src/core/path-validation.ts` | Linux-focused path normalization with caching, `isPathWithinAllowedDirectories` |
+| `src/core/roots-utils.ts` | Parses MCP root URIs (`file://...`) to validated directory paths |
+| `src/core/shared.ts` | Search engine: inline BM25, ripgrep wrappers, media streaming, sensitive file detection |
+| `src/core/tree-sitter.ts` | Semantic parsing: WASM grammar loading, symbol extraction, syntax checking, structural fingerprinting |
+| `src/core/edit-engine.ts` | Pure-function edit verification: content/block/symbol matching, batch application |
+| `src/core/symbol-index.ts` | SQLite schema, file indexing, impact queries, version snapshots |
+| `src/core/project-context.ts` | Project root resolution via `project-scope.ts`; stash DB routing; manual project registration |
+| `src/core/project-registry.ts` | `ProjectManifest`-based explicit project matching with 5-tier strategy |
+| `src/core/stash.ts` | Stash persistence API (SQLite, per-project or global) |
+| `src/core/compression.ts` | Compression budget math, truncation fallback, and Node child-process bridge to compiled `toon_bridge.js` |
+| `src/core/toon_bridge.ts` | Bridge executable: reads a file, extracts tree-sitter structure, and runs the TypeScript toon codec (no Python) |
+| `src/toon/` | Compression library: BMX+ scoring, SageRank, dedup, budget allocation, string codec |
+| `src/utils/project-scope.ts` | Project root resolution ladder: git → MCP roots + git → markers → registry → global |
 
 ---
 
@@ -138,14 +145,14 @@ All filesystem operations MUST go through `ctx.validatePath(requestedPath)` befo
 
 ### Sensitive File Blocking
 
-`isSensitive(filePath)` in `shared.js` blocks credentials files using `minimatch` globs:
+`isSensitive(filePath)` in `src/core/shared.ts` blocks credentials files using `minimatch` globs:
 - Default patterns: `.env`, `*.pem`, `*.key`, `*.crt`, `*credentials*`, `*secret*`, `docker-compose.yaml/yml`, `.config/**`
 - Checked by search tools, tree-sitter indexing, and file discovery
 - **Not** checked by direct read/write tools (the path sandbox is the primary defense)
 
 ### Exclusive Writes
 
-`writeFileContent()` in `lib.js` uses the `wx` flag for new files. If the file already exists, it falls back to a temp-file + atomic `fs.rename()` pattern. This prevents symlink-based attacks where an attacker pre-creates a symlink at the target path.
+`writeFileContent()` in `src/core/lib.ts` uses the `wx` flag for new files. If the file already exists, it falls back to a temp-file + atomic `fs.rename()` pattern. This prevents symlink-based attacks where an attacker pre-creates a symlink at the target path.
 
 ### Per-Session Isolation (HTTP)
 
@@ -155,7 +162,7 @@ Each HTTP session gets its own `FilesystemContext` copy. MCP roots negotiations 
 
 ## 5. Core Modules Deep Dive
 
-### 5.1 `core/lib.js` — Filesystem Context & I/O
+### 5.1 `src/core/lib.ts` — Filesystem Context & I/O
 
 **`createFilesystemContext(initialAllowedDirectories)`**
 
@@ -168,7 +175,7 @@ Factory that returns a per-instance context object:
 }
 ```
 
-HTTP mode creates one context per session. stdio mode creates one global context. The global `validatePath()` function still exists for backward compatibility but delegates to global `allowedDirectories`.
+HTTP mode creates one context per session. stdio mode creates one global context.
 
 **I/O utilities:**
 - `formatSize(bytes)` — human-readable sizes (B, KB, MB, GB, TB)
@@ -183,20 +190,20 @@ HTTP mode creates one context per session. stdio mode creates one global context
 - `offsetReadFile(filePath, offset, length)` — line-based offset read
 - `searchFilesWithValidation(rootPath, pattern, allowedDirectories, options)` — JS glob search with exclude patterns
 
-### 5.2 `core/path-utils.js` & `core/path-validation.js`
+### 5.2 `src/core/path-utils.ts` & `src/core/path-validation.ts`
 
-**`path-utils.js`** — Cross-platform normalization:
+**`path-utils.ts`** — Cross-platform normalization:
 - Preserves WSL paths (`/mnt/c/...`)
 - Converts Unix-style Windows paths (`/c/...`) only on Windows
 - Handles UNC paths (`\\server\share`)
 - Normalizes double slashes, trailing slashes
 
-**`path-validation.js`** — Linux-focused normalization with LRU cache (1000 entries):
+**`path-validation.ts`** — Linux-focused normalization with LRU cache (1000 entries):
 - Strips quotes, expands `~`, rejects null bytes
 - Uses Node's `path.normalize()`
 - `isPathWithinAllowedDirectories(filePath, allowedDirectories)` — checks if resolved path starts with any allowed dir + `/`
 
-### 5.3 `core/shared.js` — Search Engine
+### 5.3 `src/core/shared.ts` — Search Engine
 
 **BM25 Index (`BM25Index` class)**
 
@@ -228,14 +235,14 @@ Inline zero-dependency BM25 implementation (~120 lines):
 
 **Media:** `readFileAsBase64Stream(filePath)` — streams file to base64.
 
-### 5.4 `core/tree-sitter.js` — Semantic Parsing
+### 5.4 `src/core/tree-sitter.ts` — Semantic Parsing
 
-**Language support:** 20+ languages via `EXT_TO_LANG` mapping (JS, TS, TSX, Python, Bash, Go, Rust, Java, C, C++, C#, Kotlin, PHP, Ruby, Swift, CSS, JSON, YAML, SQL, Markdown).
+**Language support:** 40+ languages via `EXT_TO_LANG` mapping and shipped WASM grammar files. Languages include JavaScript, TypeScript, TSX, Python, Bash, Go, Rust, Java, C, C++, C#, Kotlin, PHP, Ruby, Swift, CSS, JSON, YAML, SQL, Markdown, Dart, Elixir, GraphQL, HCL, HTML, Lua, Make, Nix, Perl, Prisma, Proto, R, SCSS, Svelte, TOML, Vue, XML, CMake, Dockerfile, and more.
 
 **Lazy loading architecture:**
 - `Parser.init()` — called once, loads `tree-sitter.wasm`
 - `loadLanguage(langName)` — loads `tree-sitter-{lang}.wasm`, cached permanently in `_languageCache`
-- `loadQueryString(langName)` — loads `{lang}-tags.scm`, cached permanently
+- `loadQueryString(langName)` — loads query files, cached permanently
 - `getCompiledQuery(langName)` — compiles `Query` object, cached permanently
 
 **Symbol cache:** Parsed symbols are cached by MD5 hash of `langName + source` in an LRU cache (100 entries).
@@ -257,9 +264,9 @@ Inline zero-dependency BM25 implementation (~120 lines):
 - `getStructuralFingerprint(source, langName, startLine, endLine)` — returns AST node types in range (for structural similarity)
 - `computeStructuralSimilarity(fpA, fpB)` — Jaccard similarity of 3-grams over fingerprints
 - `getSymbolStructure(source, langName, startLine, endLine)` — extracts params, return type, parent kind, decorators, modifiers
-- `getCompressionStructure(source, langName)` — extracts definition blocks with control-flow anchors (for `toon` compression)
+- `getCompressionStructure(source, langName)` — extracts definition blocks with control-flow anchors (for compression)
 
-### 5.5 `core/edit-engine.js` — Edit Verification
+### 5.5 `src/core/edit-engine.ts` — Edit Verification
 
 Pure-function edit application. No I/O.
 
@@ -286,7 +293,7 @@ Returns `{ workingContent, errors, pendingSnapshots }`.
 - Runs `checkSyntaxErrors()` on the modified content
 - Returns a minimal warning string (`⚠ Parse errors at lines ...`) or empty string
 
-### 5.6 `core/symbol-index.js` — Symbol Database
+### 5.6 `src/core/symbol-index.ts` — Symbol Database
 
 **`findRepoRoot(filePath)`**
 - Runs `git rev-parse --show-toplevel` with 5s timeout
@@ -331,15 +338,17 @@ Returns `{ workingContent, errors, pendingSnapshots }`.
 - `getVersionText(db, versionId)` — retrieve text
 - `restoreVersion(db, symbolName, versionId, sessionId, currentText)` — validates ownership, returns original text
 
-### 5.7 `core/project-context.js` — Project Root Resolution
+### 5.7 `src/core/project-context.ts` — Project Root Resolution
 
 Singleton `ProjectContext` class. The single authority on "what project am I in?"
 
-**Resolution ladder (`_resolve()`):**
-1. MCP roots from client → git repo detection from each root
-2. Git repo detection from `process.cwd()`
-3. Manually registered project roots (`project_roots` table in `~/.zenith-mcp/global-stash.db`)
-4. Global fallback (`~/.zenith-mcp/`)
+**Resolution ladder** — delegates to `src/utils/project-scope.ts`:
+
+1. **Git repo detection** from the file path itself (or `process.cwd()` when no file is given)
+2. **MCP roots / allowed directories** — git detection on each root, with single-dir fallback if none have git
+3. **Marker-based detection** — walks up from the resolved directory looking for 16 project markers: `package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `requirements.txt`, `go.mod`, `pom.xml`, `build.gradle`, `build.gradle.kts`, `composer.json`, `Gemfile`, `mix.exs`, `stack.yaml`, `CMakeLists.txt`, `.git`
+4. **ProjectRegistry matching** — 5-tier matching (by ID, name, path segment, exact path, path prefix) against manually registered projects
+5. **Global fallback** — `~/.zenith-mcp/`
 
 **API:**
 - `getRoot(filePath)` — main entry point; auto-promotes first-touched repo as bound root
@@ -350,7 +359,7 @@ Singleton `ProjectContext` class. The single authority on "what project am I in?
 
 **Storage:** `~/.zenith-mcp/global-stash.db` with `project_roots(root_path PRIMARY KEY, name, created_at)`.
 
-### 5.8 `core/stash.js` — Stash Persistence
+### 5.8 `src/core/stash.ts` — Stash Persistence
 
 All stash operations go through `ProjectContext` for DB resolution.
 
@@ -367,7 +376,7 @@ Convenience wrappers:
 - `stashEdits(ctx, filePath, edits, failedIndices)` — type `'edit'`
 - `stashWrite(ctx, filePath, content, mode)` — type `'write'`
 
-### 5.9 `core/compression.js` & `core/toon_bridge.js`
+### 5.9 `src/core/compression.ts` & `src/core/toon_bridge.ts`
 
 **`compressTextFile(validPath, rawText, maxChars, keepRatio)`**
 - Computes target budget: `min(maxChars, rawLength * keepRatio)` (default keepRatio 0.70)
@@ -375,41 +384,58 @@ Convenience wrappers:
 - Returns `{ text, targetBudget, rawLength, compressedLength }` or `null` if compression isn't useful
 
 **`runToonBridge(validPath, budget)`**
-- Spawns: `node toon_bridge.js <filepath> <budget>`
-- `toon_bridge.js` reads file, calls `getCompressionStructure()`, then hands off to `python3 -m toon --structured`
+- Spawns: `node dist/core/toon_bridge.js <filepath> <budget>` (the compiled JS bridge)
+- The bridge process reads the file, extracts AST structure via tree-sitter `getCompressionStructure()`, then compresses using the TypeScript `toon` codec (`compressSourceStructured()` or `compressString()`)
+- No Python dependency and no external service. This is still a short-lived Node child process spawned from the main server.
 - 30-second timeout
 - Falls back to returning `null` on any error
+
+### 5.10 `src/toon/` — Compression Library
+
+A full compression library ported from Python, operating entirely in-process with zero external dependencies.
+
+| Module | Purpose |
+|--------|---------|
+| `bmx-plus.ts` | BMX+ scoring algorithm (BM25 variant) |
+| `sagerank.ts` | SageRank scoring for relevance ranking |
+| `dedup.ts` | Deduplication of compressed output |
+| `budget.ts` | Character budget allocation |
+| `config.ts` | Compression configuration |
+| `encoder.ts` | Encoding utilities |
+| `pipeline.ts` | Compression pipeline orchestration |
+| `presets.ts` | Predefined compression presets |
+| `router.ts` | Strategy routing for compression methods |
+| `string-codec.ts` | Core codec: `compressSourceStructured()` and `compressString()` |
+| `types.ts` | Type definitions (`StructureBlock`, etc.) |
+| `utils.ts` | Utility functions |
+| `index.ts` | Public API re-exports |
 
 ---
 
 ## 6. Tools Deep Dive
 
-### `read_text_file`
+### `read_file`
 
-**Schema:** discriminated union on `mode`
+**Schema:** single schema (no explicit `mode` enum)
 
-- **`standard`** — `path`, `maxChars` (default 50000, up to 400k), `head`, `tail`, `offset`, `showLineNumbers`, `compression`
-  - If `compression` is true, attempts `compressTextFile()` first; falls back to truncation
-  - `tail` uses efficient backward chunk reading
-  - `head` uses forward chunk reading
-  - `offset` + `head` uses line-based streaming
-  - Smart truncation: truncates at last newline before budget, adds `[truncated offset=N]` meta header
+- `path` (string)
+- `maxChars` (number, optional, default 50000, up to 400k)
+- `head` (number, optional) — first N lines
+- `tail` (number, optional) — last N lines
+- `offset` (number, optional) — start line (0-based), combine with `head`
+- `aroundLine` (number, optional) — center window on this line
+- `context` (number, optional, default 30) — window radius
+- `ranges` (array of `{startLine, endLine}`, optional) — explicit line ranges
+- `showLineNumbers` (boolean, optional)
+- `compression` (boolean, optional) — compress whitespace via structured compression
 
-- **`grep`** — `path`, `maxChars`, `grep` (regex), `grepContext` (default 0, max 30), `showLineNumbers`
-  - Streaming read with `readline` interface
-  - Maintains before/after context buffers
-  - Emits `---` separators between disjoint match groups
-  - Always prefixes line numbers
-
-- **`window`** — `path`, `maxChars`, `aroundLine`, `context` (default 30), `ranges[]`, `showLineNumbers`
-  - Merges overlapping windows before reading
-  - Streaming read, collects only lines within merged windows
-  - Emits `---` separators between windows
-
-- **`symbol`** — `path`, `maxChars`, `symbol` (dot-qualified supported), `nearLine`, `expandLines` (default 0, max 50)
-  - Uses `findSymbol()` with `kindFilter: 'def'`
-  - Returns symbol body plus `expandLines` context on each side
-  - Always prefixes line numbers
+**Flow & Windowing:**
+- If `compression` is true, attempts `compressTextFile()` first; falls back to truncation
+- `tail` uses efficient backward chunk reading
+- `head` uses forward chunk reading
+- `offset` + `head` uses line-based streaming
+- Windowing (`aroundLine` / `ranges`) merges overlapping windows before reading and emits `---` separators between disjoint windows.
+- Smart truncation: truncates at last newline before budget, adds `[truncated offset=N]` meta header
 
 ### `read_media_file`
 
@@ -479,8 +505,7 @@ Returns `{ type: 'image'|'audio'|'blob', data: base64, mimeType }`.
   - Symbol metadata fetched via `getFileSymbolSummary()` / `getFileSymbols()`
   - Control characters escaped in output
 
-- **`roots`** — no parameters
-  - Returns `ctx.getAllowedDirectories().join('\n')`
+`directory` does not expose a `roots` mode. Allowed root directories are managed through CLI arguments and the MCP Roots protocol, not as a public directory tool operation.
 
 ### `search_files`
 
@@ -499,7 +524,7 @@ Returns `{ type: 'image'|'audio'|'blob', data: base64, mimeType }`.
   - `includeMetadata` adds `(sizeKB, YYYY-MM-DD)` suffix
 
 - **`symbol`** — `path`, `symbolQuery` (optional), `symbolKind`, `pattern`, `maxResults`
-  - If `symbolQuery` omitted: lists all symbols (old `list_symbols` behavior)
+  - If `symbolQuery` omitted: lists all symbols
   - Scans supported files, parses definitions via `getDefinitions()`
   - Returns: `relPath:line [type] name (lines start-end)`
 
@@ -549,21 +574,15 @@ Single-file search — grep or symbol lookup within one file. Read-only.
   - For writes: writes stashed content (with append overlap logic if mode was append), clears stash
   - Max 2 attempts; stash deleted on exceeded
 
-- **`restore`** — `stashId`, `symbol`, `version`, `file`, `dryRun`
-  - Symbol version restore: reads version history, replaces symbol body via tree-sitter, snapshots current text first
-  - Stash entry rollback: clears stash entry by ID
+- **`restore`** — `stashId`
+  - Stash entry rollback: clears stash entry by ID.
+  - *(Note: Symbol version history and restoration were moved to `refactor_batch` tool.)*
 
-- **`list`** — `type` (`'edit'` | `'write'`, optional)
+- **`list`** — `type` (`'edit'` | `'write'`, optional), `file` (optional)
   - Lists stash entries with attempt count
 
-- **`read`** — `stashId`
+- **`read`** — `stashId`, `file` (optional)
   - Shows stash entry contents (edit modes + status, or write preview)
-
-- **`init`** — `projectRoot`, `projectName`
-  - Registers non-git directory as project root in global DB
-
-- **`history`** — `symbol`, `file`
-  - Lists version snapshots for a symbol from SQLite
 
 ### `refactor_batch`
 
@@ -575,7 +594,7 @@ Single-file search — grep or symbol lookup within one file. Read-only.
   - Caches results in `_loadCache` keyed by `${repoRoot}::${sessionId}`
   - Returns indexed list of callers or callees
 
-- **`load`** — `selection[]` (index numbers or `{ symbol, file }`), `contextLines`, `loadMore`
+- **`loadDiff`** — `selection[]` (index numbers or `{ symbol, file }`), `contextLines`, `loadMore`
   - Loads symbol bodies plus surrounding context
   - Fetches occurrences via `findSymbol()`
   - **Outlier detection:** computes `getSymbolStructure()` for each occurrence, finds modal structure, flags deviations (param shape, return type, parent scope, decorators, modifiers)
@@ -603,6 +622,14 @@ Single-file search — grep or symbol lookup within one file. Read-only.
   - Re-runs outlier detection, syntax gate, char budget
   - Applies to new targets with same per-file atomic semantics
 
+- **`restore`** — `symbol`, `file`, `version`, `dryRun`
+  - Symbol version restore: reads version history, replaces symbol body via tree-sitter, snapshots current text first
+  - `file` is required for restore; omitting `version` lists available snapshots instead of writing
+
+- **`history`** — `symbol`, `file`
+  - Lists version snapshots for a symbol from SQLite
+  - `file` is optional for history and filters snapshots when provided
+
 ---
 
 ## 7. Adapter System
@@ -620,7 +647,7 @@ Zenith-MCP ships auto-configuration adapters for 16 MCP client platforms. These 
 
 **Registry:** `src/adapters/registry.ts` — `AdapterRegistry`
 - Singleton with `configureRegistry(backupDir?)`, `getAdapter(toolName)`, `listAdapters()`
-- Server initialization (`core/server.js`) loads settings and initializes registry when adapters are enabled
+- Server initialization (`src/core/server.ts`) loads settings and initializes registry when adapters are enabled
 
 **Config format helpers:** `src/adapters/helpers/` — `json5.ts`, `toml.ts`, `yaml.ts`
 
@@ -754,9 +781,9 @@ The server implements the MCP Roots Protocol for dynamic directory negotiation.
 1. Client sends `initialize` with capabilities
 2. `oninitialized` handler checks `clientCapabilities.roots`
 3. If supported: calls `server.server.listRoots()` to get client's roots
-4. Roots are parsed via `roots-utils.js` (`file://` URIs resolved, validated as directories)
+4. Roots are parsed via `src/core/roots-utils.ts` (`file://` URIs resolved, validated as directories)
 5. `ctx.setAllowedDirectories(validatedRoots)` replaces all baseline directories
-6. `project-context.js` is notified via `onRootsChanged()` to refresh its root resolution
+6. `src/core/project-context.ts` is notified via `onRootsChanged()` to refresh its root resolution
 7. At runtime: client sends `notifications/roots/list_changed`
 8. Server re-requests roots and repeats step 4–6
 
@@ -792,7 +819,6 @@ When modifying tools, guard aggressively against context bloat. If unsure whethe
 | `REFACTOR_MAX_CHARS` | 30000 | Max chars for refactor_batch loads |
 | `REFACTOR_MAX_CONTEXT` | 30 | Max context lines for refactor_batch |
 | `REFACTOR_VERSION_TTL_HOURS` | 24 | Version snapshot TTL in hours |
-| `TOON_PROJECT_DIR` | `/home/tanner/Projects/toon` | Path to `toon` compression project |
 | `ZENITH_MCP_ADAPTERS_ENABLED` | — | Comma-separated adapter names to enable |
 | `ZENITH_MCP_ADAPTER_BACKUP_DIR` | — | Backup directory for adapter config changes |
 
@@ -800,46 +826,48 @@ When modifying tools, guard aggressively against context bloat. If unsure whethe
 
 ## 13. Adding a New Tool
 
-1. Create `tools/my_new_tool.js`
+1. Create `src/tools/my_new_tool.ts`
 2. Export `register(server, ctx)`
 3. Use `zod` for strict `inputSchema`
 4. **Mandatory:** Call `await ctx.validatePath(args.path)` (or `args.source` / `args.destination`) before any `fs` operation
 5. Set `annotations: { readOnlyHint, idempotentHint, destructiveHint }`
-6. Import and call `registerMyNewTool(server, ctx)` in `core/server.js`
+6. Import and call `registerMyNewTool(server, ctx)` in `src/core/server.ts`
 7. Follow response discipline: minimal outputs, no parroting inputs
 
 ---
 
-## 14. Testing Considerations
+## 14. Testing
 
-- The project uses **Vitest** with `@vitest/coverage-v8`
-- `dist/core/` and `dist/tools/` are hand-authored source (dist-only layout). `dist/adapters/` and `dist/config/` are compiled from `src/` via `tsc`.
-- Tests in `tests/` reference `dist/` modules
+- The project uses **Vitest 4.x** with `@vitest/coverage-v8`
+- Tests in `tests/` reference compiled `dist/` modules
 - Tree-sitter WASM files must be present for symbol-aware tests
-- The `toon` compression bridge requires Python with the `toon` module installed (optional for most tests)
+- The compression bridge runs in-process (no Python required for tests)
 - SQLite databases are created in `.mcp/` directories and `~/.zenith-mcp/` — clean these between test runs if needed
 
-## 15. Hybrid Source Layout
+---
 
-Zenith-MCP uses a hybrid source layout:
+## 15. Source Layout
 
-| Directory | Language | Role | Version Controlled |
-|-----------|----------|------|--------------------|
-| `dist/core/` | JavaScript | Hand-authored MCP server core | Yes |
-| `dist/tools/` | JavaScript | Hand-authored MCP tool implementations | Yes |
-| `dist/cli/` | JavaScript | Hand-authored CLI entry points | Yes |
-| `dist/server/` | JavaScript | Hand-authored HTTP entry point | Yes |
-| `dist/grammars/` | WASM + SCM | Tree-sitter grammars and queries | Yes |
-| `src/adapters/` | TypeScript | MCP config adapter integrations | Yes |
-| `src/config/` | TypeScript | Adapter settings + CLI | Yes |
-| `src/retrieval/` | TypeScript | Retrieval pipeline, ranking, telemetry, observability | Yes |
-| `src/config/zenith-mcp/` | TypeScript | Zenith-MCP config management + admin CLI | Yes |
-| `dist/adapters/` | JavaScript | tsc output from `src/adapters/` | No |
-| `dist/config/` | JavaScript | tsc output from `src/config/` | No |
-| `dist/retrieval/` | JavaScript | tsc output from `src/retrieval/` | No |
+The entire project is TypeScript in `src/`, compiled to `dist/` via `tsc`. The `dist/` directory is gitignored.
 
-**Important:** Do NOT add `dist/` to `.gitignore`. Only `dist/adapters/`, `dist/config/`, and `dist/retrieval/` are tsc output. All other `dist/` subdirectories contain hand-authored source code.
+```
+src/                          — TypeScript source (all modules)
+  core/                       — Server core: security, search, tree-sitter, edit engine, symbol index
+  tools/                      — 11 MCP tool implementations
+  cli/                        — stdio entry point
+  server/                     — HTTP entry point (Express 5)
+  adapters/                   — 16 MCP client config adapters + helpers
+  config/                     — Adapter settings, admin CLI, server config management
+  retrieval/                  — Opt-in 6-tier tool retrieval pipeline
+  toon/                       — In-process compression library (BMX+, SageRank, codec)
+  utils/                      — Project scope resolution
+dist/                         — Compiled output (gitignored)
+  grammars/                   — copied Tree-sitter WASM grammar files and query files/dirs
+
+grammars/                     — Tree-sitter WASM grammars and SCM queries (source of truth)
+tests/                        — Test suites (Vitest)
+```
+
+**Build:** `tsc` compiles `src/` to `dist/`, then `shx cp -r grammars dist/` copies the source-controlled grammar tree into `dist/grammars/`. The nested `grammars/grammars/` directory is intentional for the shipped grammar layout. The `prepare` npm script runs build automatically on install.
 
 The retrieval pipeline is opt-in — `defaultRetrievalConfig()` sets `enabled: false`. The pipeline is initialized at server startup but remains inert until explicitly activated via config.
-
-The build script includes a prebuild safety check that aborts if `dist/core/server.js` is missing, preventing accidental destruction of source via `rm -rf dist`.
