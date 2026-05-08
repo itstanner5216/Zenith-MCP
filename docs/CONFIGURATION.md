@@ -74,6 +74,8 @@ You can add comments anywhere:
 Port: 8080  # Changed to 8080 because 7000 was taken
 ```
 
+**Note about inline comments:** Zenith treats ` # ` (space, hash, space) as the start of an inline comment. If a value needs to contain that exact sequence (unusual, but possible in file paths), there is no way to escape it — the text after ` # ` will be treated as a comment. Standalone comment lines (lines starting with `#`) are not affected by this.
+
 ---
 
 ## Every Setting Explained
@@ -103,7 +105,7 @@ search_files: disabled
 
 This section controls which tools your AI agent can use. Each tool is either `enabled` or `disabled`.
 
-**You don't need to list tools yourself.** Zenith automatically discovers all available tools when it starts up. If a tool isn't in your config file yet, Zenith adds it as `enabled` by default. If a tool is already listed, Zenith respects your choice and leaves it alone.
+**You don't need to list tools yourself.** Zenith automatically discovers all available tools when it starts up. If a tool isn't in your config file yet, Zenith adds it as `enabled` by default. If a tool is already listed, Zenith respects your choice and leaves it alone. If a tool is removed from Zenith in a future update, its entry is automatically cleaned up from your config.
 
 To turn off a tool, just change its value to `disabled`:
 
@@ -199,6 +201,8 @@ Extra file paths or directories where Zenith should look for MCP configuration f
 - **Valid values:** A comma-separated list of file paths or directory paths
 
 If you point to a directory, Zenith scans it for files with `.json`, `.json5`, `.toml`, `.yaml`, or `.yml` extensions and checks if they look like MCP config files (they need to have a `mcpServers` key). It only writes to files that already exist and actually contain MCP configuration — it never creates new files or writes to unrelated config files.
+
+**Limitation:** Since commas separate paths, individual paths cannot contain commas. This is a known trade-off of the simple config format. If you need to point to a path with a comma in its name, rename the directory or use a symlink.
 
 Example:
 
@@ -410,9 +414,9 @@ The only environment variables Zenith reads are:
 
 ## Tips
 
-- **You can edit the config file while Zenith is running.** Changes take effect the next time Zenith reads the config (typically on the next request or server restart, depending on the setting).
+- **You can edit the config file at any time.** Changes take effect the next time Zenith starts up. A full server restart is required — Zenith loads the config once at startup and does not re-read it during a session.
 
-- **Unknown settings are preserved.** If you add your own comments or extra keys to the file, Zenith won't delete them. The file format is designed for safe round-tripping.
+- **Your edits are preserved.** When Zenith starts up, it only touches the `### Tools` section (to add newly registered tools or remove unregistered ones). Comments and blank lines inside the Tools section are kept in place. Everything outside the Tools section — your comments, custom formatting, unknown keys, other sections — is never modified.
 
 - **The config file never stores secrets.** API keys for HTTP authentication are passed as environment variables, not stored in the config file.
 

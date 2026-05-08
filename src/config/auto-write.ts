@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "
 import { join, extname, dirname } from "node:path";
 import { configureRegistry, listAdapters } from "../adapters/registry.js";
 import { backupFile } from "./backup.js";
+import { expandTilde } from "./schema.js";
 import type { ZenithConfig } from "./schema.js";
 
 // Format helpers — these can read/write arbitrary file paths (unlike adapters
@@ -45,7 +46,10 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
   const errors: string[] = [];
 
   // 1. Initialise the adapter registry.
-  configureRegistry(config.auto_write.backup_dir || undefined);
+  const resolvedBackupDir = config.auto_write.backup_dir
+    ? expandTilde(config.auto_write.backup_dir)
+    : undefined;
+  configureRegistry(resolvedBackupDir);
 
   // 2. Walk every known platform adapter.
   const adapters = listAdapters();
@@ -90,7 +94,7 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
       backupFile(
         cfgPath,
         config.auto_write.backup_mode,
-        config.auto_write.backup_dir || undefined,
+        resolvedBackupDir,
       );
     } catch (backupErr) {
       // Backup failure is not fatal — the in-memory snapshot still protects.
@@ -122,7 +126,8 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
   //    - File: verify it contains MCP config, write directly.
   //    - Directory: scan for MCP-compatible files (same directory only),
   //      verify each, write to verified ones.
-  for (const customPath of config.auto_write.custom_mcp_paths) {
+  for (const rawCustomPath of config.auto_write.custom_mcp_paths) {
+    const customPath = expandTilde(rawCustomPath);
     if (!existsSync(customPath)) {
       skipped.push(customPath);
       continue;
@@ -149,7 +154,7 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
       const result = verifyAndWriteMcpConfig(
         filePath,
         config.auto_write.backup_mode,
-        config.auto_write.backup_dir,
+        resolvedBackupDir ?? config.auto_write.backup_dir,
       );
 
       if (result.status === "written") {

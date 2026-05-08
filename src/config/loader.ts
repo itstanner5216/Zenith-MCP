@@ -72,7 +72,7 @@ export function saveConfig(config: ZenithConfig): void {
 }
 
 // ---------------------------------------------------------------------------
-// mergeToolsIntoConfig
+// mergeToolsIntoConfig (legacy — kept for backward compatibility)
 // ---------------------------------------------------------------------------
 
 /**
@@ -91,6 +91,10 @@ export function saveConfig(config: ZenithConfig): void {
  *
  * Returns the updated config (mutates in place for convenience, but also
  * returns it so callers can chain).
+ *
+ * @deprecated Use `syncToolsWithConfig` + `patchToolsInConfig` instead —
+ * this function only adds tools, never removes them, and its caller
+ * (`saveConfig`) destroys comments/formatting.
  */
 export function mergeToolsIntoConfig(
   config: ZenithConfig,
@@ -104,5 +108,149 @@ export function mergeToolsIntoConfig(
   }
 
   return config;
+}
+
+// ---------------------------------------------------------------------------
+// syncToolsWithConfig
+// ---------------------------------------------------------------------------
+
+/**
+ * Sync the tools map with the actual registered tool set.
+ *   - New tools are added as enabled.
+ *   - Tools no longer in the registry are removed.
+ *
+ * Returns `{ config, changed }` so the caller knows whether to persist.
+ */
+export function syncToolsWithConfig(
+  config: ZenithConfig,
+  registeredToolNames: string[],
+): { config: ZenithConfig; changed: boolean } {
+  const registered = new Set(registeredToolNames);
+  const existing = new Set(Object.keys(config.tools));
+  let changed = false;
+
+  // Add new tools (default: enabled)
+  for (const name of registeredToolNames) {
+    if (!existing.has(name)) {
+      config.tools[name] = true;
+      changed = true;
+    }
+  }
+
+  // Remove tools that are no longer registered
+  for (const name of existing) {
+    if (!registered.has(name)) {
+      delete config.tools[name];
+      changed = true;
+    }
+  }
+
+  return { config, changed };
+}
+
+// ---------------------------------------------------------------------------
+// patchToolsInConfig
+// ---------------------------------------------------------------------------
+
+/**
+ * Patch only the `### Tools` subsection in the config file on disk,
+ * preserving everything else — comments, formatting, blank lines,
+ * unknown sections, inline notes.
+ *
+ * Within the Tools block itself, comments and blank lines are preserved.
+ * Only tool key-value lines are added, updated, or removed.
+ *
+ * If no config file exists yet, falls back to a full `saveConfig` write
+ * (acceptable for first-time creation where there's nothing to preserve).
+ */
+export function patchToolsInConfig(tools: Record<string, boolean>): void {
+  let fileContent: string;
+  try {
+    fileContent = readFileSync(CONFIG_PATH, "utf-8");
+  } catch {
+    // No config file yet — full save is fine for first creation
+    const config = loadConfig();
+    config.tools = tools;
+    saveConfig(config);
+    return;
+  }
+
+  const lines = fileContent.split("\n");
+
+  // Find ### Tools boundaries
+  let toolsStart = -1;
+  let toolsEnd = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+
+    if (/^###\s+tools$/i.test(trimmed)) {
+      toolsStart = i;
+      continue;
+    }
+
+    // Next section/subsection header after tools marks the end
+    if (toolsStart !== -1 && /^#{2,3}\s+/.test(trimmed)) {
+      toolsEnd = i;
+      break;
+    }
+  }
+
+  if (toolsStart === -1) {
+    // No ### Tools section exists — append fresh
+    const toolLines = Object.entries(tools)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, enabled]) => `${name}: ${enabled ? "enabled" : "disabled"}`);
+    lines.push("", "### Tools", ...toolLines);
+  } else {
+    // Walk existing lines: preserve comments/blanks, update known tools,
+    // remove stale ones.
+    const remaining = new Map(Object.entries(tools));
+    const newBlock: string[] = ["### Tools"];
+
+    for (let i = toolsStart + 1; i < toolsEnd; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      // Preserve blank lines and comment-only lines
+      if (trimmed === "" || trimmed.startsWith("#")) {
+        newBlock.push(line);
+        continue;
+      }
+
+      // Parse as key: value (using `: ` like the main parser)
+      const colonIdx = line.indexOf(": ");
+      if (colonIdx === -1) {
+        newBlock.push(line); // unknown format, preserve
+        continue;
+      }
+
+      const key = line.substring(0, colonIdx).trim();
+
+      if (remaining.has(key)) {
+        // Tool still exists — write current value, preserve indentation
+        // and any inline comment the user may have added.
+        const indent = line.match(/^(\s*)/)?.[1] ?? "";
+        const rest = line.substring(colonIdx + 2);
+        const inlineCommentIdx = rest.indexOf(" # ");
+        const inlineComment = inlineCommentIdx !== -1
+          ? rest.substring(inlineCommentIdx)  // includes the leading " # "
+          : "";
+        newBlock.push(`${indent}${key}: ${remaining.get(key) ? "enabled" : "disabled"}${inlineComment}`);
+        remaining.delete(key);
+      }
+      // else: tool was removed from registry — skip the line
+    }
+
+    // Append any brand new tools at the end of the block
+    for (const [name, enabled] of [...remaining.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      newBlock.push(`${name}: ${enabled ? "enabled" : "disabled"}`);
+    }
+
+    lines.splice(toolsStart, toolsEnd - toolsStart, ...newBlock);
+  }
+
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  writeFileSync(CONFIG_PATH, lines.join("\n"), "utf-8");
 }
 

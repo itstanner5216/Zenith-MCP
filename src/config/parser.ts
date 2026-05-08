@@ -152,15 +152,15 @@ export function parseConfig(text: string): RawConfig {
       const key = line.slice(0, kvSep);
       let rest = line.slice(kvSep + 2); // everything after first `: `
 
-      // Detect inline comment:  ` #` at the end of the value portion.
-      // A `#` preceded by at least one space marks the start of an inline
-      // comment.  The text after the `#` is trimmed of its leading space
-      // (if any) but otherwise preserved.
+      // Detect inline comment: ` # ` (space-hash-space) in the value.
+      // Requires the space after the hash so that values containing ` #`
+      // without a trailing space (e.g. file paths like `/opt/my #project`)
+      // are not incorrectly truncated.  The serializer always writes
+      // ` # comment`, so the round-trip is preserved.
       let inlineComment: string | null = null;
-      const commentIdx = rest.indexOf(" #");
+      const commentIdx = rest.indexOf(" # ");
       if (commentIdx !== -1) {
-        const afterHash = rest.slice(commentIdx + 2);
-        inlineComment = afterHash.startsWith(" ") ? afterHash.slice(1) : afterHash;
+        inlineComment = rest.slice(commentIdx + 3);
         rest = rest.slice(0, commentIdx);
       }
 
@@ -344,6 +344,31 @@ if (isDirectRun) {
   const blanks = parsed.filter(e => e.type === "blank");
   console.assert(comments.length === 2, `Expected 2 comments, got ${comments.length}`);
   console.assert(blanks.length === 6, `Expected 6 blank lines, got ${blanks.length}`);
+
+  // Verify that ` #` without trailing space is NOT treated as inline comment.
+  // This protects path values like `/opt/my #project/file` from truncation.
+  const hashInValue = parseConfig("path_key: /opt/my #project/file");
+  const hashKv = hashInValue.find((e): e is KVEntry => e.type === "kv" && e.key === "path_key");
+  console.assert(
+    hashKv?.value === "/opt/my #project/file",
+    `Space-hash without trailing space should be part of value, got: "${hashKv?.value}"`,
+  );
+  console.assert(
+    hashKv?.inlineComment === null,
+    `Should have no inline comment, got: "${hashKv?.inlineComment}"`,
+  );
+
+  // Verify that ` # ` WITH trailing space IS still detected as inline comment.
+  const hashComment = parseConfig("port_key: 7000 # my comment");
+  const commentKv = hashComment.find((e): e is KVEntry => e.type === "kv" && e.key === "port_key");
+  console.assert(
+    commentKv?.value === 7000,
+    `Value should be 7000, got: "${commentKv?.value}"`,
+  );
+  console.assert(
+    commentKv?.inlineComment === "my comment",
+    `Comment should be 'my comment', got: "${commentKv?.inlineComment}"`,
+  );
 
   console.log("All parser self-tests passed.");
 }

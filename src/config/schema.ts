@@ -77,6 +77,22 @@ export const DEFAULT_CONFIG: ZenithConfig = {
 export const CONFIG_PATH: string = join(homedir(), ".zenith-mcp", "config");
 
 // ---------------------------------------------------------------------------
+// Helpers — tilde expansion for user-provided paths
+// ---------------------------------------------------------------------------
+
+/**
+ * Replace a leading `~` or `~/` with the actual home directory.
+ * Node's `fs` functions do NOT expand tilde — they would create a literal
+ * directory named `~` in the cwd.  Call this on any user-supplied path
+ * before passing it to the filesystem.
+ */
+export function expandTilde(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers — status booleans <-> "enabled"/"disabled" strings
 // ---------------------------------------------------------------------------
 
@@ -190,8 +206,17 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
   let currentSection: string | null = null;
 
   for (const entry of raw as RawEntry[]) {
-    if (entry.type === "subsection" || entry.type === "section") {
+    // Only ### subsection headers set the routing context.
+    // ## section headers are preserved in RawConfig for round-tripping but
+    // do NOT affect key routing.  configToRaw only emits ### headers, so
+    // a ## header in a hand-edited config is either a user note or a typo.
+    // Letting it reset currentSection would cause it to shadow subsequent
+    // ### headers and misroute keys.
+    if (entry.type === "subsection") {
       currentSection = entry.name.toLowerCase();
+      continue;
+    }
+    if (entry.type === "section") {
       continue;
     }
 

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { existsSync, readFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { expandTilde } from './schema.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -74,7 +75,7 @@ export function backupFile(
     }
 
     if (mode === 'file') {
-        const dir = backupDir ?? DEFAULT_BACKUP_DIR;
+        const dir = expandTilde(backupDir ?? DEFAULT_BACKUP_DIR);
         mkdirSync(dir, { recursive: true });
 
         // Produce a timestamp like 2026-05-07T120000 from ISO string

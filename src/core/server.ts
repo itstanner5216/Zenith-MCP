@@ -20,7 +20,7 @@ import { register as registerFilesystem } from '../tools/filesystem.js';
 import { register as registerStashRestore } from '../tools/stash_restore.js';
 import { register as registerRefactorBatch } from '../tools/refactor_batch.js';
 import { configureRegistry } from '../adapters/index.js';
-import { loadConfig, saveConfig, mergeToolsIntoConfig } from '../config/index.js';
+import { loadConfig, syncToolsWithConfig, patchToolsInConfig, expandTilde } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
 import { onRootsChanged } from './project-context.js';
 
@@ -91,27 +91,33 @@ export function createFilesystemServer(ctx: FilesystemContext): McpServer {
   }
 );
 
-  // ── Config: load, merge discovered tools, persist ────────────────────
+  // ── Config: load, sync discovered tools, patch if needed ─────────────
   const config: ZenithConfig = loadConfig();
 
   // Build the list of available tool names dynamically from the registry.
   const availableToolNames: string[] = TOOL_REGISTRY.map((t) => t.name);
 
-  // Merge discovered tools into config (new tools default to enabled).
-  const mergedConfig = mergeToolsIntoConfig(config, availableToolNames);
+  // Sync tools with registry (adds new, removes stale).
+  const { config: syncedConfig, changed } = syncToolsWithConfig(config, availableToolNames);
 
-  // Persist the merged state so the config file always reflects reality.
-  saveConfig(mergedConfig);
+  // Only write to disk if tools actually changed, and use surgical patching
+  // so comments, formatting, and unknown sections are preserved.
+  if (changed) {
+    patchToolsInConfig(syncedConfig.tools);
+  }
 
   // ── Auto-write adapter setup (guarded by config flag) ────────────────
-  if (mergedConfig.auto_write.status) {
-    configureRegistry(mergedConfig.auto_write.backup_dir ?? undefined);
+  if (syncedConfig.auto_write.status) {
+    const resolvedBackupDir = syncedConfig.auto_write.backup_dir
+      ? expandTilde(syncedConfig.auto_write.backup_dir)
+      : undefined;
+    configureRegistry(resolvedBackupDir);
   }
 
   // ── Register only the tools that are enabled in config ───────────────
   const toolServer = server as ToolServer;
   for (const entry of TOOL_REGISTRY) {
-    if (mergedConfig.tools[entry.name]) {
+    if (syncedConfig.tools[entry.name]) {
       entry.register(toolServer, ctx);
     }
   }
