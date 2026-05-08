@@ -10,7 +10,7 @@ import { expandTilde } from './schema.js';
 
 const ZENITH_HOME = join(homedir(), '.zenith-mcp');
 const GLOBAL_DB_PATH = join(ZENITH_HOME, 'global-stash.db');
-const DEFAULT_BACKUP_DIR = join(ZENITH_HOME, 'mcp_backups');
+const DEFAULT_BACKUP_DIR = join(ZENITH_HOME, 'mcp_backups');  // used as fallback when backup_dir is empty
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ export function backupFile(
     }
 
     if (mode === 'file') {
-        const dir = expandTilde(backupDir ?? DEFAULT_BACKUP_DIR);
+        const dir = expandTilde(backupDir || DEFAULT_BACKUP_DIR);
         mkdirSync(dir, { recursive: true });
 
         // Produce a timestamp like 2026-05-07T120000 from ISO string

@@ -154,7 +154,7 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
       const result = verifyAndWriteMcpConfig(
         filePath,
         config.auto_write.backup_mode,
-        resolvedBackupDir ?? config.auto_write.backup_dir,
+        resolvedBackupDir,
       );
 
       if (result.status === "written") {
@@ -254,7 +254,7 @@ function isMcpConfig(data: Record<string, unknown>): boolean {
 function verifyAndWriteMcpConfig(
   filePath: string,
   backupMode: "file" | "sqlite" | "none",
-  backupDir: string,
+  backupDir?: string,
 ): { status: "written" | "skipped" | "error"; message: string } {
   // Determine the format handler from extension.
   const handler = getFormatHandler(filePath);

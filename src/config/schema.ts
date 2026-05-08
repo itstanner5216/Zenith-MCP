@@ -48,7 +48,7 @@ export const DEFAULT_CONFIG: ZenithConfig = {
   tools: {},
   auto_write: {
     status: false,
-    backup_dir: "~/.zenith-mcp/mcp_backups/",
+    backup_dir: "",
     backup_mode: "file",
     custom_mcp_paths: [],
   },

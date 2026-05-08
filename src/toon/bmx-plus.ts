@@ -27,9 +27,10 @@
  * All executed within a TAAT posting-list architecture for 3.4–30× speedup.
  */
 
-// Module-level word regex — recreated (via exec loop) or used with matchAll
-// Python: _WORD_RE = re.compile(r"\b\w+\b")
-const _WORD_RE = /\b\w+\b/g;
+// Module-level word regex
+// Python's \w is unicode-aware by default. In JS, we must use \p{L} and \p{N}
+// with the 'u' flag to match \w's unicode behavior.
+const _WORD_RE = /[\p{L}\p{N}_]+/gu;
 
 /**
  * Padé rational approximation to σ(x) = 1/(1+e^-x). |error| < 0.01.
@@ -118,7 +119,7 @@ export class BMXPlusIndex {
    */
   static _tokenize(text: string): string[] {
     // String.match with /g returns all matches as string[] or null
-    // Equivalent to Python re.compile(r"\b\w+\b").findall(text.lower())
+    // We use the unicode-aware regex defined above
     const lower = text.toLowerCase();
     const matches = lower.match(_WORD_RE);
     return matches !== null ? matches : [];

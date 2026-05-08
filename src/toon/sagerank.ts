@@ -159,16 +159,10 @@ export class SageRank {
   // ────────────────────────────────────────────────────────────────
 
   static _tokenize(text: string): string[] {
-    // Must reset lastIndex because _WORD_RE has the /g flag and is module-level;
-    // instead, use exec loop to avoid stateful .test()
     const lower = text.toLowerCase();
-    const tokens: string[] = [];
-    const re = /\b\w+\b/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(lower)) !== null) {
-      tokens.push(m[0]);
-    }
-    return tokens;
+    // Python's \w is unicode-aware by default. In JS, we must use \p{L} and \p{N}
+    const matches = lower.match(/[\p{L}\p{N}_]+/gu);
+    return matches !== null ? matches : [];
   }
 
   // ────────────────────────────────────────────────────────────────
