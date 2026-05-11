@@ -96,11 +96,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     }
                     catch {
                         return;
-                    } // nosemgrep
+                    } 
                     for (const entry of entries) {
                         if (filePaths.length >= 2000)
                             return;
-                        const fullPath = path.join(dir, entry.name); // nosemgrep
+                        const fullPath = path.join(dir, entry.name); 
                         if (DEFAULT_EXCLUDES.some(p => entry.name === p))
                             continue;
                         if (isSensitive(fullPath))
@@ -129,13 +129,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const batch = supportedFiles.slice(i, i + BATCH_SIZE);
                     const results = await Promise.all(batch.map(async (filePath) => {
                         try {
-                            const stat = await fs.stat(filePath); // nosemgrep
+                            const stat = await fs.stat(filePath); 
                             if (stat.size > MAX_FILE_SIZE || stat.size === 0)
                                 return null;
                             const langName = getLangForFile(filePath);
                             if (!langName)
                                 return null;
-                            const source = await fs.readFile(filePath, 'utf-8'); // nosemgrep
+                            const source = await fs.readFile(filePath, 'utf-8');
                             const defs = await getDefinitions(source, langName, {
                                 typeFilter: typeFilter,
                             });
@@ -173,13 +173,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const batch = supportedFiles.slice(i, i + BATCH_SIZE);
                     const results = await Promise.all(batch.map(async (filePath) => {
                         try {
-                            const stat = await fs.stat(filePath); // nosemgrep
+                            const stat = await fs.stat(filePath); 
                             if (stat.size > MAX_FILE_SIZE || stat.size === 0)
                                 return null;
                             const langName = getLangForFile(filePath);
                             if (!langName)
                                 return null;
-                            const source = await fs.readFile(filePath, 'utf-8'); // nosemgrep
+                            const source = await fs.readFile(filePath, 'utf-8'); 
                             const defs = await getDefinitions(source, langName, {
                                 nameFilter: symbolQuery,
                                 typeFilter: typeFilter,
@@ -244,7 +244,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: `Multiple definitions for "${args.structuralQuery}":\n${candidates.join('\n')}\nNarrow with path.` }] };
             }
             const qRow = qRows[0];
-            const qAbsPath = path.resolve(repoRoot, qRow.file_path); // nosemgrep
+            const qAbsPath = path.resolve(repoRoot, qRow.file_path); 
             const qLang = getLangForFile(qAbsPath);
             if (!qLang) {
                 return { content: [{ type: 'text' as const, text: 'Unsupported language.' }] };
@@ -253,7 +253,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             try {
                 qSource = await fs.readFile(qAbsPath, 'utf-8');
             }
-            catch { // nosemgrep
+            catch { 
                 return { content: [{ type: 'text' as const, text: 'Could not read source file.' }] };
             }
             const queryFp = await getStructuralFingerprint(qSource, qLang, qRow.line, qRow.end_line);
@@ -287,7 +287,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const cand of candidates) {
                 if (cand.name === args.structuralQuery && cand.file_path === qRow.file_path)
                     continue;
-                const absPath = path.resolve(repoRoot, cand.file_path); // nosemgrep
+                const absPath = path.resolve(repoRoot, cand.file_path); 
                 const lang = getLangForFile(absPath);
                 if (!lang)
                     continue;
@@ -298,7 +298,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     }
                     catch {
                         src = null;
-                    } // nosemgrep
+                    } 
                     fileCache.set(absPath, src);
                 }
                 if (!src)
@@ -359,11 +359,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     }
                     catch {
                         return;
-                    } // nosemgrep
+                    } 
                     for (const entry of entries) {
                         if (rawResults.length >= userMaxResults * 5)
                             return;
-                        const fullPath = path.join(dir, entry.name); // nosemgrep
+                        const fullPath = path.join(dir, entry.name); 
                         if (DEFAULT_EXCLUDES.some(p => entry.name === p))
                             continue;
                         if (isSensitive(fullPath))
@@ -409,13 +409,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const batch = supportedFiles.slice(i, i + BATCH_SIZE);
                 const results = await Promise.all(batch.map(async (filePath) => {
                     try {
-                        const stat = await fs.stat(filePath); // nosemgrep
+                        const stat = await fs.stat(filePath); 
                         if (stat.size > MAX_FILE_SIZE || stat.size === 0)
                             return null;
                         const langName = getLangForFile(filePath);
                         if (!langName)
                             return null;
-                        const source = await fs.readFile(filePath, 'utf-8'); // nosemgrep
+                        const source = await fs.readFile(filePath, 'utf-8'); 
                         const defs = await getDefinitions(source, langName);
                         if (!defs)
                             return null;
@@ -497,11 +497,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     }
                     catch {
                         return;
-                    } // nosemgrep
+                    } 
                     for (const entry of entries) {
                         if (rawResults.length >= userMaxResults)
                             return;
-                        const fullPath = path.join(dir, entry.name); // nosemgrep
+                        const fullPath = path.join(dir, entry.name); 
                         const rel = path.relative(rootPath, fullPath);
                         if (DEFAULT_EXCLUDES.some(p => entry.name === p))
                             continue;
@@ -537,7 +537,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (args.includeMetadata && rawResults.length > 0) {
                 outputLines = await Promise.all(rawResults.map(async (filePath) => {
                     try {
-                        const stat = await fs.stat(filePath); // nosemgrep
+                        const stat = await fs.stat(filePath); 
                         const sizeKB = (stat.size / 1024).toFixed(1);
                         const modified = stat.mtime.toISOString().slice(0, 10);
                         return `${filePath}  (${sizeKB}KB, ${modified})`;
@@ -570,8 +570,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
         const allExcludes = DEFAULT_EXCLUDE_GLOBS;
         const flags = 'gi';
         const contentRegex = args.literalSearch
-            ? new RegExp(args.contentQuery!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags) // nosemgrep
-            : new RegExp(args.contentQuery!, flags); // nosemgrep
+            ? new RegExp(args.contentQuery!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags) 
+            : new RegExp(args.contentQuery!, flags); 
         // ---- RIPGREP PATH ----
         const hasRg = await ripgrepAvailable();
         if (hasRg) {
@@ -644,13 +644,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (contentResults.length >= maxJsFallback)
                 return;
             try {
-                const content = await fs.readFile(filePath, 'utf-8'); // nosemgrep
+                const content = await fs.readFile(filePath, 'utf-8'); 
                 const lines = content.split('\n');
                 for (let i = 0; i < lines.length; i++) {
                     if (contentResults.length >= maxJsFallback)
                         break;
-                    if (contentRegex.test(lines[i])) { // nosemgrep
-                        contentResults.push(`${filePath}:${i + 1}: ${lines[i].trim().slice(0, 500)}`); // nosemgrep
+                    if (contentRegex.test(lines[i])) { 
+                        contentResults.push(`${filePath}:${i + 1}: ${lines[i].trim().slice(0, 500)}`); 
                     }
                 }
             }
@@ -665,9 +665,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             catch {
                 return;
-            } // nosemgrep
+            } 
             for (const entry of entries) {
-                const fullPath = path.join(dir, entry.name); // nosemgrep
+                const fullPath = path.join(dir, entry.name); 
                 const rel = path.relative(rootPath, fullPath);
                 const excluded = allExcludes.some(pat => minimatch(rel, pat, { dot: true }) ||
                     minimatch(rel, pat.replace(/^\*\*\//, ''), { dot: true }));
