@@ -33,7 +33,17 @@ export function convertToWindowsPath(p: string): string {
  * @param p The path to normalize
  * @returns Normalized path
  */
-export function normalizePath(p: string): string {
+export function normalizePath(p: any): any {
+    // Handle non-string values
+    if (p === null) return null;
+    if (p === undefined) return undefined;
+    if (typeof p !== 'string') return p;
+
+    // Check for null bytes before any processing
+    if (p.includes('\x00')) {
+        throw new Error('Path contains null bytes');
+    }
+
     // Remove any surrounding quotes and whitespace
     p = p.trim().replace(/^['"]|['"]$/g, '');
 

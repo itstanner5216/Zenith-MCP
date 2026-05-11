@@ -1,14 +1,17 @@
 import path from 'path';
-import { normalizePath } from './path-utils.js';
+import { normalizePath as _normalizePath, expandHome as _expandHome } from './path-utils.js';
+
+// Re-export for backward compatibility with tests
+export { normalizePath, expandHome } from './path-utils.js';
 
 /**
  * Check if a path is within allowed directories
  */
 export function isPathWithinAllowedDirectories(filePath: string, allowedDirectories: string[]): boolean {
-    const normalized = normalizePath(filePath);
+    const normalized = _normalizePath(filePath);
     const resolved = path.resolve(normalized);
     return allowedDirectories.some(dir => {
-        const normalizedDir = path.resolve(normalizePath(dir));
+        const normalizedDir = path.resolve(_normalizePath(dir));
         return resolved === normalizedDir || resolved.startsWith(normalizedDir + '/');
     });
 }
