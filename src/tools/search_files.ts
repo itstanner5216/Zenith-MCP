@@ -235,12 +235,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const qBaseParams: unknown[] = scopePrefix
                 ? [args.structuralQuery, 'def', `${scopePrefix}%`]
                 : [args.structuralQuery, 'def'];
-            const qRows = db.prepare<SymbolDbRow>(qBaseQuery).all(...qBaseParams);
+            const qRows = db.prepare<unknown[], SymbolDbRow>(qBaseQuery).all(...qBaseParams);
             if (qRows.length === 0) {
                 return { content: [{ type: 'text' as const, text: `Symbol "${args.structuralQuery}" not found in index.` }] };
             }
             if (qRows.length > 1) {
-                const candidates = qRows.map((r, i) => `${String.fromCharCode(97 + i)}) ${r.file_path}:${r.line}`);
+                const candidates = qRows.map((r: SymbolDbRow, i: number) => `${String.fromCharCode(97 + i)}) ${r.file_path}:${r.line}`);
                 return { content: [{ type: 'text' as const, text: `Multiple definitions for "${args.structuralQuery}":\n${candidates.join('\n')}\nNarrow with path.` }] };
             }
             const qRow = qRows[0];
@@ -279,7 +279,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 candQuery = `SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def' ORDER BY name`;
                 candParams = [];
             }
-            const candidates = db.prepare<SymbolDbRow>(candQuery).all(...candParams);
+            const candidates = db.prepare<unknown[], SymbolDbRow>(candQuery).all(...candParams);
             const userMax = Math.min(50, args.maxResults ?? 20);
             const matches: Array<{ name: string; filePath: string; line: number; score: number }> = [];
             const fileCache = new Map<string, string | null>();

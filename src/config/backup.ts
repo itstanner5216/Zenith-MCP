@@ -29,10 +29,10 @@ interface BackupRow {
 // Lazy SQLite initialisation — reuses the shared global-stash.db
 // ---------------------------------------------------------------------------
 
-let _db: Database | null = null;
+let _db: Database.Database | null = null;
 let _tableReady = false;
 
-function getDb(): Database {
+function getDb(): Database.Database {
     if (_db) return _db;
     mkdirSync(ZENITH_HOME, { recursive: true });
     _db = new Database(GLOBAL_DB_PATH);
@@ -129,7 +129,7 @@ export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string
     ensureTable();
     const db = getDb();
     const row = db
-        .prepare<BackupRow>('SELECT * FROM config_backups WHERE id = ?')
+        .prepare<unknown[], BackupRow>('SELECT * FROM config_backups WHERE id = ?')
         .get(Number(backupId));
 
     if (!row) {

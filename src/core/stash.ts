@@ -36,7 +36,7 @@ export function stashEntry(ctx: FsContext, type: string, filePath: string, paylo
 
 export function getStashEntry(ctx: FsContext, id: number, filePath?: string) {
     const { db } = getDb(ctx, filePath);
-    const row = db.prepare<StashRow>('SELECT * FROM stash WHERE id = ?').get(id);
+    const row = db.prepare<unknown[], StashRow>('SELECT * FROM stash WHERE id = ?').get(id);
     if (!row) return null;
     return {
         id: row.id,
@@ -50,7 +50,7 @@ export function getStashEntry(ctx: FsContext, id: number, filePath?: string) {
 
 export function consumeAttempt(ctx: FsContext, id: number, filePath: string) {
     const { db } = getDb(ctx, filePath);
-    const row = db.prepare<AttemptsRow>('SELECT attempts FROM stash WHERE id = ?').get(id);
+    const row = db.prepare<unknown[], AttemptsRow>('SELECT attempts FROM stash WHERE id = ?').get(id);
     if (!row) return false;
     const next = row.attempts + 1;
     db.prepare('UPDATE stash SET attempts = ? WHERE id = ?').run(next, id);
@@ -68,7 +68,7 @@ export function clearStash(ctx: FsContext, id: number, filePath?: string) {
 
 export function listStash(ctx: FsContext, filePath?: string) {
     const { db, isGlobal } = getDb(ctx, filePath);
-    const rows = db.prepare<StashRow>('SELECT * FROM stash ORDER BY id').all().map((row) => ({
+    const rows = db.prepare<unknown[], StashRow>('SELECT * FROM stash ORDER BY id').all().map((row: StashRow) => ({
         id: row.id,
         type: row.type,
         filePath: row.file_path,
