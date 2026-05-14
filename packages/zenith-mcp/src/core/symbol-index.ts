@@ -75,10 +75,10 @@ export function findRepoRoot(filePath: string): string | null {
 // Database provisioning
 // ---------------------------------------------------------------------------
 
-const _dbCache = new Map<string, Database>();
+const _dbCache = new Map<string, Database.Database>();
 let _exitHandlerRegistered = false;
 
-export function getDb(repoRoot: string): Database {
+export function getDb(repoRoot: string): Database.Database {
     if (_dbCache.has(repoRoot)) return _dbCache.get(repoRoot)!;
 
     const mcpDir = path.join(repoRoot, '.mcp'); // nosemgrep
@@ -170,7 +170,7 @@ export function getSessionId(clientSessionId?: string): string {
     return `${process.pid}:${process.cwd()}`;
 }
 
-export function pruneOldSessions(db: Database, currentSessionId: string): void {
+export function pruneOldSessions(db: Database.Database, currentSessionId: string): void {
     db.prepare('DELETE FROM versions WHERE session_id != ?').run(currentSessionId);
 }
 
@@ -196,7 +196,7 @@ interface SymbolLike {
     column: number;
 }
 
-export async function indexFile(db: Database, repoRoot: string, absFilePath: string): Promise<void> {
+export async function indexFile(db: Database.Database, repoRoot: string, absFilePath: string): Promise<void> {
     const relPath = path.relative(repoRoot, absFilePath);
 
     let source: string;
@@ -207,7 +207,7 @@ export async function indexFile(db: Database, repoRoot: string, absFilePath: str
     }
 
     const hash = hashFileContent(source);
-    const existing = db.prepare<FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
+    const existing = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
     if (existing && existing.hash === hash) return;
 
     const langName = getLangForFile(absFilePath);
@@ -268,7 +268,7 @@ interface IndexDirectoryOpts {
     maxFiles?: number;
 }
 
-export async function indexDirectory(db: Database, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
+export async function indexDirectory(db: Database.Database, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
     const maxFiles = opts.maxFiles || 5000;
     const filePaths: string[] = [];
 
@@ -297,14 +297,14 @@ export async function indexDirectory(db: Database, repoRoot: string, dirPath: st
     }
 }
 
-export async function ensureIndexFresh(db: Database, repoRoot: string, absFilePaths: string[]): Promise<number> {
+export async function ensureIndexFresh(db: Database.Database, repoRoot: string, absFilePaths: string[]): Promise<number> {
     let reindexed = 0;
     for (const absPath of absFilePaths) {
         const relPath = path.relative(repoRoot, absPath);
         let source: string;
         try { source = await fs.readFile(absPath, 'utf-8'); } catch { continue; } // nosemgrep
         const hash = hashFileContent(source);
-        const existing = db.prepare<FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
+        const existing = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
         if (!existing || existing.hash !== hash) {
             await indexFile(db, repoRoot, absPath);
             reindexed++;
@@ -340,11 +340,11 @@ interface ImpactSuccess {
     total: number;
 }
 
-export function impactQuery(db: Database, symbolName: string, opts: ImpactQueryOpts = {}): ImpactDisambiguate | ImpactSuccess {
+export function impactQuery(db: Database.Database, symbolName: string, opts: ImpactQueryOpts = {}): ImpactDisambiguate | ImpactSuccess {
     const { file, depth = 1, direction = 'forward' } = opts;
 
     // Disambiguation: check for multiple definitions
-    const defFiles = db.prepare<DefFileRow>(
+    const defFiles = db.prepare<unknown[], DefFileRow>(
         'SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = ?'
     ).all(symbolName, 'def');
 
@@ -388,7 +388,7 @@ export function impactQuery(db: Database, symbolName: string, opts: ImpactQueryO
                     `;
                     params = [name];
                 }
-                for (const row of db.prepare<ImpactForwardRow>(sql).all(...params)) {
+                for (const row of db.prepare<unknown[], ImpactForwardRow>(sql).all(...params)) {
                     out.push({ name: row.name, filePath: row.file_path, refCount: row.refCount });
                 }
             } else {
@@ -415,7 +415,7 @@ export function impactQuery(db: Database, symbolName: string, opts: ImpactQueryO
                     `;
                     params = [name];
                 }
-                for (const row of db.prepare<ImpactBackwardRow>(sql).all(...params)) {
+                for (const row of db.prepare<unknown[], ImpactBackwardRow>(sql).all(...params)) {
                     out.push({ name: row.name, callCount: row.callCount });
                 }
             }
@@ -446,14 +446,14 @@ export function impactQuery(db: Database, symbolName: string, opts: ImpactQueryO
 // Version management
 // ---------------------------------------------------------------------------
 
-export function snapshotSymbol(db: Database, symbolName: string, filePath: string | null, originalText: string, sessionId: string, line: number | null = null): void {
+export function snapshotSymbol(db: Database.Database, symbolName: string, filePath: string | null, originalText: string, sessionId: string, line: number | null = null): void {
     const textHash = createHash('md5').update(originalText || '').digest('hex');
     db.prepare(
         'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(symbolName, filePath, originalText, sessionId, Date.now(), line ?? null, textHash);
 }
 
-export function getVersionHistory(db: Database, symbolName: string, sessionId: string, filePath?: string): VersionHistoryRow[] {
+export function getVersionHistory(db: Database.Database, symbolName: string, sessionId: string, filePath?: string): VersionHistoryRow[] {
     const params: unknown[] = [symbolName, sessionId];
     let query = 'SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ?';
     if (filePath) {
@@ -461,16 +461,16 @@ export function getVersionHistory(db: Database, symbolName: string, sessionId: s
         params.push(filePath);
     }
     query += ' ORDER BY created_at DESC';
-    return db.prepare<VersionHistoryRow>(query).all(...params);
+    return db.prepare<unknown[], VersionHistoryRow>(query).all(...params);
 }
 
-export function getVersionText(db: Database, versionId: number): string | null {
-    const row = db.prepare<VersionTextRow>('SELECT original_text FROM versions WHERE id = ?').get(versionId);
+export function getVersionText(db: Database.Database, versionId: number): string | null {
+    const row = db.prepare<unknown[], VersionTextRow>('SELECT original_text FROM versions WHERE id = ?').get(versionId);
     return row ? row.original_text : null;
 }
 
-export function restoreVersion(db: Database, symbolName: string, versionId: number, sessionId: string, currentText?: string): string {
-    const row = db.prepare<VersionRestoreRow>('SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?').get(versionId);
+export function restoreVersion(db: Database.Database, symbolName: string, versionId: number, sessionId: string, currentText?: string): string {
+    const row = db.prepare<unknown[], VersionRestoreRow>('SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?').get(versionId);
     if (!row) throw new Error('Version not found.');
     if (row.symbol_name !== symbolName) {
         throw new Error(`Version ${versionId} belongs to "${row.symbol_name}", not "${symbolName}".`);

@@ -1,0 +1,60 @@
+{
+  "name": "zenith-mcp",
+  "version": "2026.1.14",
+  "description": "Zenith-MCP filesystem server",
+  "license": "MIT",
+  "mcpName": "com.itstanner5216/zenith-mcp",
+  "author": "Tanner",
+  "homepage": "https://github.com/itstanner5216/Zenith-MCP",
+  "bugs": "https://github.com/itstanner5216/Zenith-MCP/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/itstanner5216/Zenith-MCP.git"
+  },
+  "type": "module",
+  "bin": {
+    "zenith-mcp": "dist/cli/stdio.js",
+    "zenith-mcp-http": "dist/server/http.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
+    "watch": "tsc --watch",
+    "test": "vitest run --coverage",
+    "start": "node dist/cli/stdio.js",
+    "start:http": "node dist/server/http.js"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@repomix/tree-sitter-wasms": "^0.1.17",
+    "better-sqlite3": "^11.0.0",
+    "diff": "^5.1.0",
+    "express": "^5.2.1",
+    "glob": "^10.5.0",
+    "js-yaml": "^4.1.0",
+    "json-schema-typed": "^8.0.2",
+    "json5": "^2.2.3",
+    "minimatch": "^10.0.1",
+    "tree-sitter-kotlin": "^0.3.8",
+    "web-tree-sitter": "^0.26.8",
+    "zenith-toon": "workspace:*",
+    "zod": "^4.3.6",
+    "zod-to-json-schema": "^3.23.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff": "^5.0.9",
+    "@types/express": "^5.0.6",
+    "@types/js-yaml": "^4.0.9",
+    "@types/minimatch": "^5.1.2",
+    "@types/node": "^22.19.17",
+    "@vitest/coverage-v8": "^4.1.5",
+    "shx": "^0.3.4",
+    "tree-sitter-cli": "^0.26.8",
+    "typescript": "^5.8.2",
+    "vitest": "^4.1.5"
+  }
+}

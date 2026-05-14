@@ -50,13 +50,14 @@ function mockAllDeps(customMocks = {}) {
         vi.doMock(modPath, () => ({ register: vi.fn() }));
     }
     vi.doMock(CONFIG_INDEX, () => ({
-        loadSettings: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined })),
+        loadConfig: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined, tools: {}, auto_write: { status: false } })),
+        syncToolsWithConfig: vi.fn((config, toolNames) => ({
+            config: { ...config, tools: Object.fromEntries(toolNames.map(n => [n, true])) },
+            changed: false,
+        })),
+        patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(RETRIEVAL_INDEX, () => ({
-        createRetrievalPipelineForZenith: vi.fn(() => ({ _type: 'mock-pipeline' })),
-        ZenithToolRegistry: vi.fn(function MockToolRegistry() { this._tools = []; }),
-    }));
     vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
@@ -78,13 +79,14 @@ async function getToolMocks(customMocks = {}) {
         vi.doMock(modPath, () => ({ register: fn }));
     }
     vi.doMock(CONFIG_INDEX, () => ({
-        loadSettings: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined })),
+        loadConfig: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined, tools: {}, auto_write: { status: false } })),
+        syncToolsWithConfig: vi.fn((config, toolNames) => ({
+            config: { ...config, tools: Object.fromEntries(toolNames.map(n => [n, true])) },
+            changed: false,
+        })),
+        patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(RETRIEVAL_INDEX, () => ({
-        createRetrievalPipelineForZenith: vi.fn(() => ({ _type: 'mock-pipeline' })),
-        ZenithToolRegistry: vi.fn(function MockToolRegistry() { this._tools = []; }),
-    }));
     vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
@@ -120,21 +122,6 @@ describe('createFilesystemServer', () => {
         }
     });
 
-    it('attaches retrieval pipeline to ctx', async () => {
-        const { mod } = await getToolMocks();
-        const ctx = makeMockCtx();
-        mod.createFilesystemServer(ctx);
-        expect(ctx._retrievalPipeline).toEqual({ _type: 'mock-pipeline' });
-    });
-
-    it('attaches tool registry to ctx', async () => {
-        const { mod } = await getToolMocks();
-        const ctx = makeMockCtx();
-        mod.createFilesystemServer(ctx);
-        expect(ctx._toolRegistry).toBeDefined();
-        expect(ctx._toolRegistry._tools).toEqual([]);
-    });
-
     it('calls configureRegistry when adapters are enabled', async () => {
         vi.resetModules();
         const configureRegistry = vi.fn();
@@ -142,16 +129,20 @@ describe('createFilesystemServer', () => {
             vi.doMock(modPath, () => ({ register: vi.fn() }));
         }
         vi.doMock(CONFIG_INDEX, () => ({
-            loadSettings: vi.fn(() => ({
+            loadConfig: vi.fn(() => ({
                 enabledAdapters: ['claude-desktop'],
                 backupDir: '/backup',
+                tools: {},
+                auto_write: { status: true, backup_dir: '/backup' },
             })),
+            syncToolsWithConfig: vi.fn((config, toolNames) => ({
+                config: { ...config, tools: Object.fromEntries(toolNames.map(n => [n, true])) },
+                changed: false,
+            })),
+            patchToolsInConfig: vi.fn(),
+            expandTilde: vi.fn((p) => p),
         }));
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
-        vi.doMock(RETRIEVAL_INDEX, () => ({
-            createRetrievalPipelineForZenith: vi.fn(() => ({})),
-            ZenithToolRegistry: vi.fn(function MockToolRegistry() { this._tools = []; }),
-        }));
         vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
         const mod = await import(SERVER_MOD);
         mod.createFilesystemServer(makeMockCtx());
@@ -165,13 +156,14 @@ describe('createFilesystemServer', () => {
             vi.doMock(modPath, () => ({ register: vi.fn() }));
         }
         vi.doMock(CONFIG_INDEX, () => ({
-            loadSettings: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined })),
+            loadConfig: vi.fn(() => ({ enabledAdapters: [], backupDir: undefined, tools: {}, auto_write: { status: false } })),
+            syncToolsWithConfig: vi.fn((config, toolNames) => ({
+                config: { ...config, tools: Object.fromEntries(toolNames.map(n => [n, true])) },
+                changed: false,
+            })),
+            patchToolsInConfig: vi.fn(),
         }));
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
-        vi.doMock(RETRIEVAL_INDEX, () => ({
-            createRetrievalPipelineForZenith: vi.fn(() => ({})),
-            ZenithToolRegistry: vi.fn(function MockToolRegistry() { this._tools = []; }),
-        }));
         vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
         const mod = await import(SERVER_MOD);
         mod.createFilesystemServer(makeMockCtx());

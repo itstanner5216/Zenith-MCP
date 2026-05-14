@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { register } from '../dist/tools/stash_restore.js';
+import { resetProjectContext } from '../dist/core/project-context.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -41,6 +42,7 @@ describe('stash_restore — stash entry management (symbol versioning moved to r
     let ctx;
 
     beforeEach(() => {
+        resetProjectContext();
         dir = mkTmpDir();
         sessionId = `test-session-${Math.random().toString(36).slice(2)}`;
         ctx = mkCtx(dir, sessionId);
@@ -50,6 +52,7 @@ describe('stash_restore — stash entry management (symbol versioning moved to r
     });
 
     afterEach(() => {
+        resetProjectContext();
         fs.rmSync(dir, { recursive: true, force: true });
     });
 
@@ -57,7 +60,9 @@ describe('stash_restore — stash entry management (symbol versioning moved to r
     // list mode
     // ------------------------------------------------------------
     it('list: returns "Empty." when no stash entries exist', async () => {
-        const result = await handler({ mode: 'list' });
+        const dummyFile = path.join(dir, 'dummy.txt');
+        fs.writeFileSync(dummyFile, '');
+        const result = await handler({ mode: 'list', file: dummyFile });
         expect(textFromResult(result)).toMatch(/empty/i);
     });
 

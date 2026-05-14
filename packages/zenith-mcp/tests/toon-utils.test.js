@@ -15,13 +15,15 @@ import {
     BIGNUM_RE,
     B64_RE,
     NORMALIZERS,
-} from '../dist/toon/utils.js';
-
-import { fieldMatcherMatches, routeField } from '../dist/toon/router.js';
-import { BudgetAllocator } from '../dist/toon/budget.js';
-import { Deduplicator } from '../dist/toon/dedup.js';
-import { encodeOutput } from '../dist/toon/encoder.js';
-import { isToonArrayMeta, isToonTemplateMeta, dedupStatsTotal } from '../dist/toon/types.js';
+    fieldMatcherMatches,
+    routeField,
+    BudgetAllocator,
+    Deduplicator,
+    encodeOutput,
+    isToonArrayMeta,
+    isToonTemplateMeta,
+    dedupStatsTotal,
+} from 'zenith-toon';
 
 // ============================================================================
 // TOON Utilities (utils.ts)

@@ -33,9 +33,9 @@ export interface FsContext {
 // survive reconnects without requiring git.
 // ---------------------------------------------------------------------------
 
-let _globalDb: Database | null = null;
+let _globalDb: Database.Database | null = null;
 
-function getGlobalDb(): Database {
+function getGlobalDb(): Database.Database {
     if (_globalDb) return _globalDb;
     fs.mkdirSync(ZENITH_HOME, { recursive: true });
     _globalDb = new Database(GLOBAL_DB_PATH);
@@ -114,7 +114,7 @@ export class ProjectContext {
     /**
      * Get the stash DB for the current project context.
      */
-    getStashDb(filePath?: string): { db: Database; root: string | null; isGlobal: boolean } {
+    getStashDb(filePath?: string): { db: Database.Database; root: string | null; isGlobal: boolean } {
         const root = this.getRoot(filePath);
         if (root) {
             const db = getDb(root);
@@ -181,7 +181,7 @@ export class ProjectContext {
      */
     listRegisteredProjects(): ProjectRootRow[] {
         const db = getGlobalDb();
-        return db.prepare<ProjectRootRow>('SELECT * FROM project_roots ORDER BY created_at DESC').all();
+        return db.prepare<unknown[], ProjectRootRow>('SELECT * FROM project_roots ORDER BY created_at DESC').all();
     }
 
     // --- Private resolution ladder ---
@@ -192,7 +192,7 @@ export class ProjectContext {
     private _syncRegistry(): void {
         try {
             const db = getGlobalDb();
-            const rows = db.prepare<ProjectRootRow>('SELECT root_path, name FROM project_roots').all();
+            const rows = db.prepare<unknown[], ProjectRootRow>('SELECT root_path, name FROM project_roots').all();
             for (const row of rows) {
                 this._registry.register({
                     project_id: row.name || path.basename(row.root_path),
@@ -238,7 +238,7 @@ export class ProjectContext {
 // Stash table setup — reused by both project DBs and the global DB
 // ---------------------------------------------------------------------------
 
-function ensureStashTables(db: Database): void {
+function ensureStashTables(db: Database.Database): void {
     db.exec(`
         CREATE TABLE IF NOT EXISTS stash (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -271,4 +271,9 @@ export function onRootsChanged(): void {
     if (_instance) {
         _instance.refresh();
     }
+}
+
+/** Reset the singleton — for test isolation only. */
+export function resetProjectContext(): void {
+    _instance = null;
 }

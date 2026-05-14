@@ -6,6 +6,7 @@ import path from 'path';
 import os from 'os';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
+import { resetProjectContext } from '../dist/core/project-context.js';
 
 function makeServer() {
     let captured = null;
@@ -32,6 +33,7 @@ function makeCtx(repoRoot, sessionId) {
 let tmpRepo;
 
 beforeAll(async () => {
+    resetProjectContext();
     tmpRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'refactor-hp-'));
     await fs.mkdir(path.join(tmpRepo, '.git'));
     await fs.writeFile(path.join(tmpRepo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
@@ -49,6 +51,7 @@ function callerB() { return targetFn(2); }
 });
 
 afterAll(async () => {
+    resetProjectContext();
     try { await fs.rm(tmpRepo, { recursive: true, force: true }); } catch {}
 });
 

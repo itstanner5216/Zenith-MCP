@@ -283,11 +283,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.target) {
                 return { content: [{ type: 'text' as const, text: 'target required for query.' }] };
             }
-            const repoRoot = pc.getRoot(args.fileScope);
+            const resolvedScope = args.fileScope ? await ctx.validatePath(args.fileScope) : undefined;
+            const repoRoot = pc.getRoot(resolvedScope);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
-            const countRow = db.prepare<CountRow>('SELECT COUNT(*) AS n FROM files').get();
+            const countRow = db.prepare<unknown[], CountRow>('SELECT COUNT(*) AS n FROM files').get();
             const count = countRow?.n ?? 0;
             if (count === 0) {
                 await indexDirectory(db, repoRoot, repoRoot, { maxFiles: 5000 });
@@ -296,7 +297,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 // Fire-and-forget freshness refresh; don't block the query.
                 (async () => {
                     try {
-                        const rows = db.prepare<FilePathRecordRow>('SELECT path FROM files').all();
+                        const rows = db.prepare<unknown[], FilePathRecordRow>('SELECT path FROM files').all();
                         const abs = rows.map((r: FilePathRecordRow) => path.join(repoRoot, r.path));
                         await ensureIndexFresh(db, repoRoot, abs);
                     }
@@ -374,7 +375,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             continue;
                         if (!r.filePath) {
                             // Reverse query result — resolve definition file from index.
-                            const defRows = db.prepare<FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(r.name);
+                            const defRows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(r.name);
                             for (const row of defRows) {
                                 workList.push({ symbol: r.name, filePath: row.file_path });
                             }
@@ -389,7 +390,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         }
                         if (!filePath) {
                             // No file specified — resolve from index, same as reapply.
-                            const defRows = db.prepare<FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(entry.symbol);
+                            const defRows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(entry.symbol);
                             for (const row of defRows) {
                                 workList.push({ symbol: entry.symbol, filePath: row.file_path });
                             }
@@ -918,7 +919,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     candidateFiles = [file];
                 }
                 else {
-                    const rows = db.prepare<FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(symName);
+                    const rows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(symName);
                     if (!rows.length) {
                         skipped.push(symName);
                         continue;
@@ -1116,15 +1117,15 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.symbol) {
                 return { content: [{ type: 'text' as const, text: 'symbol required for history.' }] };
             }
-            const repoRoot = pc.getRoot(args.file);
+            const resolvedFile = args.file ? await ctx.validatePath(args.file) : undefined;
+            const repoRoot = pc.getRoot(resolvedFile);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             let relPath: string | undefined;
-            if (args.file) {
-                const absPath = await ctx.validatePath(args.file);
-                relPath = path.relative(repoRoot, absPath);
+            if (resolvedFile) {
+                relPath = path.relative(repoRoot, resolvedFile);
             }
             const rows = getVersionHistory(db, args.symbol, sessionId, relPath);
             if (!rows.length) {
@@ -1180,7 +1181,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let fileChanged = false;
             try {
                 const curHash = createHash('md5').update(content).digest('hex');
-                const stored = db.prepare<FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
+                const stored = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
                 if (stored && stored.hash !== curHash)
                     fileChanged = true;
             }

@@ -4,7 +4,7 @@ vi.mock('../dist/core/tree-sitter.js', () => ({
     getCompressionStructure: vi.fn(),
     getLangForFile: vi.fn(),
 }));
-vi.mock('../dist/toon/string-codec.js', () => ({
+vi.mock('zenith-toon', () => ({
     compressSourceStructured: vi.fn(),
     compressString: vi.fn(),
 }));
@@ -17,7 +17,7 @@ import {
 import {
     compressSourceStructured,
     compressString,
-} from '../dist/toon/string-codec.js';
+} from 'zenith-toon';
 
 describe('compressToon', () => {
     beforeEach(() => {

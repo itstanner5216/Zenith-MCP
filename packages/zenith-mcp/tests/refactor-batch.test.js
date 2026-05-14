@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
+import { resetProjectContext } from '../dist/core/project-context.js';
 
 // -----------------------------------------------------------------------------
 // Test harness: fake MCP server captures the registered handler + schema.
@@ -44,6 +45,7 @@ let server;
 let ctx;
 
 beforeAll(async () => {
+    resetProjectContext();
     tmpRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'refactor-batch-'));
     // Init as a git repo so findRepoRoot resolves here
     await fs.mkdir(path.join(tmpRepo, '.git'));
@@ -91,6 +93,7 @@ function callerC() {
 });
 
 afterAll(async () => {
+    resetProjectContext();
     try { await fs.rm(tmpRepo, { recursive: true, force: true }); } catch {}
 });
 

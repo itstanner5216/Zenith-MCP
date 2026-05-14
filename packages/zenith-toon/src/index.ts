@@ -98,4 +98,9 @@ export {
   findKneedle,
   pearsonR,
   NORMALIZERS,
+  TIMESTAMP_RE,
+  UUID_RE,
+  IP_RE,
+  BIGNUM_RE,
+  B64_RE,
 } from './utils.js';

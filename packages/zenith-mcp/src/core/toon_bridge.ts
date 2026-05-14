@@ -3,8 +3,8 @@
 // No subprocess, no CLI — called directly by compression.ts.
 
 import { getCompressionStructure, getLangForFile } from './tree-sitter.js';
-import { compressSourceStructured, compressString } from '../toon/string-codec.js';
-import type { StructureBlock } from '../toon/types.js';
+import { compressSourceStructured, compressString } from 'zenith-toon';
+import type { StructureBlock } from 'zenith-toon';
 
 /**
  * Compress source text using tree-sitter structure + toon codec.
