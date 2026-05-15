@@ -1150,6 +1150,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             const resolvedFile = args.file ? await ctx.validatePath(args.file) : undefined;
             const allowedDirs = ctx.getAllowedDirectories();
+            if (resolvedFile === undefined && allowedDirs.length === 0)
+                throw new Error('No allowed directories configured.');
             const rootHint = resolvedFile !== undefined ? resolvedFile : allowedDirs[0];
             const repoRoot = pc.getRoot(rootHint);
             if (!repoRoot)
