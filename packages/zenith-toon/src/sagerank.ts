@@ -58,12 +58,13 @@ function _segmentSentences(text: string, minLength: number = 10): string[] {
   if (raw.length === 0) return [];
 
   // Merge very short fragments with previous sentence
-  const merged: string[] = [raw[0]];
+  const merged: string[] = [raw[0]!];
   for (let i = 1; i < raw.length; i++) {
-    if (merged[merged.length - 1].length < minLength) {
-      merged[merged.length - 1] += " " + raw[i];
+    const lastIdx = merged.length - 1;
+    if (merged[lastIdx]!.length < minLength) {
+      merged[lastIdx] = merged[lastIdx]! + " " + raw[i]!;
     } else {
-      merged.push(raw[i]);
+      merged.push(raw[i]!);
     }
   }
   return merged;
@@ -93,19 +94,19 @@ function makeSageResult(
 ): SageResult {
   const summary = [...selectedIndices]
     .sort((a, b) => a - b)
-    .map((i) => sentences[i])
+    .map((i) => sentences[i]!)
     .join(" ");
 
   const selectedSentences = [...selectedIndices]
     .sort((a, b) => a - b)
-    .map((i) => sentences[i]);
+    .map((i) => sentences[i]!);
 
   function top(k?: number | null): [number, string, number][] {
     const ranked = [...Array(scores.length).keys()].sort(
-      (a, b) => scores[b] - scores[a],
+      (a, b) => scores[b]! - scores[a]!,
     );
     const truncated = k != null ? ranked.slice(0, k) : ranked;
-    return truncated.map((i) => [i, sentences[i], scores[i]]);
+    return truncated.map((i) => [i, sentences[i]!, scores[i]!]);
   }
 
   return {
@@ -179,7 +180,7 @@ export class SageRank {
     let totalLength = 0;
 
     for (let idx = 0; idx < sentTokens.length; idx++) {
-      const tokens = sentTokens[idx];
+      const tokens = sentTokens[idx]!;
       const dl = tokens.length;
       docLengths.set(idx, dl);
       totalLength += dl;
@@ -363,9 +364,9 @@ export class SageRank {
 
       const nItems = weighted.length;
       for (let aPos = 0; aPos < nItems; aPos++) {
-        const [idxA, wA] = weighted[aPos];
+        const [idxA, wA] = weighted[aPos]!;
         for (let bPos = aPos + 1; bPos < nItems; bPos++) {
-          const [idxB, wB] = weighted[bPos];
+          const [idxB, wB] = weighted[bPos]!;
           // Canonical key ordering so (i,j) and (j,i) merge
           const key = idxA < idxB ? `${idxA},${idxB}` : `${idxB},${idxA}`;
           raw.set(key, (raw.get(key) ?? 0.0) + wA * wB);
@@ -544,7 +545,7 @@ export class SageRank {
       outTotal[i] = total;
       if (total > 0) {
         for (const [j, w] of neighbours.entries()) {
-          outEdges[i].push([j, w / total]);
+          outEdges[i]!.push([j, w / total]);
         }
       }
     }
@@ -561,20 +562,20 @@ export class SageRank {
       let dangling = 0.0;
       for (let i = 0; i < n; i++) {
         if (outTotal[i] === 0) {
-          dangling += pr[i];
+          dangling += pr[i]!;
         }
       }
 
       for (let i = 0; i < n; i++) {
-        prNew[i] = (1.0 - d) * p[i] + d * dangling * p[i];
+        prNew[i] = (1.0 - d) * p[i]! + d * dangling * p[i]!;
       }
 
       // Edge transitions
       for (let i = 0; i < n; i++) {
-        if (outEdges[i].length > 0) {
-          const mass = d * pr[i];
-          for (const [j, wNorm] of outEdges[i]) {
-            prNew[j] += mass * wNorm;
+        if (outEdges[i]!.length > 0) {
+          const mass = d * pr[i]!;
+          for (const [j, wNorm] of outEdges[i]!) {
+            prNew[j] = prNew[j]! + mass * wNorm;
           }
         }
       }
@@ -582,7 +583,7 @@ export class SageRank {
       // Convergence (L1)
       let diff = 0.0;
       for (let i = 0; i < n; i++) {
-        diff += Math.abs(prNew[i] - pr[i]);
+        diff += Math.abs(prNew[i]! - pr[i]!);
       }
       pr = prNew;
       if (diff < this._epsilon) {
@@ -592,7 +593,7 @@ export class SageRank {
 
     const result = new Map<number, number>();
     for (let i = 0; i < n; i++) {
-      result.set(i, pr[i]);
+      result.set(i, pr[i]!);
     }
     return [result, iterations];
   }
@@ -641,12 +642,12 @@ export class SageRank {
 
       for (const idx of remaining) {
         const pr = prScores.get(idx) ?? 0.0;
-        const totalW = sentTotals[idx];
+        const totalW = sentTotals[idx]!;
 
         let coverage: number;
         if (totalW > 0.0) {
           let novelW = 0.0;
-          for (const [t, w] of sentWeights[idx].entries()) {
+          for (const [t, w] of sentWeights[idx]!.entries()) {
             if (!covered.has(t)) {
               novelW += w;
             }
@@ -668,7 +669,7 @@ export class SageRank {
 
       selected.push(bestIdx);
       remaining.delete(bestIdx);
-      for (const t of sentWeights[bestIdx].keys()) {
+      for (const t of sentWeights[bestIdx]!.keys()) {
         covered.add(t);
       }
     }
@@ -773,7 +774,7 @@ export class SageRank {
     // 8. Personalization vector
     const personalization = new Map<number, number>();
     for (let i = 0; i < n; i++) {
-      let pVal = position[i];
+      let pVal = position[i]!;
       if (queryScores !== null && queryScores.size > 0) {
         pVal *= (queryScores.get(i) ?? 0.0) + 0.01;
       }
@@ -810,7 +811,7 @@ export class SageRank {
     // lead_bias: recompute position prior first element minus 1
     // Python: self._position_prior(centrality, n)[0] - 1.0 if n > 0 else 0.0
     const leadBias =
-      n > 0 ? SageRank._positionPrior(centrality, n)[0] - 1.0 : 0.0;
+      n > 0 ? SageRank._positionPrior(centrality, n)[0]! - 1.0 : 0.0;
 
     const stats: Record<string, number | boolean | string> = {
       sentences: n,
