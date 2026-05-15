@@ -238,13 +238,21 @@ app.post('/mcp', async (req, res) => {
         configurable: true,
         enumerable: true,
     });
-
-    // Wire up cleanup on transport close — session cleanup is attached to the
-    // underlying transport since that's where the close event fires.
-    transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid) removeSession(sid);
-    };
+    // Wire onclose through the adapter so the SDK's internal cleanup handler
+    // (installed by server.connect) fires alongside session cleanup.
+    // The setter wraps both: session removal runs first, then the SDK handler.
+    Object.defineProperty(mcpTransport, 'onclose', {
+        set(fn) {
+            transport.onclose = () => {
+                const sid = transport.sessionId;
+                if (sid) removeSession(sid);
+                fn?.();
+            };
+        },
+        get() { return transport.onclose ?? undefined; },
+        configurable: true,
+        enumerable: true,
+    });
 
     await server.connect(mcpTransport);
 
