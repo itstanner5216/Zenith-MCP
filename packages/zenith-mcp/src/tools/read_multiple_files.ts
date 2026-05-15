@@ -38,7 +38,9 @@ async function parallelMap<T, R>(items: T[], fn: (item: T, index: number) => Pro
         while (nextIndex < items.length) {
             const i = nextIndex++;
             const item = items[i];
-            if (item === undefined) continue;
+            if (item === undefined) {
+                throw new Error(`parallelMap invariant violated: items[${i}] is undefined`);
+            }
             results[i] = await fn(item, i);
         }
     }
