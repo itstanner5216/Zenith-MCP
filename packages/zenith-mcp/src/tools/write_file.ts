@@ -49,7 +49,6 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             }
         }
         let finalContent = normalizedContent;
-        let resumedLines = 0;
         if (args.append && existed) {
             try {
                 const existing = await fs.readFile(validPath, 'utf-8');
@@ -59,7 +58,6 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 const overlap = findResumeOffset(tailLines, incomingLines);
                 let appendContent;
                 if (overlap > 0) {
-                    resumedLines = overlap;
                     appendContent = incomingLines.slice(overlap).join('\n');
                 }
                 else {

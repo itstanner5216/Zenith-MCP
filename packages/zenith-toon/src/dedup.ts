@@ -114,10 +114,12 @@ export class Deduplicator {
         );
         const schema_h = blake2bHash(keys_str, 4);
         entry_meta.template_id = schema_h;
-        if (!this._schema_groups.has(schema_h)) {
-          this._schema_groups.set(schema_h, []);
+        let group_indices = this._schema_groups.get(schema_h);
+        if (group_indices === undefined) {
+          group_indices = [];
+          this._schema_groups.set(schema_h, group_indices);
         }
-        this._schema_groups.get(schema_h)!.push(unique.length);
+        group_indices.push(unique.length);
       } else if (typeof entry === 'string') {
         const content_h = blake2bHash(Deduplicator._normalize_string(entry));
         if (this._content_seen.has(content_h)) {
@@ -201,9 +203,19 @@ export class Deduplicator {
       if (indices.length < 3) {
         continue;
       }
-      const group: EntryMeta[] = indices
-        .filter((i) => i < entries.length)
-        .map((i) => entries[i]);
+      const group: EntryMeta[] = [];
+      for (const i of indices) {
+        if (i >= entries.length) {
+          continue;
+        }
+        const e = entries[i];
+        if (e === undefined) {
+          throw new Error(
+            `invariant: entries[${i}] missing for schema group index < entries.length`
+          );
+        }
+        group.push(e);
+      }
       if (group.length < 3) {
         continue;
       }
@@ -211,6 +223,11 @@ export class Deduplicator {
       if (template_key !== null) {
         const first = group[0];
         const last = group[group.length - 1];
+        if (first === undefined || last === undefined) {
+          throw new Error(
+            'invariant: template group has length >= 3 but first/last undefined'
+          );
+        }
         templates.set(template_key, {
           first_content: first.content,
           last_content: last.content,
@@ -230,16 +247,22 @@ export class Deduplicator {
      * Static fields (>80% same value) must comprise >30% of keys
      * for the group to qualify as a template.
      */
+    if (group.length === 0) {
+      return null;
+    }
+    const head = group[0];
+    if (head === undefined) {
+      throw new Error('invariant: group.length > 0 but group[0] undefined');
+    }
     if (
-      group.length === 0 ||
-      typeof group[0].content !== 'object' ||
-      group[0].content === null ||
-      Array.isArray(group[0].content)
+      typeof head.content !== 'object' ||
+      head.content === null ||
+      Array.isArray(head.content)
     ) {
       return null;
     }
     const keys = new Set<string>(
-      Object.keys(group[0].content as Record<string, unknown>)
+      Object.keys(head.content as Record<string, unknown>)
     );
     if (keys.size === 0) {
       return null;
@@ -264,7 +287,13 @@ export class Deduplicator {
       for (const v of values) {
         valueCounts.set(v, (valueCounts.get(v) ?? 0) + 1);
       }
-      let most_common = values[0];
+      const firstValue = values[0];
+      if (firstValue === undefined) {
+        throw new Error(
+          'invariant: values.length > 0 but values[0] undefined'
+        );
+      }
+      let most_common = firstValue;
       let most_common_count = 0;
       for (const [v, cnt] of valueCounts.entries()) {
         if (cnt > most_common_count) {
@@ -272,7 +301,13 @@ export class Deduplicator {
           most_common = v;
         }
       }
-      const frequency = valueCounts.get(most_common)! / values.length;
+      const most_common_count_lookup = valueCounts.get(most_common);
+      if (most_common_count_lookup === undefined) {
+        throw new Error(
+          `invariant: valueCounts missing entry for selected most_common '${most_common}'`
+        );
+      }
+      const frequency = most_common_count_lookup / values.length;
       if (frequency > 0.8) {
         static_values[key] = most_common;
       }
@@ -330,8 +365,8 @@ export class Deduplicator {
         continue;
       }
       // Annotate first entry of each template group
-      if (template_first_indices.has(e.index)) {
-        const info = template_first_indices.get(e.index)!;
+      const info = template_first_indices.get(e.index);
+      if (info !== undefined) {
         e.__toon_template = true;
         e.template_count = info.count;
         e.template_first = info.first_content;

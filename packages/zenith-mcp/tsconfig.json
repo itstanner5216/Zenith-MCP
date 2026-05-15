@@ -7,11 +7,22 @@
     "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
+    "composite": true,
     "declaration": true,
     "sourceMap": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
-    "types": ["node"]
+    "skipLibCheck": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "types": ["node", "emscripten"]
   },
-  "include": ["src/**/*"]
+  "references": [
+    { "path": "../zenith-toon" }
+  ],
+  "include": ["src/**/*"],
+  "exclude": [
+    "src/retrieval/**"
+  ]
 }

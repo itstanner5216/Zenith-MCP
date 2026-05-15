@@ -181,8 +181,8 @@ export function patchToolsInConfig(tools: Record<string, boolean>): void {
   let toolsStart = -1;
   let toolsEnd = lines.length;
 
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
+  for (const [i, line] of lines.entries()) {
+    const trimmed = line.trim();
 
     if (/^###\s+tools$/i.test(trimmed)) {
       toolsStart = i;
@@ -208,8 +208,7 @@ export function patchToolsInConfig(tools: Record<string, boolean>): void {
     const remaining = new Map(Object.entries(tools));
     const newBlock: string[] = ["### Tools"];
 
-    for (let i = toolsStart + 1; i < toolsEnd; i++) {
-      const line = lines[i];
+    for (const line of lines.slice(toolsStart + 1, toolsEnd)) {
       const trimmed = line.trim();
 
       // Preserve blank lines and comment-only lines

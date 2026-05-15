@@ -113,7 +113,6 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const validPath = await ctx.validatePath(entry.filePath);
                 const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
                 const edits = entry.payload.edits;
-                const failedIndices = entry.payload.failedIndices;
                 const corrections = args.corrections || [];
                 const disambiguations = new Map();
                 for (const c of corrections) {

@@ -584,7 +584,7 @@ export async function getCompressionStructure(source?: string, langName?: string
     try {
         function walk(node: Node, parent: Node | null = null): void {
             const rule = rules[node.type];
-            if (shouldCaptureAnchor(node, parent, rule)) {
+            if (rule !== undefined && shouldCaptureAnchor(node, parent, rule)) {
                 const startLine = node.startPosition.row;
                 const rawEndLine = node.endPosition.row;
                 const endLine = rawEndLine <= startLine + 1 ? rawEndLine : startLine;
@@ -823,11 +823,7 @@ export async function checkSyntaxErrors(source: string, langName: string): Promi
     if (!tree) return null;
 
     try {
-        // Compat shim for older web-tree-sitter where hasError was a method, not a getter
-        const rootHasError = typeof tree.rootNode.hasError === 'function'
-            ? (tree.rootNode.hasError as unknown as () => boolean)()
-            : tree.rootNode.hasError;
-        if (!rootHasError) {
+        if (!tree.rootNode.hasError) {
             return [];
         }
 
@@ -836,14 +832,7 @@ export async function checkSyntaxErrors(source: string, langName: string): Promi
 
         function walk(node: Node): void {
             if (errors.length >= MAX_ERRORS) return;
-            // Compat shim for older web-tree-sitter where isMissing was a method, not a getter.
-            // Symmetric to the hasError shim above. Required for runtime correctness on legacy
-            // versions where reading the property would yield a function reference (always truthy)
-            // rather than the actual missing-node boolean.
-            const nodeMissing: boolean = typeof node.isMissing === 'function'
-                ? (node.isMissing as unknown as () => boolean)()
-                : node.isMissing;
-            if (node.type === 'ERROR' || nodeMissing) {
+            if (node.type === 'ERROR' || node.isMissing) {
                 errors.push({
                     line: node.startPosition.row + 1,
                     column: node.startPosition.column,
@@ -1045,7 +1034,9 @@ export async function getSymbolStructure(source: string, langName: string, start
             }
             const idx = siblings.indexOf(foundNode);
             for (let i = idx - 1; i >= 0; i--) {
-                if (siblings[i].type === 'decorator') decorators.unshift(siblings[i].type);
+                const prev = siblings[i];
+                if (prev === undefined) break;
+                if (prev.type === 'decorator') decorators.unshift(prev.type);
                 else break;
             }
         }

@@ -90,14 +90,24 @@ export function findResumeOffset(existingTailLines: string[], incomingLines: str
     if (!existingTailLines.length || !incomingLines.length)
         return 0;
     const trim = (s: string) => s.trimEnd();
-    const firstIncoming = trim(incomingLines[0]);
+    const firstIncomingRaw = incomingLines[0];
+    if (firstIncomingRaw === undefined)
+        throw new Error('findResumeOffset: incomingLines[0] missing despite non-empty check');
+    const firstIncoming = trim(firstIncomingRaw);
     for (let i = 0; i < existingTailLines.length; i++) {
-        if (trim(existingTailLines[i]) !== firstIncoming)
+        const existingAtI = existingTailLines[i];
+        if (existingAtI === undefined)
+            throw new Error(`findResumeOffset: existingTailLines[${i}] out of range`);
+        if (trim(existingAtI) !== firstIncoming)
             continue;
         const overlapLen = Math.min(existingTailLines.length - i, incomingLines.length);
         let matched = true;
         for (let j = 0; j < overlapLen; j++) {
-            if (trim(existingTailLines[i + j]) !== trim(incomingLines[j])) {
+            const existingAtIJ = existingTailLines[i + j];
+            const incomingAtJ = incomingLines[j];
+            if (existingAtIJ === undefined || incomingAtJ === undefined)
+                throw new Error(`findResumeOffset: index out of range at i=${i}, j=${j}`);
+            if (trim(existingAtIJ) !== trim(incomingAtJ)) {
                 matched = false;
                 break;
             }
@@ -179,10 +189,15 @@ export async function applyFileEdits(filePath: string, edits: Array<{ oldText: s
             const potentialMatch = contentLines.slice(i, i + oldLines.length);
             const isMatch = oldLines.every((oldLine, j) => {
                 const contentLine = potentialMatch[j];
+                if (contentLine === undefined)
+                    throw new Error(`applyFileEdits: potentialMatch[${j}] missing for window at i=${i}`);
                 return oldLine.trim() === contentLine.trim();
             });
             if (isMatch) {
-                const originalIndent = contentLines[i].match(/^\s*/)?.[0] || '';
+                const firstContentLine = contentLines[i];
+                if (firstContentLine === undefined)
+                    throw new Error(`applyFileEdits: contentLines[${i}] missing despite matched window`);
+                const originalIndent = firstContentLine.match(/^\s*/)?.[0] || '';
                 const newLines = normalizedNew.split('\n').map((line, j) => {
                     if (j === 0) return originalIndent + line.trimStart();
                     const oldIndent = oldLines[j]?.match(/^\s*/)?.[0] || '';
@@ -255,7 +270,10 @@ export async function tailFile(filePath: string, numLines: number) {
             const chunkText = readData + remainingText;
             const chunkLines = normalizeLineEndings(chunkText).split('\n');
             if (position > 0) {
-                remainingText = chunkLines[0];
+                const firstChunkLine = chunkLines[0];
+                if (firstChunkLine === undefined)
+                    throw new Error('tailFile: split produced empty array unexpectedly');
+                remainingText = firstChunkLine;
                 chunkLines.shift();
             }
             for (let i = chunkLines.length - 1; i >= 0 && linesFound < numLines; i--) {

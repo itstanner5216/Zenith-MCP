@@ -19,16 +19,6 @@ const S = {
   bgRed:     "\x1b[41m",
 };
 
-/** Bold bright red text */
-function red(text: string): string {
-  return `${S.bold}${S.brightRed}${text}${S.reset}`;
-}
-
-/** Bold white text */
-function white(text: string): string {
-  return `${S.bold}${S.white}${text}${S.reset}`;
-}
-
 /** Dim gray text */
 function gray(text: string): string {
   return `${S.dim}${S.gray}${text}${S.reset}`;

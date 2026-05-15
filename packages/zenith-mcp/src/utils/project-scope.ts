@@ -171,7 +171,11 @@ function _resolveFromAllowedDirectories(
 
   // If exactly one allowed dir and the file is inside it, use it
   if (allowedDirectories.length === 1) {
-    const dir = path.resolve(allowedDirectories[0]);
+    const [onlyDir] = allowedDirectories;
+    if (onlyDir === undefined) {
+      throw new Error("Invariant: allowedDirectories.length === 1 but element [0] is undefined");
+    }
+    const dir = path.resolve(onlyDir);
     if (isWithinProject(absPath, dir)) {
       return dir;
     }
@@ -235,7 +239,8 @@ function _resolveFromMarkers(absPath: string): string | null {
   }
 
   // Git root present: return the deepest candidate (closest to file)
-  return candidates.length > 0 ? candidates[0] : null;
+  const [first] = candidates;
+  return first ?? null;
 }
 
 /**

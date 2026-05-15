@@ -14,3 +14,6 @@ src/**/*.d.ts
 # pnpm
 .turbo/
 pnpm-debug.log*
+
+# TypeScript project-reference build state
+*.tsbuildinfo

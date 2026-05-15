@@ -117,7 +117,8 @@ export class ProjectRegistry {
 
         // 3. Leading path-segment match on project_id or project_name
         if (query.includes('/') || query.includes(path.sep)) {
-            const firstSegment = query.split(/[\/]/)[0].trim().toLowerCase();
+            const firstSegmentRaw = query.split(/[\\/]/)[0];
+            const firstSegment = firstSegmentRaw?.trim().toLowerCase();
             if (firstSegment) {
                 match = this._byId.get(firstSegment);
                 if (match) return match;

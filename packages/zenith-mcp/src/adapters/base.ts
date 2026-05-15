@@ -1,6 +1,6 @@
 import { join, win32 } from "path";
-import { homedir, platform } from "os";
-import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { platform } from "os";
+import { copyFileSync, mkdirSync, existsSync } from "fs";
 
 export abstract class MCPConfigAdapter {
   abstract toolName: string;

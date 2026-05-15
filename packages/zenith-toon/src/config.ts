@@ -236,13 +236,14 @@ export function toonConfigPreset(
   name: string,
   presets: Record<string, ToonConfig>
 ): ToonConfig {
-  if (!(name in presets)) {
+  const preset = presets[name];
+  if (preset === undefined) {
     const available = Object.keys(presets).sort();
     throw new Error(
       `Unknown preset: ${JSON.stringify(name)}. Available: ${JSON.stringify(available)}`
     );
   }
-  return deepCopyConfig(presets[name]);
+  return deepCopyConfig(preset);
 }
 
 /**

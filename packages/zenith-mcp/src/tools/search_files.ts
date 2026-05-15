@@ -5,6 +5,7 @@ import { minimatch } from "minimatch";
 import { DEFAULT_EXCLUDES, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, CHAR_BUDGET, RANK_THRESHOLD } from '../core/shared.js';
 import { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
+import type { SymbolFilterOptions } from '../core/tree-sitter.js';
 import { findRepoRoot, getDb, indexDirectory } from '../core/symbol-index.js';
 import { ToolServer, ToolContext } from './types.js';
 import { loadConfig } from '../config/index.js';
@@ -136,9 +137,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             if (!langName)
                                 return null;
                             const source = await fs.readFile(filePath, 'utf-8');
-                            const defs = await getDefinitions(source, langName, {
-                                typeFilter: typeFilter,
-                            });
+                            const symOpts: SymbolFilterOptions = {};
+                            if (typeFilter !== undefined) symOpts.typeFilter = typeFilter;
+                            const defs = await getDefinitions(source, langName, symOpts);
                             if (!defs || defs.length === 0)
                                 return null;
                             const rel = path.relative(rootPath, filePath);
@@ -179,11 +180,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             const langName = getLangForFile(filePath);
                             if (!langName)
                                 return null;
-                            const source = await fs.readFile(filePath, 'utf-8'); 
-                            const defs = await getDefinitions(source, langName, {
-                                nameFilter: symbolQuery,
-                                typeFilter: typeFilter,
-                            });
+                            const source = await fs.readFile(filePath, 'utf-8');
+                            const symOpts: SymbolFilterOptions = {};
+                            if (symbolQuery !== undefined) symOpts.nameFilter = symbolQuery;
+                            if (typeFilter !== undefined) symOpts.typeFilter = typeFilter;
+                            const defs = await getDefinitions(source, langName, symOpts);
                             if (!defs || defs.length === 0)
                                 return null;
                             const rel = path.relative(rootPath, filePath);
@@ -244,7 +245,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: `Multiple definitions for "${args.structuralQuery}":\n${candidates.join('\n')}\nNarrow with path.` }] };
             }
             const qRow = qRows[0];
-            const qAbsPath = path.resolve(repoRoot, qRow.file_path); 
+            if (qRow === undefined) {
+                return { content: [{ type: 'text' as const, text: `Symbol "${args.structuralQuery}" not found in index.` }] };
+            }
+            const qAbsPath = path.resolve(repoRoot, qRow.file_path);
             const qLang = getLangForFile(qAbsPath);
             if (!qLang) {
                 return { content: [{ type: 'text' as const, text: 'Unsupported language.' }] };
@@ -334,8 +338,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let rawResults: string[] = [];
             if (hasRg) {
                 const extGlobs = args.extensions?.length ? args.extensions.map((e: string) => `*${e}`) : null;
-                const effectivePattern = (extGlobs?.length === 1 && !args.namePattern)
-                    ? extGlobs[0]
+                const singleExtGlob = (extGlobs?.length === 1 && !args.namePattern) ? extGlobs[0] : undefined;
+                const effectivePattern: string | null = singleExtGlob !== undefined
+                    ? singleExtGlob
                     : (args.namePattern || null);
                 const results = await ripgrepFindFiles(rootPath, {
                     namePattern: effectivePattern,
@@ -473,8 +478,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let rawResults: string[] = [];
             if (hasRg) {
                 const extGlobs = args.extensions?.length ? args.extensions.map((e: string) => `*${e}`) : null;
-                const effectivePattern = args.pattern
-                    || ((extGlobs?.length === 1 && !args.namePattern) ? extGlobs[0] : (args.namePattern || null));
+                const singleExtGlob = (extGlobs?.length === 1 && !args.namePattern) ? extGlobs[0] : undefined;
+                const fallbackPattern: string | null = singleExtGlob !== undefined
+                    ? singleExtGlob
+                    : (args.namePattern || null);
+                const effectivePattern: string | null = args.pattern || fallbackPattern;
                 const results = await ripgrepFindFiles(rootPath, {
                     namePattern: effectivePattern,
                     pathContains: args.pathContains || null,
@@ -644,13 +652,15 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (contentResults.length >= maxJsFallback)
                 return;
             try {
-                const content = await fs.readFile(filePath, 'utf-8'); 
+                const content = await fs.readFile(filePath, 'utf-8');
                 const lines = content.split('\n');
-                for (let i = 0; i < lines.length; i++) {
+                let lineNumber = 0;
+                for (const line of lines) {
+                    lineNumber++;
                     if (contentResults.length >= maxJsFallback)
                         break;
-                    if (contentRegex.test(lines[i])) { 
-                        contentResults.push(`${filePath}:${i + 1}: ${lines[i].trim().slice(0, 500)}`); 
+                    if (contentRegex.test(line)) {
+                        contentResults.push(`${filePath}:${lineNumber}: ${line.trim().slice(0, 500)}`);
                     }
                 }
             }

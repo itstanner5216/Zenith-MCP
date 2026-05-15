@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, extname, dirname } from "node:path";
+import { join, extname } from "node:path";
 import { configureRegistry, listAdapters } from "../adapters/registry.js";
 import { backupFile } from "./backup.js";
 import { expandTilde } from "./schema.js";
@@ -330,9 +330,10 @@ export function formatAutoWriteSummary(result: AutoWriteResult): string {
     return `All configurations updated as expected. Backups saved to the configured backup directory.`;
   }
 
-  if (result.errors.length > 0) {
-    const failedPathMatch = result.errors[0].match(/update (.+?)(?:\s+\(| and)/);
-    const failedPath = failedPathMatch ? failedPathMatch[1] : "unknown path";
+  const firstError = result.errors[0];
+  if (firstError !== undefined) {
+    const failedPathMatch = firstError.match(/update (.+?)(?:\s+\(| and)/);
+    const failedPath = failedPathMatch?.[1] ?? "unknown path";
 
     return `${result.written.length}/${total} MCP configurations updated. An error occurred when attempting to update ${failedPath} and will need manually configured. The configuration file remains unchanged.`;
   }

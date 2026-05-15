@@ -141,7 +141,13 @@ export function attachRootsHandlers(server: McpServer, ctx: FilesystemContext): 
     try {
       const response = await server.server.listRoots();
       if (response && 'roots' in response) {
-        await updateAllowedDirectoriesFromRoots(response.roots);
+        await updateAllowedDirectoriesFromRoots(
+          response.roots.map(r =>
+            r.name !== undefined
+              ? { uri: r.uri, name: r.name }
+              : { uri: r.uri }
+          )
+        );
       }
     } catch (error) {
       console.error("Failed to request roots from client:", error instanceof Error ? error.message : String(error));
@@ -154,7 +160,13 @@ export function attachRootsHandlers(server: McpServer, ctx: FilesystemContext): 
       try {
         const response = await server.server.listRoots();
         if (response && 'roots' in response) {
-          await updateAllowedDirectoriesFromRoots(response.roots);
+          await updateAllowedDirectoriesFromRoots(
+            response.roots.map(r =>
+              r.name !== undefined
+                ? { uri: r.uri, name: r.name }
+                : { uri: r.uri }
+            )
+          );
         } else {
           console.error("Client returned no roots set, keeping current settings");
         }

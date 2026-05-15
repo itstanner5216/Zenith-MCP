@@ -154,8 +154,7 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
   // priority_lines: [priority, index, line]
   const priorityLines: Array<[number, number, string]> = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     const stripped = line.trim();
     if (!stripped) continue;
 
@@ -343,8 +342,7 @@ function _compressLog(text: string, budget: number): string {
   // Normalize + hash for dedup
   const seenNormalized = new Map<string, number[]>();
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const [i, line] of lines.entries()) {
     const stripped = line.trim();
     if (!stripped) continue;
 
@@ -440,25 +438,35 @@ function _compressSourceCode(text: string, budget: number): string {
   const lines = text.split('\n');
   const n = lines.length;
 
-  // Find and cap module-level docstring
+  // Find and cap module-level docstring.
+  // Walk past leading blank lines by inspecting each entry safely.
   let i = 0;
-  while (i < n && !lines[i].trim()) i++;
+  while (i < n) {
+    const candidate = lines[i];
+    if (candidate === undefined || candidate.trim()) break;
+    i++;
+  }
 
   const modDocIndices: number[] = [];
   const MOD_DOC_CAP = 5;
   if (i < n) {
-    const s = lines[i].trim();
-    if (s.startsWith('"""') || s.startsWith("'''")) {
-      const marker = s.slice(0, 3);
-      modDocIndices.push(i);
-      // Python: not (s.count(marker) >= 2 and len(s) > 3) => multi-line
-      const countMarker = s.split(marker).length - 1;
-      if (!(countMarker >= 2 && s.length > 3)) {
-        let j = i + 1;
-        while (j < n) {
-          modDocIndices.push(j);
-          if (lines[j].trim().endsWith(marker) && j > i) break;
-          j++;
+    const docStart = lines[i];
+    if (docStart !== undefined) {
+      const s = docStart.trim();
+      if (s.startsWith('"""') || s.startsWith("'''")) {
+        const marker = s.slice(0, 3);
+        modDocIndices.push(i);
+        // Python: not (s.count(marker) >= 2 and len(s) > 3) => multi-line
+        const countMarker = s.split(marker).length - 1;
+        if (!(countMarker >= 2 && s.length > 3)) {
+          let j = i + 1;
+          while (j < n) {
+            const nextLine = lines[j];
+            if (nextLine === undefined) break;
+            modDocIndices.push(j);
+            if (nextLine.trim().endsWith(marker) && j > i) break;
+            j++;
+          }
         }
       }
     }
@@ -481,8 +489,7 @@ function _compressSourceCode(text: string, budget: number): string {
   let pendingDecorators: number[] = [];
   let currentGroup: AnchorGroup | null = null;
 
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx];
+  for (const [idx, line] of lines.entries()) {
     if (modDocSet.has(idx)) continue;
     const stripped = line.trim();
 
@@ -545,8 +552,10 @@ function _compressSourceCode(text: string, budget: number): string {
     for (const dl of g.decoratorLines) mandatory.add(dl);
     // First non-blank body line if it looks like a docstring
     for (const li of g.bodyLines) {
-      if (!lines[li].trim()) continue;
-      const s = lines[li].trim();
+      const bodyLine = lines[li];
+      if (bodyLine === undefined) continue;
+      if (!bodyLine.trim()) continue;
+      const s = bodyLine.trim();
       if (s.startsWith('"""') || s.startsWith("'''") || s.startsWith('//') || s.startsWith('/*') || s.startsWith('*')) {
         mandatory.add(li);
       }
@@ -554,7 +563,13 @@ function _compressSourceCode(text: string, budget: number): string {
     }
   }
 
-  const lc = (idx: number): number => lines[idx].length + 1;
+  const lc = (idx: number): number => {
+    const line = lines[idx];
+    if (line === undefined) {
+      throw new Error(`invariant: lc called with out-of-range index ${idx}`);
+    }
+    return line.length + 1;
+  };
 
   let mandatoryChars = 0;
   for (const mi of mandatory) mandatoryChars += lc(mi);
@@ -593,7 +608,11 @@ function _compressSourceCode(text: string, budget: number): string {
   const result: string[] = [];
 
   // Module docstring block
-  for (const idx of modDocKeep) result.push(lines[idx]);
+  for (const idx of modDocKeep) {
+    const line = lines[idx];
+    if (line === undefined) continue;
+    result.push(line);
+  }
   if (modDocOmitted > 0) {
     result.push(`# ... [${modDocOmitted} docstring lines omitted]`);
   }
@@ -603,9 +622,8 @@ function _compressSourceCode(text: string, budget: number): string {
   let omitCount = 0;
   let omitIndent = '    ';
 
-  for (let idx = 0; idx < lines.length; idx++) {
+  for (const [idx, line] of lines.entries()) {
     if (modDocSet.has(idx)) continue;
-    const line = lines[idx];
 
     if (!line.trim()) {
       pendingBlanks.push(line);
@@ -651,9 +669,11 @@ function _stripDocBlocksBeforeBlocks(
     const span: number[] = [];
     let hasDocTags = false;
 
-    while (scan >= 0 && topLevelSet.has(scan) && _isCommentOnlyLine(lines[scan])) {
+    while (scan >= 0 && topLevelSet.has(scan)) {
+      const scanLine = lines[scan];
+      if (scanLine === undefined || !_isCommentOnlyLine(scanLine)) break;
       span.push(scan);
-      if (_DOC_TAG_RE.test(lines[scan])) {
+      if (_DOC_TAG_RE.test(scanLine)) {
         hasDocTags = true;
       }
       scan--;
@@ -718,17 +738,33 @@ function _compressSourceStructured(
   let topLevelLines = Array.from({ length: n }, (_, i) => i).filter((i) => !allBlockLines.has(i));
   topLevelLines = _stripDocBlocksBeforeBlocks(lines, topLevelLines, workingStructure);
 
+  // Helper: safe access into the (presumed in-range) `lines` array. We control
+  // every index passed here — they come from Array.from({length: n}) filters
+  // and from working-structure ranges that were already clamped to [0, n-1] —
+  // so undefined is a true invariant violation.
+  const lineAt = (idx: number): string => {
+    const line = lines[idx];
+    if (line === undefined) {
+      throw new Error(`invariant: lines[${idx}] out of range (n=${n})`);
+    }
+    return line;
+  };
+
   // Fix 1: reclassify `if __name__ == '__main__':` block
-  const mainStart = topLevelLines.find((i) => lines[i].trim().startsWith('if __name__')) ?? null;
+  const mainStart = topLevelLines.find((i) => lineAt(i).trim().startsWith('if __name__')) ?? null;
   if (mainStart !== null) {
     const mainLines = topLevelLines.filter((i) => i >= mainStart);
     topLevelLines = topLevelLines.filter((i) => i < mainStart);
+    const mainEnd = mainLines[mainLines.length - 1];
+    if (mainEnd === undefined) {
+      throw new Error('invariant: mainLines is non-empty (mainStart was found in topLevelLines)');
+    }
     workingStructure.push({
       type: 'main_block',
       name: '__main__',
       kind: 'main_block',
       startLine: mainStart,
-      endLine: mainLines[mainLines.length - 1],
+      endLine: mainEnd,
       exported: false,
       anchors: [],
       priority: 10,
@@ -737,15 +773,15 @@ function _compressSourceStructured(
 
   // Fix 2: Hard budget cap on top-level lines (40% of budget max)
   const topLevelCap = Math.floor(budget * 40 / 100);
-  const topLevelCost = topLevelLines.reduce((sum, i) => sum + lines[i].length + 1, 0);
+  const topLevelCost = topLevelLines.reduce((sum, i) => sum + lineAt(i).length + 1, 0);
   if (topLevelCost > topLevelCap) {
-    const importSet = new Set(topLevelLines.filter((i) => _SOURCE_IMPORT_RE.test(lines[i])));
-    const importCost = [...importSet].reduce((sum, i) => sum + lines[i].length + 1, 0);
+    const importSet = new Set(topLevelLines.filter((i) => _SOURCE_IMPORT_RE.test(lineAt(i))));
+    const importCost = [...importSet].reduce((sum, i) => sum + lineAt(i).length + 1, 0);
     let rem = topLevelCap - importCost;
     const kept: number[] = [...importSet];
     for (const i of topLevelLines) {
       if (importSet.has(i)) continue;
-      const cost = lines[i].length + 1;
+      const cost = lineAt(i).length + 1;
       if (rem <= 0) break;
       kept.push(i);
       rem -= cost;
@@ -754,16 +790,16 @@ function _compressSourceStructured(
   }
 
   for (const i of topLevelLines) {
-    resultLines.set(i, lines[i]);
+    resultLines.set(i, lineAt(i));
   }
-  let used = topLevelLines.reduce((sum, i) => sum + lines[i].length + 1, 0);
+  let used = topLevelLines.reduce((sum, i) => sum + lineAt(i).length + 1, 0);
 
   // Fill blocks by priority, highest first
   const sortedBlocks = [...workingStructure].sort((a, b) => b.priority - a.priority);
 
-  const lineCost = (idx: number): number => lines[idx].length + 1;
+  const lineCost = (idx: number): number => lineAt(idx).length + 1;
 
-  const renderedSignature = (idx: number): string => lines[idx] + `  # L${idx + 1}`;
+  const renderedSignature = (idx: number): string => lineAt(idx) + `  # L${idx + 1}`;
 
   const renderedSignatureCost = (idx: number): number => renderedSignature(idx).length + 1;
 
@@ -786,7 +822,7 @@ function _compressSourceStructured(
     if (used + newSize <= budget) {
       // Full block fits — annotate signature with 1-based line number
       for (const i of newIndices) {
-        resultLines.set(i, lines[i]);
+        resultLines.set(i, lineAt(i));
       }
       resultLines.set(start, sigText);
       used += newSize;
@@ -812,7 +848,8 @@ function _compressSourceStructured(
         let prevIdx = start;
         for (const idx of sortedIndices) {
           if (idx > prevIdx + 1 && (idx - prevIdx - 1) >= _MIN_OMISSION_THRESHOLD) {
-            const indent = ' '.repeat(lines[idx].length - lines[idx].trimStart().length);
+            const lineForIndent = lineAt(idx);
+            const indent = ' '.repeat(lineForIndent.length - lineForIndent.trimStart().length);
             const gapMarker = `${indent}# ... [lines ${prevIdx + 2}-${idx} omitted]`;
             cost += gapMarker.length + 1;
           }
@@ -897,7 +934,7 @@ function _compressSourceStructured(
 
         resultLines.set(start, sigText);
         for (const idx of finalBody) {
-          resultLines.set(idx, lines[idx]);
+          resultLines.set(idx, lineAt(idx));
         }
         used += sigSize + bodyCost;
         continue;
@@ -920,9 +957,15 @@ function _compressSourceStructured(
   if (resultLines.size >= 2) {
     const tinyGapLines = new Set<number>();
     const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
-    let prev = sortedKeys[0];
+    // resultLines.size >= 2 guarantees sortedKeys has at least 2 entries.
+    const first = sortedKeys[0];
+    if (first === undefined) {
+      throw new Error('invariant: resultLines.size >= 2 yet sortedKeys is empty');
+    }
+    let prev = first;
     for (let ki = 1; ki < sortedKeys.length; ki++) {
       const ln = sortedKeys[ki];
+      if (ln === undefined) continue;
       const gap = ln - prev - 1;
       if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
         for (let g = prev + 1; g < ln; g++) tinyGapLines.add(g);
@@ -932,7 +975,7 @@ function _compressSourceStructured(
 
     for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
       if (!resultLines.has(idx) && used + lineCost(idx) <= budget) {
-        resultLines.set(idx, lines[idx]);
+        resultLines.set(idx, lineAt(idx));
         used += lineCost(idx);
       }
     }
@@ -947,7 +990,14 @@ function _compressSourceStructured(
     const lineText = resultLines.get(ln) ?? '';
     const lineSize = lineText.length + 1;
     if (prev >= 0 && ln > prev + 1) {
-      const prevContent = output.length > 0 ? output[output.length - 1] : '';
+      let prevContent = '';
+      if (output.length > 0) {
+        const last = output[output.length - 1];
+        if (last === undefined) {
+          throw new Error('invariant: output is non-empty but indexed access returned undefined');
+        }
+        prevContent = last;
+      }
       if (!prevContent.includes('# ...') && (ln - prev - 1) >= _MIN_OMISSION_THRESHOLD) {
         const indent = ' '.repeat(lineText.length - lineText.trimStart().length);
         const gapMarker = `${indent}# ... [lines ${prev + 2}-${ln} omitted]`;

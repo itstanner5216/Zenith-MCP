@@ -54,9 +54,10 @@ if (!API_KEY) {
 
 for (const arg of args) {
     if (arg.startsWith('--port=')) {
-        cliPort = parseInt(arg.split('=')[1], 10);
+        const portStr = arg.slice('--port='.length);
+        cliPort = parseInt(portStr, 10);
     } else if (arg.startsWith('--host=')) {
-        host = arg.split('=')[1];
+        host = arg.slice('--host='.length);
     } else if (!arg.startsWith('--')) {
         dirArgs.push(arg);
     }
@@ -199,7 +200,9 @@ app.post('/mcp', async (req, res) => {
         sessionIdGenerator: () => randomUUID(),
     });
 
-    // Wire up cleanup on transport close
+    // Session cleanup when the transport closes.
+    // SDK's connect() chains any pre-existing onclose handler, so this fires
+    // alongside the SDK's internal cleanup (_onclose) on disconnect.
     transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid) removeSession(sid);

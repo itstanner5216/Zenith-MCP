@@ -196,7 +196,10 @@ function findModal(items: (SymbolStructure | null | undefined)[]): SymbolStructu
     if (!buckets.length)
         return null;
     buckets.sort((a, b) => b.count - a.count);
-    return buckets[0].sample;
+    const [top] = buckets;
+    if (!top)
+        return null;
+    return top.sample;
 }
 function firstDiffReason(modal: SymbolStructure | null, s: SymbolStructure | null): string | null {
     if (!modal || !s)
@@ -233,9 +236,11 @@ function parsePayload(payload: string): ParsedPayloadGroup[] {
         const m = header.match(/^([A-Za-z_$][\w$.]*)\s+([\d,\s]+?)(?:\s+ack:([\d,\s]+))?$/);
         if (!m)
             continue;
-        const symbol = m[1];
-        const indices = m[2].split(',').map((s: string) => Number(s.trim())).filter(Number.isFinite);
-        const ack = m[3] ? m[3].split(',').map((s: string) => Number(s.trim())).filter(Number.isFinite) : [];
+        const [, symbol, rawIndices, rawAck] = m;
+        if (symbol === undefined || rawIndices === undefined)
+            continue;
+        const indices = rawIndices.split(',').map((s: string) => Number(s.trim())).filter(Number.isFinite);
+        const ack = rawAck ? rawAck.split(',').map((s: string) => Number(s.trim())).filter(Number.isFinite) : [];
         groups.push({ symbol, indices, ack, body });
     }
     return groups;
@@ -284,13 +289,19 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'target required for query.' }] };
             }
             const resolvedScope = args.fileScope ? await ctx.validatePath(args.fileScope) : undefined;
-            const repoRoot = pc.getRoot(resolvedScope);
+            const allowedDirs = ctx.getAllowedDirectories();
+            if (resolvedScope === undefined && allowedDirs.length === 0)
+                throw new Error("No allowed directories configured.");
+            const rootHint = resolvedScope !== undefined ? resolvedScope : allowedDirs[0];
+            const repoRoot = pc.getRoot(rootHint);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
             const countRow = db.prepare<unknown[], CountRow>('SELECT COUNT(*) AS n FROM files').get();
             const count = countRow?.n ?? 0;
-            if (count === 0) {
+            if (count === 0 || !args.fileScope) {
+                // No fileScope means a broad query — make sure new files since the
+                // last index are discovered, not just refreshed.
                 await indexDirectory(db, repoRoot, repoRoot, { maxFiles: 5000 });
             }
             else {
@@ -310,7 +321,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 relScope = path.relative(repoRoot, absScope);
             }
             const result = impactQuery(db, args.target, {
-                file: relScope,
+                file: relScope ?? null,
                 depth: args.depth,
                 direction: args.direction,
             });
@@ -346,7 +357,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.selection?.length && !args.loadMore) {
                 return { content: [{ type: 'text' as const, text: 'selection required for loadDiff (or use loadMore=true to continue).' }] };
             }
-            const repoRoot = pc.getRoot();
+            const allowedDirs = ctx.getAllowedDirectories();
+            if (allowedDirs.length === 0) {
+                throw new Error("No allowed directories configured.");
+            }
+            const repoRoot = pc.getRoot(allowedDirs[0]);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -414,8 +429,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 workIndex: number;
             }
             const occurrences: RawOccurrence[] = []; // { symbol, relFile, absPath, source, sourceLines, line, endLine }
-            for (let i = 0; i < workList.length; i++) {
-                const { symbol, filePath } = workList[i];
+            for (const [i, workItem] of workList.entries()) {
+                const { symbol, filePath } = workItem;
                 if (!filePath)
                     continue;
                 const absPath = path.join(repoRoot, filePath);
@@ -484,7 +499,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (!modal)
                     continue;
                 modalBySymbol.set(symName, modal);
-                for (let i = 0; i < group.length; i++) {
+                for (const [i, occInGroup] of group.entries()) {
                     const s = structs[i];
                     if (!s)
                         continue;
@@ -492,7 +507,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         continue;
                     const reason = firstDiffReason(modal, s);
                     if (reason)
-                        flagByOccurrence.set(group[i], reason);
+                        flagByOccurrence.set(occInGroup, reason);
                 }
             }
             // -----------------------------------------------------------------
@@ -503,8 +518,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let totalChars = 0;
             let cutAt = occurrences.length;
             const startIndex = args.loadMore ? (cached?.occurrences?.length || 0) : 0;
-            for (let i = 0; i < occurrences.length; i++) {
-                const occ = occurrences[i];
+            for (const [i, occ] of occurrences.entries()) {
                 const ctxAboveStart = Math.max(0, occ.line - 1 - contextLines);
                 const bodyStart = occ.line - 1;
                 const bodyEnd = occ.endLine;
@@ -531,9 +545,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Remaining entries (not yet loaded) — carry forward unique workIndices after cutAt.
             const loadedWorkIndices = new Set(occurrences.slice(0, cutAt).map(o => o.workIndex));
             const remaining: WorkItem[] = [];
-            for (let i = 0; i < workList.length; i++) {
+            for (const [i, workItem] of workList.entries()) {
                 if (!loadedWorkIndices.has(i))
-                    remaining.push(workList[i]);
+                    remaining.push(workItem);
             }
             const emittedOccurrences: LoadedOccurrence[] = occurrences.slice(0, cutAt).map((o, i) => ({
                 index: startIndex + i + 1,
@@ -574,7 +588,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.payload) {
                 return { content: [{ type: 'text' as const, text: 'payload required for apply.' }] };
             }
-            const repoRoot = pc.getRoot();
+            const allowedDirs = ctx.getAllowedDirectories();
+            if (allowedDirs.length === 0) {
+                throw new Error('No allowed directories configured.');
+            }
+            const repoRoot = pc.getRoot(allowedDirs[0]);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -639,7 +657,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 try {
                     const errs = await checkSyntaxErrors(g.body, langName);
                     if (errs && errs.length) {
-                        return { content: [{ type: 'text' as const, text: `Syntax error in ${g.symbol}: line ${errs[0].line}:${errs[0].column}` }] };
+                        const [firstErr] = errs;
+                        if (firstErr) {
+                            return { content: [{ type: 'text' as const, text: `Syntax error in ${g.symbol}: line ${firstErr.line}:${firstErr.column}` }] };
+                        }
                     }
                 }
                 catch { /* best-effort */ }
@@ -709,9 +730,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const failedEditIdx = new Set(result.errors.map(e => e.i));
                     const failedSymbolsInFile = new Set<string>();
                     const firstErrMsgBySymbol = new Map<string, string>();
-                    for (let i = 0; i < bundle.occMeta.length; i++) {
+                    for (const [i, meta] of bundle.occMeta.entries()) {
                         if (failedEditIdx.has(i)) {
-                            const sym = bundle.occMeta[i].group.symbol;
+                            const sym = meta.group.symbol;
                             failedSymbolsInFile.add(sym);
                             if (!firstErrMsgBySymbol.has(sym)) {
                                 const errRec = result.errors.find(e => e.i === i);
@@ -881,7 +902,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.newTargets?.length) {
                 return { content: [{ type: 'text' as const, text: 'newTargets required for reapply.' }] };
             }
-            const repoRoot = pc.getRoot();
+            const allowedDirs = ctx.getAllowedDirectories();
+            if (allowedDirs.length === 0) {
+                throw new Error('No allowed directories configured.');
+            }
+            const repoRoot = pc.getRoot(allowedDirs[0]);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -1004,11 +1029,17 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             // Syntax gate on the cached body (language of first target).
             try {
-                const langName = getLangForFile(targets[0].absPath);
-                if (langName) {
-                    const errs = await checkSyntaxErrors(cachedPayload.body, langName);
-                    if (errs && errs.length) {
-                        return { content: [{ type: 'text' as const, text: `Syntax error in ${args.symbolGroup}: line ${errs[0].line}:${errs[0].column}` }] };
+                const [firstTarget] = targets;
+                if (firstTarget) {
+                    const langName = getLangForFile(firstTarget.absPath);
+                    if (langName) {
+                        const errs = await checkSyntaxErrors(cachedPayload.body, langName);
+                        if (errs && errs.length) {
+                            const [firstErr] = errs;
+                            if (firstErr) {
+                                return { content: [{ type: 'text' as const, text: `Syntax error in ${args.symbolGroup}: line ${firstErr.line}:${firstErr.column}` }] };
+                            }
+                        }
                     }
                 }
             }
@@ -1118,7 +1149,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'symbol required for history.' }] };
             }
             const resolvedFile = args.file ? await ctx.validatePath(args.file) : undefined;
-            const repoRoot = pc.getRoot(resolvedFile);
+            const allowedDirs = ctx.getAllowedDirectories();
+            if (resolvedFile === undefined && allowedDirs.length === 0)
+                throw new Error('No allowed directories configured.');
+            const rootHint = resolvedFile !== undefined ? resolvedFile : allowedDirs[0];
+            const repoRoot = pc.getRoot(rootHint);
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
@@ -1197,7 +1232,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Disambiguate: multiple matches → try stored line, then fall back to
             // body-similarity (the version text itself is the best fingerprint if the
             // symbol moved lines but its body hasn't been edited again).
-            let sym = matches[0];
+            const [firstMatch] = matches;
+            if (firstMatch === undefined) {
+                return { content: [{ type: 'text' as const, text: `${args.symbol}: not found in ${relPath}.` }] };
+            }
+            let sym = firstMatch;
             if (matches.length > 1) {
                 // First try exact line match from snapshot.
                 if (versionEntry.line) {
@@ -1208,7 +1247,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
                 // If line didn't match (symbol moved), compare current body to
                 // the restored text — the closest match is likely the right target.
-                if (!versionEntry.line || sym === matches[0]) {
+                if (!versionEntry.line || sym === firstMatch) {
                     const contentLines = content.split('\n');
                     let bestOverlap = -1;
                     for (const m of matches) {

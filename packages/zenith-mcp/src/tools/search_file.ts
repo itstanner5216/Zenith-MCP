@@ -44,7 +44,8 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             let afterRemaining = 0;
             let lastEmittedLine = 0;
             function emit(lineNum: number, line: string, isMatch: boolean): void {
-                if (outputEntries.length > 0 && lineNum <= outputEntries[outputEntries.length - 1].num)
+                const lastEntry = outputEntries[outputEntries.length - 1];
+                if (lastEntry !== undefined && lineNum <= lastEntry.num)
                     return;
                 if (hasContext && lastEmittedLine > 0 && lineNum > lastEmittedLine + 1) {
                     const sep = '---';
@@ -106,17 +107,19 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             const source = await fs.readFile(validPath, 'utf-8');
             const allLines = source.split('\n');
             const totalLines = allLines.length;
-            const matches = await findSymbol(source, langName, args.symbol, {
-                kindFilter: 'def',
-                nearLine: args.nearLine,
-            });
+            const findOptions: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
+            if (args.nearLine !== undefined) findOptions.nearLine = args.nearLine;
+            const matches = await findSymbol(source, langName, args.symbol, findOptions);
             if (!matches || matches.length === 0) {
                 throw new Error('Symbol not found.');
             }
             if (matches.length > 1 && !args.nearLine) {
                 throw new Error('Multiple matches. Use nearLine.');
             }
-            const sym = matches[0];
+            const [sym] = matches;
+            if (sym === undefined) {
+                throw new Error('Symbol not found.');
+            }
             const expand = Math.max(0, Math.min(args.expandLines ?? 0, 50));
             const startLine = Math.max(1, sym.line - expand);
             const endLine = Math.min(totalLines, sym.endLine + expand);

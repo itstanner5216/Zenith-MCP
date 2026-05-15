@@ -63,11 +63,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
             windows.sort((a, b) => a.startLine - b.startLine);
             const merged: LineWindow[] = [];
             for (const w of windows) {
-                if (merged.length === 0 || w.startLine > merged[merged.length - 1].endLine + 1) {
+                const last = merged[merged.length - 1];
+                if (last === undefined || w.startLine > last.endLine + 1) {
                     merged.push({ ...w });
                 }
                 else {
-                    merged[merged.length - 1].endLine = Math.max(merged[merged.length - 1].endLine, w.endLine);
+                    last.endLine = Math.max(last.endLine, w.endLine);
                 }
             }
             const outputLines: string[] = [];
@@ -83,12 +84,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     totalLines++;
                     if (budgetExhausted)
                         return;
-                    while (windowIdx < merged.length && totalLines > merged[windowIdx].endLine) {
+                    let currentWindow = merged[windowIdx];
+                    while (currentWindow !== undefined && totalLines > currentWindow.endLine) {
                         windowIdx++;
+                        currentWindow = merged[windowIdx];
                     }
-                    if (windowIdx >= merged.length)
+                    if (currentWindow === undefined)
                         return;
-                    const currentWindow = merged[windowIdx];
                     if (totalLines < currentWindow.startLine)
                         return;
                     if (lastCollectedLine !== -1 && totalLines > lastCollectedLine + 1) {

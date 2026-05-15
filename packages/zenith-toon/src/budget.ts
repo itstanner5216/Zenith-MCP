@@ -75,9 +75,15 @@ export class BudgetAllocator {
 
     // Calculate preserve tier consumption
     let preserve_tokens = 0;
-    for (let i = 0; i < tiers.length; i++) {
-      if (tiers[i] === 'preserve') {
-        preserve_tokens += estimateTokensObj(entries[i].content);
+    for (const [i, tier] of tiers.entries()) {
+      if (tier === 'preserve') {
+        const entry = entries[i];
+        if (entry === undefined) {
+          throw new Error(
+            `invariant: entries[${i}] missing for tier index in preserve loop`
+          );
+        }
+        preserve_tokens += estimateTokensObj(entry.content);
       }
     }
 
@@ -88,9 +94,13 @@ export class BudgetAllocator {
       preserve: preserve_tokens,
     };
     for (const tier_name of Object.keys(BudgetAllocator.TIER_RATIOS)) {
-      tier_budgets[tier_name] = Math.trunc(
-        remaining * BudgetAllocator.TIER_RATIOS[tier_name]
-      );
+      const ratio = BudgetAllocator.TIER_RATIOS[tier_name];
+      if (ratio === undefined) {
+        throw new Error(
+          `invariant: TIER_RATIOS missing entry for tier '${tier_name}'`
+        );
+      }
+      tier_budgets[tier_name] = Math.trunc(remaining * ratio);
     }
     tier_budgets['cut'] = 0;
 
@@ -99,8 +109,8 @@ export class BudgetAllocator {
 
     for (const tier_name of ['preserve', 'high', 'medium', 'low', 'cut']) {
       const tier_indices: number[] = [];
-      for (let i = 0; i < tiers.length; i++) {
-        if (tiers[i] === tier_name) {
+      for (const [i, tier] of tiers.entries()) {
+        if (tier === tier_name) {
           tier_indices.push(i);
         }
       }
@@ -110,7 +120,13 @@ export class BudgetAllocator {
 
       if (tier_name === 'preserve') {
         for (const i of tier_indices) {
-          entry_budgets[i] = estimateTokensObj(entries[i].content);
+          const entry = entries[i];
+          if (entry === undefined) {
+            throw new Error(
+              `invariant: entries[${i}] missing for preserve tier index`
+            );
+          }
+          entry_budgets[i] = estimateTokensObj(entry.content);
         }
         continue;
       }
@@ -120,16 +136,32 @@ export class BudgetAllocator {
       }
 
       const tier_budget = tier_budgets[tier_name];
-      const tier_scores: number[] = tier_indices.map((i) =>
-        Math.max(scores[i], 1e-10)
-      );
+      if (tier_budget === undefined) {
+        throw new Error(
+          `invariant: no budget for tier '${tier_name}'`
+        );
+      }
+      const tier_scores: number[] = tier_indices.map((i) => {
+        const s = scores[i];
+        if (s === undefined) {
+          throw new Error(
+            `invariant: scores[${i}] missing for tier index in '${tier_name}'`
+          );
+        }
+        return Math.max(s, 1e-10);
+      });
       const score_sum = tier_scores.reduce((a, b) => a + b, 0);
 
-      for (let idx = 0; idx < tier_indices.length; idx++) {
-        const i = tier_indices[idx];
+      for (const [idx, i] of tier_indices.entries()) {
+        const tier_score = tier_scores[idx];
+        if (tier_score === undefined) {
+          throw new Error(
+            `invariant: tier_scores[${idx}] missing in tier '${tier_name}'`
+          );
+        }
         const share =
           score_sum > 0
-            ? tier_scores[idx] / score_sum
+            ? tier_score / score_sum
             : 1.0 / tier_indices.length;
         entry_budgets[i] = Math.max(10, Math.trunc(tier_budget * share));
       }

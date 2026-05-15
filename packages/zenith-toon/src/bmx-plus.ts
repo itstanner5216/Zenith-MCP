@@ -439,10 +439,10 @@ export class BMXPlusIndex {
     finalScores.sort((a, b_) => b_[1] - a[1]);
 
     if (this.normalizeScores && finalScores.length > 0) {
-      const maxScore = finalScores[0][1];
+      const maxScore = finalScores[0]![1];
       if (maxScore > 0.0) {
         for (let i = 0; i < finalScores.length; i++) {
-          finalScores[i] = [finalScores[i][0], finalScores[i][1] / maxScore];
+          finalScores[i] = [finalScores[i]![0], finalScores[i]![1] / maxScore];
         }
       }
     }

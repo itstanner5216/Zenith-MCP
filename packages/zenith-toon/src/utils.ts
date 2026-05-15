@@ -238,8 +238,8 @@ export function computeGini(values: number[]): number {
   }
   let cumulative = 0.0;
   let giniSum = 0.0;
-  for (let i = 0; i < n; i++) {
-    cumulative += sortedV[i];
+  for (const v of sortedV) {
+    cumulative += v;
     giniSum += cumulative;
   }
   return 1.0 - (2.0 * giniSum) / (n * total) + 1.0 / n;
@@ -268,13 +268,11 @@ export function findKneedle(scores: number[], sensitivity: number = 1.0): number
     return n - 1;
   }
 
-  // Normalize to [0,1]
-  let sMin = scores[0];
-  let sMax = scores[0];
-  for (let i = 1; i < n; i++) {
-    if (scores[i] < sMin) sMin = scores[i];
-    if (scores[i] > sMax) sMax = scores[i];
-  }
+  // Normalize to [0,1]. After the n < 3 guard above, scores has at least 3
+  // entries, so reduce() with no initializer is safe and returns number, not
+  // number | undefined.
+  const sMin = scores.reduce((a, b) => Math.min(a, b));
+  const sMax = scores.reduce((a, b) => Math.max(a, b));
   const sRange = sMax - sMin;
   if (sRange < 1e-10) {
     return n - 1; // flat distribution — no knee
@@ -282,23 +280,36 @@ export function findKneedle(scores: number[], sensitivity: number = 1.0): number
 
   const xNorm: number[] = [];
   const yNorm: number[] = [];
-  for (let i = 0; i < n; i++) {
+  for (const [i, score] of scores.entries()) {
     xNorm.push(i / (n - 1));
-    yNorm.push((scores[i] - sMin) / sRange);
+    yNorm.push((score - sMin) / sRange);
   }
 
-  // Difference from diagonal y = 1 - x
+  // Difference from diagonal y = 1 - x. yNorm and xNorm both have length n
+  // (built from scores above), so destructuring via entries() yields defined
+  // values throughout.
   const diff: number[] = [];
-  for (let i = 0; i < n; i++) {
-    diff.push(yNorm[i] - (1.0 - xNorm[i]));
+  for (const [i, yi] of yNorm.entries()) {
+    const xi = xNorm[i];
+    if (xi === undefined) {
+      throw new Error('invariant: xNorm and yNorm have identical length');
+    }
+    diff.push(yi - (1.0 - xi));
   }
 
-  // Find global maximum of difference curve (Python iterates range(1, n-1))
+  // Find global maximum of difference curve (Python iterates range(1, n-1)).
+  // n >= 3 guarantees diff[0] exists.
+  const diff0 = diff[0];
+  if (diff0 === undefined) {
+    throw new Error('invariant: diff has at least 3 entries when n >= 3');
+  }
   let bestIdx = 0;
-  let bestVal = diff[0];
+  let bestVal = diff0;
   for (let i = 1; i < n - 1; i++) {
-    if (diff[i] > bestVal) {
-      bestVal = diff[i];
+    const di = diff[i];
+    if (di === undefined) continue;
+    if (di > bestVal) {
+      bestVal = di;
       bestIdx = i;
     }
   }
@@ -306,7 +317,9 @@ export function findKneedle(scores: number[], sensitivity: number = 1.0): number
   // Walk forward: first point where diff drops below threshold
   const threshold = bestVal - sensitivity * sRange / n;
   for (let i = bestIdx + 1; i < n; i++) {
-    if (diff[i] < threshold) {
+    const di = diff[i];
+    if (di === undefined) continue;
+    if (di < threshold) {
       return i;
     }
   }
@@ -332,8 +345,13 @@ export function pearsonR(x: number[], y: number[]): number {
   let sumX = 0;
   let sumY = 0;
   for (let i = 0; i < n; i++) {
-    sumX += x[i];
-    sumY += y[i];
+    const xi = x[i];
+    const yi = y[i];
+    if (xi === undefined || yi === undefined) {
+      throw new Error('invariant: x and y must have identical length');
+    }
+    sumX += xi;
+    sumY += yi;
   }
   const mx = sumX / n;
   const my = sumY / n;
@@ -342,8 +360,13 @@ export function pearsonR(x: number[], y: number[]): number {
   let varX = 0.0;
   let varY = 0.0;
   for (let i = 0; i < n; i++) {
-    const dx = x[i] - mx;
-    const dy = y[i] - my;
+    const xi = x[i];
+    const yi = y[i];
+    if (xi === undefined || yi === undefined) {
+      throw new Error('invariant: x and y must have identical length');
+    }
+    const dx = xi - mx;
+    const dy = yi - my;
     cov += dx * dy;
     varX += dx * dx;
     varY += dy * dy;

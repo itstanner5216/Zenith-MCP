@@ -171,6 +171,7 @@ export function bm25RankResults(lines: string[], query: string, charBudget = CHA
     let charCount = 0;
     for (const { id } of ranked) {
         const line = lines[Number(id)];
+        if (line === undefined) continue;
         if (charCount + line.length + 1 > charBudget) break;
         result.push(line);
         charCount += line.length + 1;

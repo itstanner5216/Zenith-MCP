@@ -197,7 +197,11 @@ export class TOONCompressor {
     if (result.entries.length === 0) {
       return null;
     }
-    const content = result.entries[0].content;
+    const first = result.entries[0];
+    if (first === undefined) {
+      throw new Error('invariant: deduplicate returned empty entries after length check in feed');
+    }
+    const content = first.content;
     return _compressEntry(content, null, this.config);
   }
 
@@ -336,7 +340,16 @@ function _scoreEntries(
     // Mulberry32 seeded from the first 8 hex chars of MD5 as a 32-bit uint.
     // Same input → same output (deterministic); exact float values differ
     // from Python's Mersenne Twister. Statistical equivalence is preserved.
-    const seed_text = texts.length > 0 ? texts[0].slice(0, 100) : '';
+    let seed_text: string;
+    if (texts.length > 0) {
+      const first_text = texts[0];
+      if (first_text === undefined) {
+        throw new Error('invariant: texts[0] undefined after length check');
+      }
+      seed_text = first_text.slice(0, 100);
+    } else {
+      seed_text = '';
+    }
     const rng = seededPRNG(seed_text);
     const sample_size = Math.min(500, n);
 
@@ -344,21 +357,40 @@ function _scoreEntries(
     const pool = Array.from({ length: n }, (_, i) => i);
     for (let i = 0; i < sample_size; i++) {
       const j = i + Math.floor(rng() * (n - i));
-      const tmp = pool[i];
-      pool[i] = pool[j];
-      pool[j] = tmp;
+      const pool_i = pool[i];
+      const pool_j = pool[j];
+      if (pool_i === undefined || pool_j === undefined) {
+        throw new Error(
+          `invariant: pool[${i}] or pool[${j}] undefined in Fisher-Yates shuffle (n=${n})`,
+        );
+      }
+      pool[i] = pool_j;
+      pool[j] = pool_i;
     }
     const sample_indices = pool.slice(0, sample_size).sort((a, b) => a - b);
 
     // SageRank on sample → real graph centrality scores
     const sage = new SageRank();
-    const sage_result = sage.rankSentences(
-      sample_indices.map((i) => texts[i]),
-      sample_size,
-    );
+    const sample_texts: string[] = sample_indices.map((i) => {
+      const t = texts[i];
+      if (t === undefined) {
+        throw new Error(
+          `invariant: texts[${i}] undefined in sample_indices map (n=${n})`,
+        );
+      }
+      return t;
+    });
+    const sage_result = sage.rankSentences(sample_texts, sample_size);
     const sample_scores = new Map<number, number>();
     for (let i = 0; i < sample_size; i++) {
-      sample_scores.set(sample_indices[i], sage_result.scores[i]);
+      const idx = sample_indices[i];
+      const sscore = sage_result.scores[i];
+      if (idx === undefined || sscore === undefined) {
+        throw new Error(
+          `invariant: sample_indices[${i}] or sage_result.scores[${i}] undefined (sample_size=${sample_size})`,
+        );
+      }
+      sample_scores.set(idx, sscore);
     }
 
     // Core from sample: top centrality entries (sample_size // 5)
@@ -368,7 +400,15 @@ function _scoreEntries(
     const sample_core_size = Math.max(3, Math.floor(sample_size / 5));
     let core_query = sorted_sample
       .slice(0, sample_core_size)
-      .map(([idx]) => texts[idx].slice(0, 200))
+      .map(([idx]) => {
+        const t = texts[idx];
+        if (t === undefined) {
+          throw new Error(
+            `invariant: texts[${idx}] undefined in core_query map (n=${n})`,
+          );
+        }
+        return t.slice(0, 200);
+      })
       .join(' ');
     if (query !== null) {
       core_query = query + ' ' + core_query.slice(0, 500);
@@ -432,15 +472,32 @@ function _scoreEntries(
   // Radovanović et al. (JMLR 2010): hubs distort centrality.
   const sorted_ss = [...self_scores].sort((a, b) => a - b);
   const median_ss = sorted_ss[Math.floor(n / 2)];
+  if (median_ss === undefined) {
+    throw new Error(
+      `invariant: sorted_ss[${Math.floor(n / 2)}] undefined (n=${n})`,
+    );
+  }
   const abs_devs = self_scores
     .map((s) => Math.abs(s - median_ss))
     .sort((a, b) => a - b);
-  const mad = abs_devs[Math.floor(n / 2)] * 1.4826; // MAD to std conversion factor
+  const abs_dev_mid = abs_devs[Math.floor(n / 2)];
+  if (abs_dev_mid === undefined) {
+    throw new Error(
+      `invariant: abs_devs[${Math.floor(n / 2)}] undefined (n=${n})`,
+    );
+  }
+  const mad = abs_dev_mid * 1.4826; // MAD to std conversion factor
 
   const hubs: number[] = [];
   if (mad > 0) {
     for (let i = 0; i < n; i++) {
-      const z = (self_scores[i] - median_ss) / mad;
+      const ss_i = self_scores[i];
+      if (ss_i === undefined) {
+        throw new Error(
+          `invariant: self_scores[${i}] undefined in hubness loop (n=${n})`,
+        );
+      }
+      const z = (ss_i - median_ss) / mad;
       if (z > config.hubness_z_threshold) {
         self_scores[i] = median_ss + 2 * mad;
         hubs.push(i);
@@ -449,10 +506,25 @@ function _scoreEntries(
   }
 
   // Phase 3: Core identification via Kneedle
-  const sorted_indices = Array.from({ length: n }, (_, i) => i).sort(
-    (a, b) => self_scores[b] - self_scores[a],
-  );
-  const sorted_scores = sorted_indices.map((i) => self_scores[i]);
+  const sorted_indices = Array.from({ length: n }, (_, i) => i).sort((a, b) => {
+    const sa = self_scores[a];
+    const sb = self_scores[b];
+    if (sa === undefined || sb === undefined) {
+      throw new Error(
+        `invariant: self_scores[${a}] or self_scores[${b}] undefined in sort (n=${n})`,
+      );
+    }
+    return sb - sa;
+  });
+  const sorted_scores: number[] = sorted_indices.map((i) => {
+    const s = self_scores[i];
+    if (s === undefined) {
+      throw new Error(
+        `invariant: self_scores[${i}] undefined in sorted_scores map (n=${n})`,
+      );
+    }
+    return s;
+  });
 
   let core_size: number;
   if (config.core_fraction_method === 'kneedle') {
@@ -466,7 +538,17 @@ function _scoreEntries(
   const core_indices = sorted_indices.slice(0, core_size);
 
   // Phase 4: Relevance scoring against core
-  let core_text = core_indices.map((i) => texts[i].slice(0, 200)).join(' ');
+  let core_text = core_indices
+    .map((i) => {
+      const t = texts[i];
+      if (t === undefined) {
+        throw new Error(
+          `invariant: texts[${i}] undefined in core_text map (n=${n})`,
+        );
+      }
+      return t.slice(0, 200);
+    })
+    .join(' ');
   let combined_query: string;
   if (query !== null) {
     combined_query = query + ' ' + core_text.slice(0, 500);
@@ -489,26 +571,52 @@ function _scoreEntries(
   if (r > config.redundancy_r_threshold) {
     final_scores = [...self_scores];
   } else {
-    final_scores = self_scores.map((ss, i) => 0.4 * ss + 0.6 * relevance_scores[i]);
+    final_scores = self_scores.map((ss, i) => {
+      const rel_i = relevance_scores[i];
+      if (rel_i === undefined) {
+        throw new Error(
+          `invariant: relevance_scores[${i}] undefined in blend (n=${n})`,
+        );
+      }
+      return 0.4 * ss + 0.6 * rel_i;
+    });
   }
 
   // Normalize to [0,1]
   const max_fs = final_scores.length > 0 ? Math.max(...final_scores) : 1.0;
   if (max_fs > 0) {
     for (let i = 0; i < final_scores.length; i++) {
-      final_scores[i] = final_scores[i] / max_fs;
+      const fs_i = final_scores[i];
+      if (fs_i === undefined) {
+        throw new Error(
+          `invariant: final_scores[${i}] undefined in normalize (length=${final_scores.length})`,
+        );
+      }
+      final_scores[i] = fs_i / max_fs;
     }
   }
 
   // Phase 5: Tier assignment
   const sorted_final = [...final_scores].sort((a, b) => a - b);
-  const p75 =
+  const p75_raw =
     n > 3 ? sorted_final[Math.floor(n * 0.75)] : sorted_final[sorted_final.length - 1];
-  const p25 = n > 3 ? sorted_final[Math.floor(n * 0.25)] : sorted_final[0];
+  const p25_raw = n > 3 ? sorted_final[Math.floor(n * 0.25)] : sorted_final[0];
+  if (p75_raw === undefined || p25_raw === undefined) {
+    throw new Error(
+      `invariant: p75/p25 percentile undefined (n=${n}, sorted_final.length=${sorted_final.length})`,
+    );
+  }
+  const p75: number = p75_raw;
+  const p25: number = p25_raw;
 
   const tiers: string[] = [];
   for (let i = 0; i < n; i++) {
     const score = final_scores[i];
+    if (score === undefined) {
+      throw new Error(
+        `invariant: final_scores[${i}] undefined in tier assignment (n=${n})`,
+      );
+    }
     if (score >= p75) {
       tiers.push('high');
     } else if (score >= p25) {
@@ -554,10 +662,14 @@ function _compressEntries(
   // Build list of (original_index, compressed_entry) for order preservation
   const indexed_results: Array<[number, unknown]> = [];
 
-  for (let i = 0; i < scored.entries.length; i++) {
-    const entry = scored.entries[i];
+  for (const [i, entry] of scored.entries.entries()) {
     const tier = scored.tiers[i];
     const entry_budget = allocation.entry_budgets[i];
+    if (tier === undefined || entry_budget === undefined) {
+      throw new Error(
+        `invariant: scored.tiers[${i}] or allocation.entry_budgets[${i}] undefined (entries.length=${scored.entries.length})`,
+      );
+    }
 
     if (tier === 'cut') {
       entries_cut += 1;

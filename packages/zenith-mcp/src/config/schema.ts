@@ -115,10 +115,6 @@ type RawEntry =
   | { type: "comment"; text: string }
   | { type: "blank" };
 
-function section(name: string): RawEntry {
-  return { type: "section", name, raw: `## ${name}` };
-}
-
 function subsection(name: string): RawEntry {
   return { type: "subsection", name, raw: `### ${name}` };
 }
@@ -159,7 +155,9 @@ export function configToRaw(config: ZenithConfig): RawConfig {
     entries.push(comment("# (no tools configured)"));
   } else {
     for (const name of toolNames) {
-      entries.push(kv(name, config.tools[name], statusToStr(config.tools[name])));
+      const enabled = config.tools[name];
+      if (enabled === undefined) continue;
+      entries.push(kv(name, enabled, statusToStr(enabled)));
     }
   }
   entries.push(blank());
