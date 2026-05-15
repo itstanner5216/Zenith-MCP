@@ -102,7 +102,7 @@ describe('configToRaw — status string values', () => {
         const result = configToRaw(config);
         const kv = result.find(e => e.type === 'kv' && e.key === 'my_tool');
         expect(kv).toBeDefined();
-        expect(kv.comment).toBe('enabled');
+        expect(kv.rawValue).toBe('enabled');
     });
 
     it('disabled tool has comment value "disabled"', () => {
