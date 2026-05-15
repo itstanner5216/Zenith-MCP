@@ -21,7 +21,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { createFilesystemContext, type FilesystemContext } from '../core/lib.js';
 import {
     createFilesystemServer,
@@ -201,60 +200,15 @@ app.post('/mcp', async (req, res) => {
         sessionIdGenerator: () => randomUUID(),
     });
 
-    // Create a Transport-typed adapter with correctly-declared optional callbacks.
-    // The adapter delegates all protocol operations to the underlying transport.
-    // This is needed because StreamableHTTPServerTransport declares onclose/onerror
-    // as T|undefined (getter) rather than T? (optional), which is incompatible
-    // with Transport under exactOptionalPropertyTypes.
-    const mcpTransport: Transport = {
-        start: ()     => transport.start(),
-        send:  (m, o) => transport.send(m, o),
-        close: ()     => transport.close(),
+    // Session cleanup when the transport closes.
+    // SDK's connect() chains any pre-existing onclose handler, so this fires
+    // alongside the SDK's internal cleanup (_onclose) on disconnect.
+    transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) removeSession(sid);
     };
 
-    // Wire optional members via defineProperty. Under exactOptionalPropertyTypes,
-    // declaring `sessionId` directly on the object literal would require the
-    // getter to return `string` (not `string | undefined`); using defineProperty
-    // lets the descriptor carry the optional semantics correctly. Same idea for
-    // the onmessage/onerror callbacks, where the underlying class exposes
-    // `T | undefined` getter/setters that clash with Transport's `T?` form.
-    Object.defineProperty(mcpTransport, 'sessionId', {
-        get() { return transport.sessionId; },
-        configurable: true,
-        enumerable: true,
-    });
-
-    // Wire the server's incoming message handler back to the transport
-    // (McpServer sets mcpTransport.onmessage when connecting — we forward it)
-    Object.defineProperty(mcpTransport, 'onmessage', {
-        set(fn) { transport.onmessage = fn; },
-        get()   { return transport.onmessage ?? undefined; },
-        configurable: true,
-        enumerable: true,
-    });
-    Object.defineProperty(mcpTransport, 'onerror', {
-        set(fn) { transport.onerror = fn; },
-        get()   { return transport.onerror ?? undefined; },
-        configurable: true,
-        enumerable: true,
-    });
-    // Wire onclose through the adapter so the SDK's internal cleanup handler
-    // (installed by server.connect) fires alongside session cleanup.
-    // The setter wraps both: session removal runs first, then the SDK handler.
-    Object.defineProperty(mcpTransport, 'onclose', {
-        set(fn) {
-            transport.onclose = () => {
-                const sid = transport.sessionId;
-                if (sid) removeSession(sid);
-                fn?.();
-            };
-        },
-        get() { return transport.onclose ?? undefined; },
-        configurable: true,
-        enumerable: true,
-    });
-
-    await server.connect(mcpTransport);
+    await server.connect(transport);
 
     // Handle the initialize request — this sets transport.sessionId
     await transport.handleRequest(req, res, req.body);
