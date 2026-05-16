@@ -36,9 +36,6 @@
 
 ; --- Namespaces ---
 (namespace_definition
-  name: (identifier) @name.definition.namespace) @definition.namespace
-
-(namespace_definition
   name: (namespace_identifier) @name.definition.namespace) @definition.namespace
 
 ; --- Typedefs ---
