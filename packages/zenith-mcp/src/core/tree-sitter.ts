@@ -22,6 +22,7 @@
 
 import { Parser, Language, Query, Node } from 'web-tree-sitter';
 import fs from 'fs/promises';
+import { constants as fsConstants } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
@@ -420,9 +421,14 @@ async function isIncompatiblePicSideModule(wasmPath: string): Promise<boolean> {
     let bytes: Buffer;
     try {
         bytes = await fs.readFile(wasmPath);
-    } catch {
-        // If we can't read the file the outer access() check already handles this.
-        return false;
+    } catch (err) {
+        // Propagate read failure with context. The caller wraps this in
+        // try/catch and treats inspect failure as "skip the grammar" rather
+        // than silently falling through to Language.load() with an
+        // un-screened WASM (which could poison the GOT if the unreadable
+        // file is in fact a PIC side-module).
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to inspect grammar WASM ${wasmPath}: ${message}`);
     }
 
     // WASM magic: \0asm followed by version 1 (little-endian uint32 = 01 00 00 00).
@@ -433,38 +439,17 @@ async function isIncompatiblePicSideModule(wasmPath: string): Promise<boolean> {
         return false;
     }
 
-    // Search for the "GOT.func" byte sequence (ASCII: 47 4f 54 2e 66 75 6e 63).
-    // This is the import module name used by Emscripten PIC side-modules for
-    // GOT-relocation stubs. No correctly-linked standalone grammar WASM uses it.
-    const gotFuncMarker = Buffer.from('GOT.func', 'ascii');
-    if (!bufferIncludes(bytes, gotFuncMarker)) {
-        return false;
-    }
-
-    // Also require "external_scanner" to distinguish a GOT.func import that
-    // specifically stubs out tree-sitter external-scanner functions from any
-    // other hypothetical future GOT.func usage.
-    const extScannerMarker = Buffer.from('external_scanner', 'ascii');
-    return bufferIncludes(bytes, extScannerMarker);
-}
-
-/**
- * Returns true if `haystack` contains `needle` as a contiguous byte subsequence.
- * Uses a simple scan; files are at most a few hundred KB so this is fast enough.
- */
-function bufferIncludes(haystack: Buffer, needle: Buffer): boolean {
-    if (needle.length === 0) return true;
-    const limit = haystack.length - needle.length;
-    const first = needle[0];
-    for (let i = 0; i <= limit; i++) {
-        if (haystack[i] !== first) continue;
-        let match = true;
-        for (let j = 1; j < needle.length; j++) {
-            if (haystack[i + j] !== needle[j]) { match = false; break; }
-        }
-        if (match) return true;
-    }
-    return false;
+    // Detect Emscripten PIC side-modules by the co-occurrence of two ASCII
+    // byte sequences that appear together only in this incompatible build
+    // shape:
+    //   - "GOT.func": the import module name used for GOT-relocation stubs.
+    //     No correctly-linked standalone grammar WASM uses this.
+    //   - "external_scanner": tree-sitter scanner symbol prefix; required to
+    //     disambiguate a hypothetical future GOT.func usage from one that
+    //     specifically stubs out tree-sitter external-scanner functions.
+    // Buffer.includes() is implemented in native C++ and accepts strings
+    // directly — no manual byte-scan needed.
+    return bytes.includes('GOT.func') && bytes.includes('external_scanner');
 }
 
 /**
@@ -479,8 +464,11 @@ async function loadLanguage(langName: string): Promise<Language | null> {
     await ensureInit();
 
     const wasmPath = path.join(GRAMMARS_DIR, `tree-sitter-${langName}.wasm`);
+    // R_OK (not the default F_OK) so a file that exists but is unreadable —
+    // permission flip, mid-write, NFS hiccup — is caught here rather than
+    // surfacing later as a silent fallthrough to Language.load().
     try {
-        await fs.access(wasmPath);
+        await fs.access(wasmPath, fsConstants.R_OK);
     } catch {
         _languageCache.set(langName, null);
         return null;
@@ -500,7 +488,23 @@ async function loadLanguage(langName: string): Promise<Language | null> {
     // Language.load() on it, so the GOT is never touched and all subsequent
     // grammar loads remain healthy. The return value (null) is identical to what
     // the caller would have received after the load failure anyway.
-    if (await isIncompatiblePicSideModule(wasmPath)) {
+    //
+    // If the inspect itself fails (read error after access() passed —
+    // unusual, but possible with concurrent writes or transient FS issues),
+    // we treat the grammar as unusable and cache null. We do NOT fall through
+    // to Language.load() with an un-screened WASM, because if the unreadable
+    // file IS a PIC side-module the GOT poisoning we're trying to prevent
+    // would still happen.
+    let isIncompatible: boolean;
+    try {
+        isIncompatible = await isIncompatiblePicSideModule(wasmPath);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[tree-sitter] Failed to inspect ${langName} grammar; skipping:`, message);
+        _languageCache.set(langName, null);
+        return null;
+    }
+    if (isIncompatible) {
         console.error(
             `[tree-sitter] Skipping ${langName} grammar: WASM is an Emscripten PIC ` +
             `side-module with unresolvable GOT.func imports for external_scanner_* ` +
