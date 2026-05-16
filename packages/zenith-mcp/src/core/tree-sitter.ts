@@ -312,8 +312,17 @@ export function getLangForFile(filePath?: string): string | null {
     const basename = path.basename(resolved);
     const exactLang = FILENAME_TO_LANG[basename];
     if (exactLang !== undefined) return exactLang;
-    // Prefix fallback: Dockerfile.* variants (Dockerfile.dev, Dockerfile.prod, etc.)
-    if (basename.startsWith('Dockerfile')) return 'dockerfile';
+    // Dockerfile is the only filename family with widely-used case variants
+    // (dockerfile.dev, DOCKERFILE.prod, etc., common on case-insensitive
+    // filesystems like macOS). Other canonical filenames such as Gemfile or
+    // Cargo.lock are emitted by their tooling with a fixed case; keeping
+    // those case-sensitive lets typos surface rather than silently match.
+    // The dot anchor on `dockerfile.` is required so we don't false-positive
+    // on names like DockerfileBackup or DockerfileNotes.txt.
+    const lowerBasename = basename.toLowerCase();
+    if (lowerBasename === 'dockerfile' || lowerBasename.startsWith('dockerfile.')) {
+        return 'dockerfile';
+    }
     return null;
 }
 
