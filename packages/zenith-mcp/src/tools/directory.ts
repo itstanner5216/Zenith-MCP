@@ -76,18 +76,22 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     return lines;
                 }
                 // Filter by user-specified excludes before capping, so excluded entries don't consume cap slots
-                if (excludePatterns.length > 0) {
-                    entries = entries.filter(entry => {
-                        const rel = relativeBase ? path.join(relativeBase, entry.name) : entry.name;
-                        return !excludePatterns.some(pattern =>
-                            pattern.includes('*')
-                                ? minimatch(rel, pattern, { dot: true })
-                                : minimatch(rel, pattern, { dot: true }) ||
-                                  minimatch(rel, `**/${pattern}`, { dot: true }) ||
-                                  minimatch(rel, `**/${pattern}/**`, { dot: true })
-                        );
-                    });
-                }
+                entries = entries.filter(entry => {
+                    const rel = relativeBase ? path.join(relativeBase, entry.name) : entry.name;
+                    const userExcluded = excludePatterns.some(pattern =>
+                        pattern.includes('*')
+                            ? minimatch(rel, pattern, { dot: true })
+                            : minimatch(rel, pattern, { dot: true }) ||
+                              minimatch(rel, `**/${pattern}`, { dot: true }) ||
+                              minimatch(rel, `**/${pattern}/**`, { dot: true })
+                    );
+                    const defaultExcluded = getDefaultExcludes().some(p =>
+                        entry.name === p ||
+                        minimatch(rel, p, { dot: true }) ||
+                        minimatch(rel, `**/${p}`, { dot: true })
+                    );
+                    return !userExcluded && !defaultExcluded;
+                });
                 const truncated = entries.length > LIST_CAP;
                 if (truncated) entries = entries.slice(0, LIST_CAP);
                 // Load sizes when needed for sorting or display
