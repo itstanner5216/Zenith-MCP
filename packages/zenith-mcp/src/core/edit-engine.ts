@@ -248,7 +248,18 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             const findSymbolOpts: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (nearLine !== undefined) findSymbolOpts.nearLine = nearLine;
             const symbolMatches = await findSymbol(workingContent, langName, edit.symbol!, findSymbolOpts);
-            if (!symbolMatches?.length) {
+            // findSymbol returns null when the language has no compiled tags
+            // query (grammar present, query file missing or unloadable —
+            // common for parse-capable-only languages like cmake/make/dart/
+            // elixir/ini/perl/r/regex). Distinguish that from a real empty
+            // match set so the user gets actionable guidance rather than a
+            // misleading "Symbol not found" for a language that doesn't
+            // support symbol queries at all.
+            if (symbolMatches === null) {
+                errors.push({ i, msg: `${tag}Symbol queries not available for ${langName} (grammar present, tags query missing). Use block or content mode instead.` });
+                continue;
+            }
+            if (symbolMatches.length === 0) {
                 errors.push({ i, msg: `${tag}Symbol not found.` });
                 continue;
             }
