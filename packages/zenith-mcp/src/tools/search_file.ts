@@ -34,7 +34,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 fileList: [validPath],
                 includeContextLines: true,
                 skipSensitiveFilter: true,
-                maxMatchesPerFile: null,
+                maxMatchesPerFile: 500,
             });
 
             if (!rgResults || rgResults.length === 0) {
