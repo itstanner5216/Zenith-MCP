@@ -36,7 +36,8 @@
 
 ; inherit binding  →  inherit name;  or  inherit (src) name;
 (inherit
-  (identifier) @name.definition.inherit) @definition.inherit
+  (inherited_attrs
+    (identifier) @name.definition.inherit)) @definition.inherit
 
 ; =============================================================================
 ; Nix — references.scm
@@ -52,8 +53,10 @@
 
 ; Function application  →  f x
 (apply_expression
-  function: (identifier) @name.reference.function) @reference.function
+  (variable_expression
+    (identifier) @name.reference.function)) @reference.function
 
 ; String interpolation  →  ${expr}
 (interpolation
-  (identifier) @name.reference.variable) @reference.variable
+  (variable_expression
+    (identifier) @name.reference.variable)) @reference.variable

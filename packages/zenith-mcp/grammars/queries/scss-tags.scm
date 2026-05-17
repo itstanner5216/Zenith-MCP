@@ -8,19 +8,23 @@
   (selectors) @name.definition.rule) @definition.rule
 
 ; Mixin declaration: @mixin name { ... }
+; Grammar emits `name` as a child node type, not a field
 (mixin_statement
-  name: (identifier) @name.definition.mixin) @definition.mixin
+  (name) @name.definition.mixin) @definition.mixin
 
 ; Include as a mixin "definition" target (for cross-referencing)
 ; (no definition — include is a reference)
 
 ; SCSS variable declaration: $var: value;
+; Variable DECLARATIONS use `variable_name`; `variable_value` is the
+; `$var` USAGE inside property values (handled by reference patterns below)
 (declaration
-  (variable_value) @name.definition.variable) @definition.variable
+  (variable_name) @name.definition.variable) @definition.variable
 
 ; Placeholder selector: %placeholder { ... }
-(placeholder_selector
-  (identifier) @name.definition.placeholder) @definition.placeholder
+; Grammar node type is `placeholder` with a `name` child (not `placeholder_selector`)
+(placeholder
+  (name) @name.definition.placeholder) @definition.placeholder
 
 ; Keyframes definition: @keyframes name { ... }
 (keyframes_statement
@@ -39,8 +43,9 @@
 ; CONSERVATIVE: captures mixin includes, variable references, and selector references.
 
 ; Mixin include: @include name
+; Grammar uses positional `identifier` child, not a `name:` field
 (include_statement
-  name: (identifier) @name.reference.mixin) @reference.mixin
+  (identifier) @name.reference.mixin) @reference.mixin
 
 ; Variable reference in property value
 (variable_value) @name.reference.variable

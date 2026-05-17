@@ -47,7 +47,7 @@
   name: (constant) @name.reference.constant) @reference.constant
 
 (scope_resolution
-  name: (identifier) @name.reference.constant) @reference.constant
+  (identifier) @name.reference.constant) @reference.constant
 
 ; --- Standalone constant references ---
 (constant) @name.reference.type

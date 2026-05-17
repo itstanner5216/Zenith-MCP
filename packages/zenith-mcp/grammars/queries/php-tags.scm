@@ -33,7 +33,7 @@
 ; --- Constants ---
 (const_declaration
   (const_element
-    name: (name) @name.definition.constant)) @definition.constant
+    (name) @name.definition.constant)) @definition.constant
 
 ; --- Properties ---
 (property_declaration
@@ -64,14 +64,12 @@
 
 ; --- Object creation ---
 (object_creation_expression
-  class: (named_type
-    (name) @name.reference.type)) @reference.type
+  (name) @name.reference.type) @reference.type
 
 (object_creation_expression
-  class: (named_type
-    (qualified_name) @name.reference.type)) @reference.type
+  (qualified_name) @name.reference.type) @reference.type
 
 ; --- Use declarations ---
-(use_declaration
-  (use_declarator
+(namespace_use_declaration
+  (namespace_use_clause
     (qualified_name) @name.reference.import)) @reference.import

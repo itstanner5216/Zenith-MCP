@@ -12,7 +12,7 @@
 
 ; --- Objects (singletons) ---
 (object_declaration
-  (simple_identifier) @name.definition.object) @definition.object
+  (type_identifier) @name.definition.object) @definition.object
 
 ; --- Properties ---
 (property_declaration
@@ -20,7 +20,7 @@
 
 ; --- Type aliases ---
 (type_alias
-  (simple_identifier) @name.definition.type) @definition.type
+  (type_identifier) @name.definition.type) @definition.type
 
 ; Tree-sitter Kotlin references (CONSERVATIVE — fwcd grammar)
 ; Captures function calls, navigation expressions, and imports.
@@ -39,8 +39,5 @@
   (identifier) @name.reference.import) @reference.import
 
 ; --- Type references ---
-(user_type
-  (simple_identifier) @name.reference.type) @reference.type
-
 (user_type
   (type_identifier) @name.reference.type) @reference.type

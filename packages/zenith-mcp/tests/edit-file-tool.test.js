@@ -124,7 +124,7 @@ describe('edit_file tool handler — content mode', () => {
             path: filePath,
             edits: [{ mode: 'content', oldContent: '    return 1;', newContent: '    return {' }],
         });
-        expect(result.content[0].text).toContain('⚠ Parse errors');
+        expect(result.content[0].text).toContain('Parse errors at lines');
         expect(fs.readFileSync(filePath, 'utf-8')).toContain('return {');
     });
 });

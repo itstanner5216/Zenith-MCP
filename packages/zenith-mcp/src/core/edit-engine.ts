@@ -248,7 +248,18 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             const findSymbolOpts: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (nearLine !== undefined) findSymbolOpts.nearLine = nearLine;
             const symbolMatches = await findSymbol(workingContent, langName, edit.symbol!, findSymbolOpts);
-            if (!symbolMatches?.length) {
+            // findSymbol returns null when the language has no compiled tags
+            // query (grammar present, query file missing or unloadable —
+            // common for parse-capable-only languages like cmake/make/dart/
+            // elixir/ini/perl/r/regex). Distinguish that from a real empty
+            // match set so the user gets actionable guidance rather than a
+            // misleading "Symbol not found" for a language that doesn't
+            // support symbol queries at all.
+            if (symbolMatches === null) {
+                errors.push({ i, msg: `${tag}Symbol queries not available for ${langName} (grammar present, tags query missing). Use block or content mode instead.` });
+                continue;
+            }
+            if (symbolMatches.length === 0) {
                 errors.push({ i, msg: `${tag}Symbol not found.` });
                 continue;
             }
@@ -314,13 +325,23 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
 async function syntaxWarn(filePath: string, content: string): Promise<string> {
     try {
         const ext = path.extname(filePath).toLowerCase();
-        if (['.mdx', '.jsonc'].includes(ext)) return '';
+        // Suppression list: extensions registered to a grammar whose strict
+        // parser will reject the format's idiomatic content.
+        //   .mdx   — Markdown with embedded JSX; plain Markdown grammar errors
+        //   .jsonc — JSON-with-comments; strict JSON rejects `//` and `/* */`
+        //   .json5 — JSON5 (unquoted keys, trailing commas, etc.)
+        //   .jsonl, .ndjson — multiple top-level JSON values per file
+        // .geojson / .topojson are strict JSON variants and stay un-suppressed.
+        if (['.mdx', '.jsonc', '.json5', '.jsonl', '.ndjson'].includes(ext)) return '';
         const langName = getLangForFile(filePath);
         if (!langName) return '';
         const syntaxErrors = await checkSyntaxErrors(content, langName);
         if (!syntaxErrors?.length) return '';
         const locations = syntaxErrors.map(e => `${e.line}:${e.column}`).join(', ');
-        return `\n⚠ Parse errors at lines ${locations}`;
+        // Leading \n gives visual separation when this string is appended to
+        // other tool output. The body is plain text — no decorative glyph or
+        // emoji. Tool output stays actionable and machine-readable.
+        return `\nParse errors at lines ${locations}`;
     } catch {
         return '';
     }
