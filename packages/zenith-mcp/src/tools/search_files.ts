@@ -2,20 +2,12 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { minimatch } from "minimatch";
-import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, RANK_THRESHOLD } from '../core/shared.js';
+import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, ripgrepCountMatches, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
 import { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
 import { findRepoRoot, getDb, indexDirectory } from '../core/symbol-index.js';
 import { ToolServer, ToolContext } from './types.js';
-import { loadConfig } from '../config/index.js';
-
-// Lazy singleton — avoids calling loadConfig() at module evaluation time.
-let _sfConfig: ReturnType<typeof loadConfig> | null = null;
-function getSearchCharBudget(): number {
-    if (!_sfConfig) _sfConfig = loadConfig();
-    return Math.min(_sfConfig.advanced.search_char_budget, getCharBudget());
-}
 
 interface SymbolDbRow {
     file_path: string;
@@ -405,7 +397,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             const BATCH_SIZE = 50;
             const MAX_FILE_SIZE = 512 * 1024;
-            const symbolName = args.definesSymbol!;
+            if (!args.definesSymbol) {
+                throw new Error('definesSymbol is required for definition mode.');
+            }
+            const symbolName = args.definesSymbol;
             interface DefinitionSymbol {
                 name: string;
                 type: string;
@@ -579,20 +574,56 @@ export function register(server: ToolServer, ctx: ToolContext) {
         const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 50));
         const contextLines = Math.max(0, args.contextLines ?? 0);
         const allExcludes = defaultExcludeGlobs;
-        const flags = 'gi';
-        const contentRegex = args.literalSearch
-            ? new RegExp(args.contentQuery!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags) 
-            : new RegExp(args.contentQuery!, flags); 
-        // ---- RIPGREP PATH ----
+
+        // JS fallback only supports literal search — untrusted regex compilation is a ReDoS risk
         const hasRg = await ripgrepAvailable();
+        if (!hasRg && !args.literalSearch) {
+            throw new Error('Regex content search requires ripgrep. Use literalSearch: true for the JS fallback.');
+        }
+
+        const contentRegex = args.literalSearch
+            ? new RegExp(args.contentQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            : null; // regex search is handled by ripgrep only
+
+        function contentFileFilter(fullPath: string, relativePath: string): boolean {
+            if (args.pathContains && !fullPath.toLowerCase().includes(args.pathContains.toLowerCase())) {
+                return false;
+            }
+            if (args.extensions?.length) {
+                const ext = path.extname(fullPath).toLowerCase();
+                if (!args.extensions.some(e => e.toLowerCase() === ext)) return false;
+            }
+            if (args.pattern && !minimatch(relativePath, args.pattern, { dot: true })) {
+                return false;
+            }
+            return true;
+        }
+
+        // ---- RIPGREP PATH ----
         if (hasRg) {
+            // Use --count-matches for exact totals when no per-file filters are needed
+            if (args.countOnly && !args.extensions?.length && !args.pathContains) {
+                const counts = await ripgrepCountMatches(rootPath, {
+                    contentQuery: args.contentQuery,
+                    filePattern: args.pattern || null,
+                    excludePatterns: allExcludes,
+                    literalSearch: args.literalSearch ?? false,
+                    includeHidden: args.includeHidden ?? false,
+                });
+                if (counts !== null) {
+                    return { content: [{ type: 'text' as const, text: `matches: ${counts.matchCount}\nfiles: ${counts.fileCount}` }] };
+                }
+                // Fall through to BM25+ripgrep for degraded count
+            }
+
             let rgResults: RipgrepResult[] | null = null;
-            if (args.contentQuery!.length > 2) {
+            if (args.contentQuery.length > 2) {
                 try {
-                    const candidateFiles = await bm25PreFilterFiles(rootPath, args.contentQuery!, 100, allExcludes);
+                    let candidateFiles = await bm25PreFilterFiles(rootPath, args.contentQuery, 100, allExcludes);
+                    candidateFiles = candidateFiles.filter(f => contentFileFilter(f, path.relative(rootPath, f)));
                     if (candidateFiles.length > 0) {
                         rgResults = await ripgrepSearch(rootPath, {
-                            contentQuery: args.contentQuery!,
+                            contentQuery: args.contentQuery,
                             filePattern: args.pattern || null,
                             ignoreCase: true,
                             maxResults: Math.max(userMaxResults, 500),
@@ -604,12 +635,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         });
                     }
                 }
-                catch {
+                catch (_err) {
+                    // BM25 pre-filter failed — fall through to full ripgrep search
                 }
             }
             if (rgResults === null) {
                 rgResults = await ripgrepSearch(rootPath, {
-                    contentQuery: args.contentQuery!,
+                    contentQuery: args.contentQuery,
                     filePattern: args.pattern || null,
                     ignoreCase: true,
                     maxResults: Math.max(userMaxResults, 500),
@@ -620,6 +652,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 });
             }
             if (rgResults !== null) {
+                // Apply extensions/pathContains filters to results
+                rgResults = rgResults.filter(r => contentFileFilter(r.file, path.relative(rootPath, r.file)));
                 if (rgResults.length === 0) {
                     return { content: [{ type: "text" as const, text: 'No matches.' }] };
                 }
@@ -630,7 +664,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const rawLines = rgResults.map(r => `${r.file}:${r.line}: ${r.content}`);
                 let outputLines: string[];
                 if (rawLines.length > RANK_THRESHOLD) {
-                    const { ranked } = bm25RankResults(rawLines, args.contentQuery!, getSearchCharBudget());
+                    const { ranked } = bm25RankResults(rawLines, args.contentQuery, getSearchCharBudget());
                     outputLines = ranked;
                 }
                 else {
@@ -647,12 +681,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
         }
         // ------------------------------------------------------------------
-        // JS fallback (content mode)
+        // JS fallback (content mode — literal search only)
         // ------------------------------------------------------------------
         const contentResults: string[] = [];
         const maxJsFallback = Math.min(200, userMaxResults);
         async function grepFile(filePath: string) {
-            if (contentResults.length >= maxJsFallback)
+            if (contentResults.length >= maxJsFallback || !contentRegex)
                 return;
             try {
                 const content = await fs.readFile(filePath, 'utf-8');
@@ -662,12 +696,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     lineNumber++;
                     if (contentResults.length >= maxJsFallback)
                         break;
+                    contentRegex.lastIndex = 0; // Reset stateful regex before each test
                     if (contentRegex.test(line)) {
                         contentResults.push(`${filePath}:${lineNumber}: ${line.trim().slice(0, 500)}`);
                     }
                 }
             }
-            catch { /* skip binary/unreadable */ }
+            catch (_err) { /* skip binary/unreadable files */ }
         }
         async function walk(dir: string) {
             if (contentResults.length >= maxJsFallback)
@@ -676,11 +711,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             try {
                 entries = await fs.readdir(dir, { withFileTypes: true });
             }
-            catch {
+            catch (_err) {
                 return;
-            } 
+            }
             for (const entry of entries) {
-                const fullPath = path.join(dir, entry.name); 
+                const fullPath = path.join(dir, entry.name);
                 const rel = path.relative(rootPath, fullPath);
                 const excluded = allExcludes.some(pat => minimatch(rel, pat, { dot: true }) ||
                     minimatch(rel, pat.replace(/^\*\*\//, ''), { dot: true }));
@@ -692,8 +727,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     await walk(fullPath);
                 }
                 else if (entry.isFile()) {
-                    if (!args.pattern || minimatch(rel, args.pattern, { dot: true }))
+                    if (contentFileFilter(fullPath, rel)) {
                         await grepFile(fullPath);
+                    }
                 }
             }
         }
@@ -704,7 +740,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         }
         let finalOutput: string[];
         if (contentResults.length > RANK_THRESHOLD) {
-            const { ranked } = bm25RankResults(contentResults, args.contentQuery!, getSearchCharBudget());
+            const { ranked } = bm25RankResults(contentResults, args.contentQuery, getSearchCharBudget());
             finalOutput = ranked;
         }
         else {

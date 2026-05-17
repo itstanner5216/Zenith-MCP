@@ -10,13 +10,18 @@ import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
+import type { ZenithConfig } from '../config/index.js';
 // ---------------------------------------------------------------------------
-// Module-level constants
+// Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
-const _config = loadConfig();
-const MAX_CHARS = _config.advanced.refactor_max_chars;
+let _rbConfig: ZenithConfig | null = null;
+function getRbConfig(): ZenithConfig {
+    if (!_rbConfig) _rbConfig = loadConfig();
+    return _rbConfig;
+}
+function getMaxChars(): number { return getRbConfig().advanced.refactor_max_chars; }
 const DEFAULT_CONTEXT = 5;
-const MAX_CONTEXT_LINES = Math.min(30, _config.advanced.refactor_max_context);
+function getMaxContextLines(): number { return Math.min(30, getRbConfig().advanced.refactor_max_context); }
 // ---------------------------------------------------------------------------
 // Local interfaces
 // ---------------------------------------------------------------------------
@@ -262,7 +267,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 z.number().int().min(1),
                 z.object({ symbol: z.string(), file: z.string().optional() }),
             ])).optional().describe("loadDiff: Which symbols to load. Either numeric indices from a prior query result, or explicit {symbol, file?} pairs. You can skip query and go straight to loadDiff with explicit pairs."),
-            contextLines: z.number().int().min(0).max(MAX_CONTEXT_LINES).default(DEFAULT_CONTEXT).describe("loadDiff: How many lines above and below each symbol body to include as read-only context. Context lines are marked with │ so you can distinguish them from the editable body."),
+            contextLines: z.number().int().min(0).max(getMaxContextLines()).default(DEFAULT_CONTEXT).describe("loadDiff: How many lines above and below each symbol body to include as read-only context. Context lines are marked with │ so you can distinguish them from the editable body."),
             loadMore: z.boolean().default(false).describe("loadDiff: When a prior loadDiff was truncated at the char budget, call loadDiff again with loadMore=true to get the next page."),
             payload: z.string().optional().describe("apply: The edited diff you're sending back. Format: one or more groups, each starting with a header line 'symbolName idx1,idx2 [ack:N]' followed by the new function body on subsequent lines. Example: 'validateCard 1,2,3 ack:3\\nfunction validateCard(card) { ... }'. Indices match the [N] tags from loadDiff output."),
             dryRun: z.boolean().default(false).describe("apply/reapply/restore: Validate everything (syntax gate, outlier checks, char budget) without writing any files. Returns what would happen."),
@@ -509,7 +514,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
             }
             // -----------------------------------------------------------------
-            // Emit blocks, honour MAX_CHARS without splitting a symbol.
+            // Emit blocks, honour getMaxChars() without splitting a symbol.
             // -----------------------------------------------------------------
             const blocks: string[] = [];
             const fileCounts = new Map<string, number>();
@@ -532,7 +537,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     ? `${occ.symbol} [${globalIndex}] ${occ.relFile} ⚠ ${flag}`
                     : `${occ.symbol} [${globalIndex}] ${occ.relFile}`;
                 const block = `${header}\n${body}\n`;
-                if (totalChars > 0 && (totalChars + block.length) > MAX_CHARS) {
+                if (totalChars > 0 && (totalChars + block.length) > getMaxChars()) {
                     cutAt = i;
                     break;
                 }
@@ -640,7 +645,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let totalBudget = 0;
             for (const g of groups)
                 totalBudget += g.body.length * g.indices.length;
-            if (totalBudget > MAX_CHARS) {
+            if (totalBudget > getMaxChars()) {
                 return { content: [{ type: 'text' as const, text: 'Over char budget. Split the apply into smaller groups.' }] };
             }
             // Gate: syntax.
@@ -1043,7 +1048,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             catch { /* best-effort */ }
             // Char budget.
-            if (cachedPayload.body.length * targets.length > MAX_CHARS) {
+            if (cachedPayload.body.length * targets.length > getMaxChars()) {
                 return { content: [{ type: 'text' as const, text: 'Over char budget. Split the apply into smaller groups.' }] };
             }
             // Build per-file bundles.

@@ -159,7 +159,7 @@ describe('directory tool — tree mode', () => {
     it('renders files and directories with indentation', async () => {
         fs.mkdirSync(path.join(tmpDir, 'src'));
         fs.writeFileSync(path.join(tmpDir, 'src', 'app.js'), '');
-        const result = await handler({ mode: 'tree', path: tmpDir });
+        const result = await handler({ mode: 'tree', path: tmpDir, depth: 2 });
         const text = result.content[0].text;
         expect(text).toContain('src/');
         expect(text).toContain('app.js');
@@ -198,7 +198,7 @@ describe('directory tool — tree mode', () => {
         fs.mkdirSync(path.join(tmpDir, 'src'));
         fs.writeFileSync(path.join(tmpDir, 'src', 'file.min.js'), '');
         fs.writeFileSync(path.join(tmpDir, 'src', 'file.js'), '');
-        const result = await handler({ mode: 'tree', path: tmpDir, excludePatterns: ['*.min.js'] });
+        const result = await handler({ mode: 'tree', path: tmpDir, excludePatterns: ['*.min.js'], depth: 2 });
         const text = result.content[0].text;
         expect(text).not.toContain('file.min.js');
         expect(text).toContain('file.js');
@@ -217,7 +217,7 @@ describe('directory tool — tree mode', () => {
         const srcDir = path.join(tmpDir, 'src');
         fs.mkdirSync(srcDir);
         fs.writeFileSync(path.join(srcDir, 'mod.ts'), 'export function foo() {}\nexport class Bar {}');
-        const result = await handler({ mode: 'tree', path: tmpDir, showSymbols: true });
+        const result = await handler({ mode: 'tree', path: tmpDir, showSymbols: true, depth: 2 });
         const text = result.content[0].text;
         const modLine = text.split('\n').find(l => l.includes('mod.ts'));
         expect(modLine).toBeDefined();

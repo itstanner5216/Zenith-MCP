@@ -4,11 +4,9 @@ import path from 'path';
 
 import {
     getCharBudget,
-    CHAR_BUDGET,
     RANK_THRESHOLD,
     getDefaultExcludes,
-    DEFAULT_EXCLUDES,
-    SENSITIVE_PATTERNS,
+    getSensitivePatterns,
     isSensitive,
     BM25Index,
     ripgrepAvailable,
@@ -37,26 +35,12 @@ describe('shared constants', () => {
         expect(isSensitive('.env')).toBe(true);
         expect(isSensitive('server.pem')).toBe(true);
     });
-});
 
-describe('shared compatibility exports', () => {
-    it('CHAR_BUDGET is a number equal to getCharBudget() default', () => {
-        expect(typeof CHAR_BUDGET).toBe('number');
-        expect(CHAR_BUDGET).toBe(getCharBudget());
-    });
-
-    it('DEFAULT_EXCLUDES is an array containing common directories', () => {
-        expect(Array.isArray(DEFAULT_EXCLUDES)).toBe(true);
-        expect(DEFAULT_EXCLUDES).toContain('node_modules');
-        expect(DEFAULT_EXCLUDES).toContain('.git');
-        // Must match the getter output since both derive from the same config path
-        expect(DEFAULT_EXCLUDES).toEqual(getDefaultExcludes());
-    });
-
-    it('SENSITIVE_PATTERNS is an array covering credential-like patterns', () => {
-        expect(Array.isArray(SENSITIVE_PATTERNS)).toBe(true);
-        expect(SENSITIVE_PATTERNS.some(p => p.includes('.env'))).toBe(true);
-        expect(SENSITIVE_PATTERNS.some(p => p.includes('.pem'))).toBe(true);
+    it('getSensitivePatterns returns patterns covering .env and .pem', () => {
+        const patterns = getSensitivePatterns();
+        expect(Array.isArray(patterns)).toBe(true);
+        expect(patterns.some(p => p.includes('.env'))).toBe(true);
+        expect(patterns.some(p => p.includes('.pem'))).toBe(true);
     });
 });
 

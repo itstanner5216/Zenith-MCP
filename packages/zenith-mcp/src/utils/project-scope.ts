@@ -111,6 +111,14 @@ function clampToAllowed(candidate: string | null, absPath: string, allowedDirect
     const allowedRoot = getMostSpecificAllowedRoot(absPath, allowedDirectories);
     if (!allowedRoot) return null;
     if (!candidate) return allowedRoot;
+
+    // If the candidate is within or equal to ANY allowed directory, return it as-is.
+    // This prevents over-clamping when e.g. both /repo and /repo/packages/pkg are
+    // allowed and the git root is /repo — without this check, getMostSpecificAllowedRoot
+    // returns /repo/packages/pkg and clamps /repo down to it incorrectly.
+    const resolvedAllowed = allowedDirectories.map(dir => path.resolve(dir));
+    if (resolvedAllowed.some(dir => isWithinProject(candidate, dir))) return candidate;
+
     // Candidate is above (contains) the allowed root — clamp down
     if (isWithinProject(allowedRoot, candidate)) return allowedRoot;
     // Candidate is within the allowed root — keep it

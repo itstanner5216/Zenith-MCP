@@ -111,7 +111,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 rl.on('error', reject);
                 stream.on('error', reject);
             });
-            const text = (budgetExhausted ? '[truncated]\n' : '') + outputLines.join('\n');
+            const body = outputLines.join('\n');
+            const text = budgetExhausted
+                ? (body.length > 0 ? `${body}\n[truncated]` : '[truncated]')
+                : body;
             return {
                 content: [{ type: "text" as const, text }],
             };

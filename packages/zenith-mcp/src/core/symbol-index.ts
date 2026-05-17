@@ -5,9 +5,8 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { getSymbols, getLangForFile, isSupported } from './tree-sitter.js';
-import { getDefaultExcludes, isSensitive } from './shared.js';
+import { getDefaultExcludes, isSensitive, getRefactorVersionTtlMs } from './shared.js';
 import { minimatch } from 'minimatch';
-import { loadConfig } from '../config/index.js';
 
 // ---------------------------------------------------------------------------
 // Row shape interfaces for typed DB queries
@@ -154,7 +153,7 @@ export function getDb(repoRoot: string): Database.Database {
         });
     }
 
-    try { db.prepare('DELETE FROM versions WHERE created_at < ?').run(Date.now() - loadConfig().advanced.refactor_version_ttl_hours * 60 * 60 * 1000); } catch { /* table may be mid-migration */ }
+    try { db.prepare('DELETE FROM versions WHERE created_at < ?').run(Date.now() - getRefactorVersionTtlMs()); } catch { /* table may be mid-migration */ }
 
     _dbCache.set(repoRoot, db);
     return db;

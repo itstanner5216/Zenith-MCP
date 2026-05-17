@@ -50,6 +50,21 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             const depth = Math.max(1, Math.min(args.depth || 1, 10));
             const includeSizes = args.includeSizes || false;
             const sortBy = args.sortBy || "name";
+            const excludePatterns = args.excludePatterns ?? [];
+
+            function compareEntries(
+                left: { entry: Dirent; size: number },
+                right: { entry: Dirent; size: number },
+            ): number {
+                if (sortBy === 'size' && left.size !== right.size) {
+                    return right.size - left.size;
+                }
+                if (left.entry.isDirectory() !== right.entry.isDirectory()) {
+                    return left.entry.isDirectory() ? -1 : 1;
+                }
+                return left.entry.name.localeCompare(right.entry.name, undefined, { numeric: true, sensitivity: 'base' });
+            }
+
             async function listRecursive(dirPath: string, currentDepth: number, relativeBase: string): Promise<string[]> {
                 const lines: string[] = [];
                 let entries: Dirent[];
@@ -63,8 +78,9 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 let truncated = entries.length > LIST_CAP;
                 if (truncated)
                     entries = entries.slice(0, LIST_CAP);
-                let processed = entries.map(e => ({ entry: e, size: 0 }));
-                if (includeSizes) {
+                // Load sizes when needed for sorting or display
+                let processed: { entry: Dirent; size: number }[];
+                if (includeSizes || sortBy === 'size') {
                     processed = await Promise.all(entries.map(async (entry) => {
                         try {
                             const stats = await fs.stat(path.join(dirPath, entry.name));
@@ -74,14 +90,32 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                             return { entry, size: 0 };
                         }
                     }));
-                    if (sortBy === "size") {
-                        processed.sort((a, b) => b.size - a.size);
-                    }
                 }
+                else {
+                    processed = entries.map(e => ({ entry: e, size: 0 }));
+                }
+                // Always sort
+                processed.sort(compareEntries);
                 for (const { entry, size } of processed) {
                     if (lines.length >= LIST_CAP)
                         break;
                     const rel = relativeBase ? path.join(relativeBase, entry.name) : entry.name;
+                    // Apply user-specified exclude patterns
+                    const shouldSkip = excludePatterns.some(pattern =>
+                        pattern.includes('*')
+                            ? minimatch(rel, pattern, { dot: true })
+                            : minimatch(rel, pattern, { dot: true }) ||
+                              minimatch(rel, `**/${pattern}`, { dot: true }) ||
+                              minimatch(rel, `**/${pattern}/**`, { dot: true })
+                    );
+                    if (shouldSkip) continue;
+                    // Apply default excludes
+                    const defaultExcluded = getDefaultExcludes().some(p =>
+                        entry.name === p ||
+                        minimatch(rel, p, { dot: true }) ||
+                        minimatch(rel, `**/${p}`, { dot: true })
+                    );
+                    if (defaultExcluded) continue;
                     if (entry.isDirectory()) {
                         lines.push(`${rel}/`);
                         if (currentDepth + 1 < depth) {
@@ -105,7 +139,8 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         const showSymbols = args.showSymbols || args.showSymbolNames || false;
         const showSymbolNames = args.showSymbolNames || false;
         let totalEntries = 0;
-        async function buildTree(currentPath: string, excludePatterns: string[] = []): Promise<FileTreeEntry[]> {
+        const maxDepth = Math.max(1, Math.min(args.depth ?? 1, 10));
+        async function buildTree(currentPath: string, currentDepth: number, excludePatterns: string[] = []): Promise<FileTreeEntry[]> {
             if (totalEntries >= TREE_MAX_ENTRIES)
                 return [];
             const validPath = await ctx.validatePath(currentPath);
@@ -159,13 +194,15 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 const results = await Promise.all(promises);
                 symbolResults = new Map(results.map(([name, summary, names]) => [name, { summary, names }]));
             }
+            dirEntries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+            fileEntries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
             for (const entry of dirEntries) {
                 if (totalEntries >= TREE_MAX_ENTRIES)
                     break;
-                const entryData: FileTreeEntry = {
-                    name: entry.name,
-                    children: await buildTree(path.join(currentPath, entry.name), excludePatterns)
-                };
+                const nextPath = path.join(currentPath, entry.name);
+                const entryData: FileTreeEntry = currentDepth < maxDepth
+                    ? { name: entry.name, children: await buildTree(nextPath, currentDepth + 1, excludePatterns) }
+                    : { name: entry.name, children: [] }; // Show as dir stub at max depth
                 result.push(entryData);
                 totalEntries++;
             }
@@ -185,7 +222,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             }
             return result;
         }
-        const treeData = await buildTree(rootPath, args.excludePatterns);
+        const treeData = await buildTree(rootPath, 1, args.excludePatterns);
         function escapeControlChars(str: string): string {
             return str.replace(/[\x00-\x1F\x7F]/g, (char: string) => {
                 const code = char.charCodeAt(0);

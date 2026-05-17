@@ -23,7 +23,14 @@ export function getCharBudget(): number {
     return 400_000;
 }
 export const RANK_THRESHOLD = 50;
-export const CHAR_BUDGET = getCharBudget();
+
+export function getSearchCharBudget(): number {
+    return Math.min(getConfig().advanced.search_char_budget, getCharBudget());
+}
+
+export function getRefactorVersionTtlMs(): number {
+    return getConfig().advanced.refactor_version_ttl_hours * 60 * 60 * 1000;
+}
 
 export function getDefaultExcludes(): string[] {
     const raw = getConfig().advanced.default_excludes;
@@ -34,9 +41,8 @@ export function getDefaultExcludes(): string[] {
     return 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
         .split(',').map(p => p.trim()).filter(Boolean);
 }
-export const DEFAULT_EXCLUDES = getDefaultExcludes();
 
-function getSensitivePatterns(): string[] {
+export function getSensitivePatterns(): string[] {
     const raw = getConfig().advanced.sensitive_patterns;
     if (raw && typeof raw === 'string') {
         const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
@@ -45,7 +51,6 @@ function getSensitivePatterns(): string[] {
     return '**/.env,**/*.pem,**/*.key,**/*.crt,**/*credentials*,**/*secret*,**/docker-compose.yaml,**/docker-compose.yml,**/.config/**'
         .split(',').map(p => p.trim()).filter(Boolean);
 }
-export const SENSITIVE_PATTERNS = getSensitivePatterns();
 
 export function isSensitive(filePath: string): boolean {
     const rel = path.relative(os.homedir(), filePath);
@@ -260,6 +265,7 @@ export interface RipgrepResult {
     file: string;
     line: number;
     content: string;
+    isContext?: boolean;
 }
 
 export async function ripgrepSearch(rootPath: string, options: {
@@ -272,8 +278,9 @@ export async function ripgrepSearch(rootPath: string, options: {
     literalSearch?: boolean;
     includeHidden?: boolean;
     fileList?: string[] | null;
+    includeContextLines?: boolean;
 } = {}): Promise<RipgrepResult[] | null> {
-    const { contentQuery, filePattern = null, ignoreCase = true, maxResults = 50, excludePatterns = [], contextLines = 0, literalSearch = false, includeHidden = false, fileList = null } = options;
+    const { contentQuery, filePattern = null, ignoreCase = true, maxResults = 50, excludePatterns = [], contextLines = 0, literalSearch = false, includeHidden = false, fileList = null, includeContextLines = false } = options;
     const rgArgs = ['--json', '--max-count', '100', '-m', '500'];
     if (ignoreCase) rgArgs.push('-i');
     if (literalSearch) rgArgs.push('-F');
@@ -305,8 +312,14 @@ export async function ripgrepSearch(rootPath: string, options: {
                         if (filePath && !isSensitive(filePath)) {
                             results.push({ file: filePath, line: d.line_number, content: d.lines?.text?.replace(/\n$/, '') || '' });
                         }
+                    } else if (includeContextLines && msg.type === 'context') {
+                        const d = msg.data;
+                        const filePath = d.path?.text;
+                        if (filePath && !isSensitive(filePath)) {
+                            results.push({ file: filePath, line: d.line_number, content: d.lines?.text?.replace(/\n$/, '') || '', isContext: true });
+                        }
                     }
-                } catch { }
+                } catch (_err) { }
             }
         });
         proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
@@ -353,6 +366,74 @@ export async function ripgrepFindFiles(rootPath: string, options: {
             }
         });
         proc.on('close', () => resolveP(results));
+        proc.on('error', () => resolveP(null));
+    });
+}
+
+export interface RipgrepCountResult {
+    matchCount: number;
+    fileCount: number;
+}
+
+export async function ripgrepCountMatches(
+    rootPath: string,
+    options: {
+        contentQuery: string;
+        filePattern?: string | null;
+        excludePatterns?: string[];
+        literalSearch?: boolean;
+        includeHidden?: boolean;
+        fileList?: string[] | null;
+    },
+): Promise<RipgrepCountResult | null> {
+    const {
+        contentQuery,
+        filePattern = null,
+        excludePatterns = [],
+        literalSearch = false,
+        includeHidden = false,
+        fileList = null,
+    } = options;
+
+    const baseArgs: string[] = ['-i'];
+    if (literalSearch) baseArgs.push('-F');
+    if (includeHidden) baseArgs.push('--hidden');
+    for (const pat of excludePatterns) baseArgs.push('--glob', `!${pat}`);
+    if (filePattern) {
+        const includeGlob = filePattern.includes('/') ? filePattern : `**/${filePattern}`;
+        baseArgs.push('--glob', includeGlob);
+    }
+
+    const targets = fileList && fileList.length > 0 ? fileList : [rootPath];
+    const countArgs = ['--count-matches', '--no-messages', ...baseArgs, '--', contentQuery, ...targets];
+
+    return new Promise<RipgrepCountResult | null>((resolveP) => {
+        let matchCount = 0;
+        let fileCount = 0;
+        let buffer = '';
+        const proc = spawn(RG_PATH, countArgs, { timeout: 30000 });
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                const lastColon = trimmed.lastIndexOf(':');
+                if (lastColon === -1) continue;
+                const count = Number(trimmed.slice(lastColon + 1));
+                if (!isNaN(count) && count > 0) {
+                    matchCount += count;
+                    fileCount++;
+                }
+            }
+        });
+
+        proc.on('close', (code) => {
+            if ((code ?? 0) > 1) { resolveP(null); return; }
+            resolveP({ matchCount, fileCount });
+        });
         proc.on('error', () => resolveP(null));
     });
 }
