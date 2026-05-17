@@ -325,7 +325,14 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
 async function syntaxWarn(filePath: string, content: string): Promise<string> {
     try {
         const ext = path.extname(filePath).toLowerCase();
-        if (['.mdx', '.jsonc'].includes(ext)) return '';
+        // Suppression list: extensions registered to a grammar whose strict
+        // parser will reject the format's idiomatic content.
+        //   .mdx   — Markdown with embedded JSX; plain Markdown grammar errors
+        //   .jsonc — JSON-with-comments; strict JSON rejects `//` and `/* */`
+        //   .json5 — JSON5 (unquoted keys, trailing commas, etc.)
+        //   .jsonl, .ndjson — multiple top-level JSON values per file
+        // .geojson / .topojson are strict JSON variants and stay un-suppressed.
+        if (['.mdx', '.jsonc', '.json5', '.jsonl', '.ndjson'].includes(ext)) return '';
         const langName = getLangForFile(filePath);
         if (!langName) return '';
         const syntaxErrors = await checkSyntaxErrors(content, langName);
