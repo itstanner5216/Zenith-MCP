@@ -88,9 +88,9 @@ export async function compressTextFile(validPath: string, rawText: string, maxCh
     }
 
     return {
-        text: compressed!,
+        text: compressed,
         targetBudget,
         rawLength: rawText.length,
-        compressedLength: compressed!.length,
+        compressedLength: compressed.length,
     };
 }
