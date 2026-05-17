@@ -1127,7 +1127,7 @@ export async function getCompressionStructure(source?: string, langName?: string
     if (!defs) return null;
     if (defs.length === 0) return [];
 
-    const blocks: BlockEntry[] = defs.map((d: SymbolInfo) => ({
+    let blocks: BlockEntry[] = defs.map((d: SymbolInfo) => ({
         type: d.type,
         name: d.name,
         startLine: d.line - 1,
@@ -1135,6 +1135,19 @@ export async function getCompressionStructure(source?: string, langName?: string
         exported: false,
         anchors: [],
     }));
+
+    // Filter out nested blocks (e.g. local variables inside functions)
+    // A block is nested if there exists another block that strictly contains it,
+    // or if they have the exact same bounds, we keep the one that appears first (usually the parent declaration).
+    blocks = blocks.filter((b, i) => {
+        return !blocks.some((other, j) => {
+            if (i === j) return false;
+            const strictlyContains = other.startLine <= b.startLine && other.endLine >= b.endLine &&
+                                     (other.startLine < b.startLine || other.endLine > b.endLine);
+            const identicalBounds = other.startLine === b.startLine && other.endLine === b.endLine && j < i;
+            return strictlyContains || identicalBounds;
+        });
+    });
 
     const rulesOrUndef = langName !== undefined ? COMPRESSION_ANCHOR_RULES[langName] : undefined;
     if (!rulesOrUndef) return blocks;

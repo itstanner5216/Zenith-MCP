@@ -13,9 +13,8 @@ export function computeCompressionBudget(rawLength: number, maxChars: number, ke
     return Math.min(boundedMaxChars, ratioBudget);
 }
 
-export function isCompressionUseful(rawText: unknown, compressedText: unknown, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): boolean {
-    if (typeof rawText !== 'string' || typeof compressedText !== 'string') return false;
-    if (compressedText.length === 0 || rawText.length === 0) return false;
+export function isCompressionUseful(rawText: string, compressedText: string | null, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): compressedText is string {
+    if (compressedText === null || compressedText.length === 0 || rawText.length === 0) return false;
 
     // If raw text length exactly equals maxChars, it already fits the budget — no compression needed
     const boundedMaxChars = Math.max(0, Math.floor(maxChars));
