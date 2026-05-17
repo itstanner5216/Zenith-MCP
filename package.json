@@ -3,6 +3,7 @@
   "version": "2026.1.14",
   "private": true,
   "description": "Zenith-MCP monorepo",
+  "main": "packages/zenith-mcp/src/server/http.ts",
   "license": "MIT",
   "packageManager": "pnpm@11.1.0",
   "scripts": {
