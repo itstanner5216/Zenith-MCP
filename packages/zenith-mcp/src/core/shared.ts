@@ -249,7 +249,7 @@ export async function bm25PreFilterFiles(rootPath: string, query: string, topK =
     const MAX_FILE_SIZE = 512 * 1024;
     const MAX_FILES = 5000;
     const defaultExcludes = getDefaultExcludes();
-    const defaultExcludeGlobs = defaultExcludes.map(p => `**/${p}/**`);
+    const defaultExcludeGlobs = defaultExcludes.flatMap(p => [`**/${p}`, `**/${p}/**`]);
     const allExcludes = [...excludePatterns, ...defaultExcludeGlobs];
     const textExts = new Set(['.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte', '.html', '.css', '.scss', '.less', '.json', '.yaml', '.yml', '.toml', '.xml', '.md', '.txt', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.sql', '.graphql', '.proto', '.tf', '.hcl', '.lua', '.ex', '.exs', '.erl', '.hs', '.ml', '.clj', '.r', '.dockerfile', '.makefile', '.cmake', '.gradle', '.sbt', '.env.example', '.gitignore', '.editorconfig']);
     const hasRg = await ripgrepAvailable();
