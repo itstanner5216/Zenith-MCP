@@ -142,7 +142,7 @@ export function createRetrievalAwareToolRegistrar(
         registry.register(
           tool,
           (result as RegisteredToolLike).handler ?? handler,
-          config.inputSchema,
+          (result as RegisteredToolLike).inputSchema ?? config.inputSchema,
         );
         onRegistryChanged?.();
       };
