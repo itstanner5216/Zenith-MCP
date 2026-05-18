@@ -299,7 +299,11 @@ export async function findSymbol(source: string, langName: string, symbolName: s
     const targetName = parts[parts.length - 1];  // innermost name
     const parentNames = parts.slice(0, -1);       // qualifying parents
 
-    const allSymbols = await getSymbols(source, langName, { kindFilter });
+    const allSymbols = await getSymbols(source, langName, {
+        ...options,
+        kindFilter,
+        nameFilter: undefined,
+    });
     if (!allSymbols) return null;
 
     // Find direct matches on the target name
