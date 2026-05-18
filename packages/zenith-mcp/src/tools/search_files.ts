@@ -2,7 +2,7 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { minimatch } from "minimatch";
-import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, ripgrepCountMatches, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
+import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
 import { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
