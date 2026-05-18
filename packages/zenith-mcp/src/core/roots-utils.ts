@@ -8,16 +8,23 @@ async function parseRootUri(rootUri: string) {
     try {
         let rawPath: string;
         if (rootUri.startsWith('file:')) {
-            try {
-                rawPath = fileURLToPath(new URL(rootUri));
-            } catch (urlError) {
-                void urlError; // malformed file URI — fall back to manual path extraction
-                const afterScheme = rootUri.slice('file:'.length);
-                if (afterScheme.startsWith('//')) {
-                    const pathStart = afterScheme.indexOf('/', 2);
-                    rawPath = pathStart >= 0 ? afterScheme.slice(pathStart) : afterScheme;
-                } else {
-                    rawPath = afterScheme;
+            const afterScheme = rootUri.slice('file:'.length);
+            // Handle non-standard file:~ and file:~/... forms before URL parsing,
+            // because new URL('file:~/repo') normalizes the path to '/~' and loses
+            // the home-directory expansion semantics.
+            const pathPart = afterScheme.startsWith('///')
+                ? afterScheme.slice(2)
+                : afterScheme.startsWith('//')
+                    ? afterScheme.slice(afterScheme.indexOf('/', 2))
+                    : afterScheme;
+            if (pathPart === '~' || pathPart.startsWith('~/')) {
+                rawPath = pathPart;
+            } else {
+                try {
+                    rawPath = fileURLToPath(new URL(rootUri));
+                } catch (urlError) {
+                    void urlError;
+                    rawPath = pathPart;
                 }
             }
         } else {

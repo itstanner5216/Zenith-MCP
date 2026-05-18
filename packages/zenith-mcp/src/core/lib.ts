@@ -352,7 +352,7 @@ export async function tailFile(filePath: string, numLines: number) {
     const handle = await fs.open(filePath, 'r');
     try {
         let position = stat.size;
-        let tail = '';
+        const chunks: string[] = [];
         let lineCount = 0;
 
         while (position > 0 && lineCount <= cap) {
@@ -361,13 +361,15 @@ export async function tailFile(filePath: string, numLines: number) {
             const buf = Buffer.alloc(readSize);
             await handle.read(buf, 0, readSize, position);
             const chunk = buf.toString('utf-8');
-            // Count newlines in only the new chunk — avoids O(n²) re-scan
             for (let i = 0; i < chunk.length; i++) {
                 if (chunk[i] === '\n') lineCount++;
             }
-            tail = chunk + tail;
+            chunks.push(chunk);
         }
 
+        // Reverse chunks (read back-to-front) and join once
+        chunks.reverse();
+        const tail = chunks.join('');
         const lines = tail.replace(/\r\n/g, '\n').split('\n');
         if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
         const result = lines.slice(-cap);

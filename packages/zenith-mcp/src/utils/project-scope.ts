@@ -141,19 +141,27 @@ export function resolveProjectRoot(filePath: string, options?: ResolveOptions): 
         if (!allowedRoot) return setCached(cacheKey, null);
     }
 
-    // Step 1: Git root from the file path, clamped to sandbox
+    // Step 1: Git root from the file path
+    let gitRoot: string | null = null;
     try {
-        const gitRoot = clampToAllowed(findRepoRoot(absPath), absPath, options?.allowedDirectories);
-        if (gitRoot) return setCached(cacheKey, gitRoot);
+        gitRoot = clampToAllowed(findRepoRoot(absPath), absPath, options?.allowedDirectories);
     } catch (_err) {
-        // Continue to next step
+        // findRepoRoot may throw for non-git paths
     }
 
-    // Step 2: Marker-based detection, clamped to sandbox
-    // Try markers BEFORE broad allowed-root fallback so that /workspace/app
-    // (with package.json) is preferred over /workspace when no git root exists.
+    // Step 2: Marker-based detection — finds the deepest marker root.
+    // Within a git repo this finds the deepest package root (e.g. monorepo package).
+    // Without git this finds the nearest marker walking up.
     const markerRoot = clampToAllowed(_resolveFromMarkers(absPath), absPath, options?.allowedDirectories);
+
+    // Prefer the deepest (most specific) root between git and markers.
+    // In a monorepo, markerRoot (e.g. /repo/packages/app) is deeper than gitRoot (/repo).
+    if (markerRoot && gitRoot) {
+        const result = markerRoot.length >= gitRoot.length ? markerRoot : gitRoot;
+        return setCached(cacheKey, result);
+    }
     if (markerRoot) return setCached(cacheKey, markerRoot);
+    if (gitRoot) return setCached(cacheKey, gitRoot);
 
     // Step 3: MCP roots / allowed directories (broad fallback)
     const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
@@ -258,8 +266,8 @@ function _resolveFromAllowedDirectories(
  * With git:    returns the DEEPEST marker still at or below the git root
  * Without git: returns the NEAREST marker (first one walking up).
  *
- * Uses a single readdirSync per directory level (cached as a Set) to avoid
- * N × existsSync calls per marker per level, minimizing syscalls.
+ * Uses targeted existsSync per marker (~15 checks) rather than reading the
+ * full directory listing, which is more efficient for large directories.
  */
 function _resolveFromMarkers(absPath: string): string | null {
     let ceiling: string;
@@ -285,8 +293,7 @@ function _resolveFromMarkers(absPath: string): string | null {
         }
 
         try {
-            const dirEntries = new Set(fs.readdirSync(dir));
-            if (PROJECT_MARKERS.some(m => dirEntries.has(m))) {
+            if (PROJECT_MARKERS.some(m => fs.existsSync(path.join(dir, m)))) {
                 candidates.push(dir);
                 if (!ceiling || ceiling === fsRoot) return dir;
             }

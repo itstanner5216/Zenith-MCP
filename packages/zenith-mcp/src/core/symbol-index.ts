@@ -344,7 +344,11 @@ export async function ensureIndexFresh(db: Database.Database, repoRoot: string, 
             continue;
         }
         let source: string;
-        try { source = await fs.readFile(absPath, 'utf-8'); } catch { continue; } // nosemgrep
+        try { source = await fs.readFile(absPath, 'utf-8'); } catch { // nosemgrep
+            // File is unreadable or deleted — purge stale index rows
+            purgeIndexedPath(db, relPath);
+            continue;
+        }
         const hash = hashFileContent(source);
         const existing = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
         if (!existing || existing.hash !== hash) {
