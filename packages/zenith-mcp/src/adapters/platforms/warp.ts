@@ -9,6 +9,16 @@ class WarpAdapter extends MCPConfigAdapter {
   configFormat = "json" as const;
   supportedPlatforms: ("macos" | "linux" | "windows")[] = ["macos", "linux", "windows"];
 
+  /**
+   * Returns the Warp MCP config location.
+   *
+   * On macOS and Windows: returns a DIRECTORY path. Each MCP server has its own
+   * JSON file in that directory. Use `_isDirMode()` to check.
+   *
+   * On Linux: returns a single JSON FILE path containing all servers.
+   *
+   * Both `readConfig()` and `discoverServers()` handle both modes internally.
+   */
   configPath() {
     const plat = platform();
     if (plat === "darwin") {
@@ -46,13 +56,22 @@ class WarpAdapter extends MCPConfigAdapter {
       try {
         const files = readdirSync(p).filter(f => f.endsWith(".json")).sort();
         for (const file of files) {
+          const fullPath = join(p, file);
           try {
-            const data = JSON.parse(readFileSync(join(p, file), "utf-8"));
+            const data = JSON.parse(readFileSync(fullPath, "utf-8"));
             const name = file.replace(/\.json$/, "");
             result[name] = data;
-          } catch {}
+          } catch (error) {
+            console.warn(
+              `Skipping invalid Warp MCP config ${fullPath}: ${(error as Error).message}`,
+            );
+          }
         }
-      } catch {}
+      } catch (error) {
+        console.warn(
+          `Unable to read Warp MCP directory ${p}: ${(error as Error).message}`,
+        );
+      }
       return result;
     }
 

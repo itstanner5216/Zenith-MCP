@@ -1,22 +1,12 @@
-// toon_bridge.ts
-// In-process bridge: tree-sitter structure extraction → toon compression.
-// Called directly by compression.ts or executed via CLI for subprocess isolation.
-
+import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
 import { getCompressionStructure, getLangForFile } from './tree-sitter.js';
 import { compressSourceStructured, compressString } from 'zenith-toon';
 import type { StructureBlock } from 'zenith-toon';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
 /**
  * Compress source text using tree-sitter structure + toon codec.
  * Falls back to unstructured compression when tree-sitter can't parse.
- *
- * @param content  - raw file text
- * @param budget   - target character budget
- * @param filePath - optional, used to detect language for tree-sitter
- * @returns compressed text, or original if already within budget
  */
 export async function compressToon(
     content: string,
@@ -32,7 +22,7 @@ export async function compressToon(
         try {
             const defs = await getCompressionStructure(content, langName);
             if (defs && defs.length > 0) {
-                structure = defs.map((d: { name: string; type: string; startLine: number; endLine: number; exported: boolean; anchors: Array<{ startLine: number; endLine: number; kind: string; priority: number }> }) => ({
+                structure = defs.map((d) => ({
                     name: d.name,
                     kind: d.type,
                     type: d.type,
@@ -52,23 +42,51 @@ export async function compressToon(
         : compressString(content, budget);
 }
 
-// CLI Entry Point — invoked by compression.ts as: node dist/core/toon_bridge.js <filepath> <budget>
-const scriptPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-const thisPath = fileURLToPath(import.meta.url);
-if (scriptPath === thisPath) {
-    const filePath = process.argv[2];
-    const budget = parseInt(process.argv[3] ?? '0', 10);
+// ── Back-compat CLI shim ─────────────────────────────────────────────────────
+// Prior to the toon_bridge_cli.ts split, external callers ran:
+//   node dist/core/toon_bridge.js <file> <budget>
+// To avoid silent-failure breakage in pinned downstream tooling, detect when
+// this module IS the entry script and run the same CLI dispatch as
+// toon_bridge_cli.ts. Importers (the common case) are not affected.
 
-    if (filePath && !isNaN(budget) && budget > 0) {
-        const content = fs.readFileSync(filePath, 'utf-8');
+const __thisFile = fileURLToPath(import.meta.url);
+const __argv1 = process.argv[1];
+
+if (__argv1) {
+    let resolvedArgv: string;
+    try {
+        resolvedArgv = fs.realpathSync(__argv1);
+    } catch {
+        resolvedArgv = __argv1;
+    }
+    let resolvedSelf: string;
+    try {
+        resolvedSelf = fs.realpathSync(__thisFile);
+    } catch {
+        resolvedSelf = __thisFile;
+    }
+
+    if (resolvedArgv === resolvedSelf) {
+        // Same strict budget parsing as toon_bridge_cli.ts (kept inline to keep
+        // this shim self-contained and avoid a circular dependency).
+        const [filePath, budgetRaw] = process.argv.slice(2);
+        const valid = typeof budgetRaw === 'string' && /^\d+$/.test(budgetRaw);
+        const budget = valid ? Number.parseInt(budgetRaw, 10) : NaN;
+
+        if (!filePath || !Number.isFinite(budget) || budget <= 0) {
+            process.exit(1);
+        }
+
+        let content: string;
+        try {
+            content = fs.readFileSync(filePath, 'utf8');
+        } catch (error) {
+            console.error(`Failed to read file ${filePath}:`, error);
+            process.exit(1);
+        }
+
         compressToon(content, budget, filePath)
-            .then(out => process.stdout.write(out))
-            .catch(err => {
-                console.error(err);
-                process.exit(1);
-            });
-    } else {
-        process.exit(1);
+            .then((out) => process.stdout.write(out))
+            .catch((err) => { console.error(err); process.exit(1); });
     }
 }
-

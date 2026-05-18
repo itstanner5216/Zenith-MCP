@@ -11,6 +11,7 @@ import {
   validateDirectories,
 } from '../core/server.js';
 import { configExists, runFirstRunWizard } from '../config/index.js';
+import type { WizardIO } from '../config/wizard.js';
 
 async function runStdio() {
   const args = process.argv.slice(2);
@@ -28,7 +29,13 @@ async function runStdio() {
   await validateDirectories(allowedDirectories);
 
   if (!configExists()) {
-    await runFirstRunWizard();
+    // stdout is the MCP JSON-RPC transport in stdio mode — route wizard
+    // prompts to stderr to keep that pipe clean.
+    const wizardIO: WizardIO = {
+      input: process.stdin,
+      output: process.stderr,
+    };
+    await runFirstRunWizard(wizardIO);
   }
 
   const ctx = createFilesystemContext(allowedDirectories);

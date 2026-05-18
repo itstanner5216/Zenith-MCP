@@ -24,9 +24,9 @@ export function hashToolList(tools: Tool[]): string {
 export class ZenithToolRegistry {
   private _m = new Map<string, ToolMapping>();
 
-  register(tool: Tool, handler?: unknown): ToolMapping {
+  register(tool: Tool, handler?: unknown, inputZodSchema?: unknown): ToolMapping {
     const key = makeToolKey("zenith", tool.name);
-    const mapping: ToolMapping = { serverName: "zenith", tool, handler };
+    const mapping: ToolMapping = { serverName: "zenith", tool, handler, inputZodSchema };
     this._m.set(key, mapping);
     return mapping;
   }

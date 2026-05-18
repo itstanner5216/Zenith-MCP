@@ -10,6 +10,8 @@ export interface ToolMapping {
   tool: Tool;
   handler?: unknown;
   namespace?: string;
+  /** Original Zod input schema for runtime validation before dispatch. */
+  inputZodSchema?: unknown;
 }
 
 export interface PromptMapping {
@@ -131,6 +133,12 @@ export interface RankingEvent {
   scorerLatencyMs: number;
   group: "canary" | "control";
   timestamp: number;
+}
+
+// ─── Phase 2: Frequency prior ────────────────────────────────────────────────
+
+export interface FrequencyPriorSource {
+  readRankingEvents(sinceEpochSeconds: number): Promise<RankingEvent[]>;
 }
 
 // ─── Factory helpers ────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import type { ZenithConfig } from "./schema.js";
 // Format helpers — these can read/write arbitrary file paths (unlike adapters
 // which are locked to their own configPath).
 import { readJson5, writeJson5 } from "../adapters/helpers/json5.js";
+import { readJsonc, writeJsonc } from "../adapters/helpers/jsonc.js";
 import { readToml, writeToml } from "../adapters/helpers/toml.js";
 import { readYaml, writeYaml } from "../adapters/helpers/yaml.js";
 
@@ -15,16 +16,18 @@ import { readYaml, writeYaml } from "../adapters/helpers/yaml.js";
 // The server entry that Zenith writes into each platform's MCP config
 // ---------------------------------------------------------------------------
 
-const zenithServerEntry: Record<string, unknown> = {
-  command: "zenith-mcp",
-  args: [],
-};
+function makeZenithServerEntry(): Record<string, unknown> {
+  return {
+    command: "zenith-mcp",
+    args: [],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Supported MCP config extensions — used for directory scanning
 // ---------------------------------------------------------------------------
 
-const MCP_EXTENSIONS = new Set([".json", ".json5", ".toml", ".yaml", ".yml"]);
+const MCP_EXTENSIONS = new Set([".json", ".jsonc", ".json5", ".toml", ".yaml", ".yml"]);
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -34,6 +37,14 @@ export interface AutoWriteResult {
   written: string[];
   skipped: string[];
   errors: string[];
+}
+
+// ---------------------------------------------------------------------------
+// isObjectLike — shared helper for validating object-shaped config fields
+// ---------------------------------------------------------------------------
+
+function isObjectLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +116,7 @@ export function autoWriteToMcpConfigs(config: ZenithConfig): AutoWriteResult {
 
     // Write the Zenith server entry via the adapter's read-modify-write flow.
     try {
-      adapter.registerServer("zenith-mcp", zenithServerEntry);
+      adapter.registerServer("zenith-mcp", makeZenithServerEntry());
       written.push(cfgPath);
     } catch {
       // Restore the original content immediately.
@@ -225,6 +236,8 @@ function getFormatHandler(filePath: string): FormatHandler | null {
           writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf-8");
         },
       };
+    case ".jsonc":
+      return { read: readJsonc, write: writeJsonc };
     case ".json5":
       return { read: readJson5, write: writeJson5 };
     case ".toml":
@@ -239,16 +252,16 @@ function getFormatHandler(filePath: string): FormatHandler | null {
 
 /**
  * Check if parsed data looks like an MCP configuration file.
- * The universal indicator is a top-level `mcpServers` key.
+ * Recognises `mcpServers` (Claude, Cursor, etc.), `context_servers` (Zed),
+ * and `mcp.servers` (OpenCode, generic mcp). A bare `mcp: {}` without a
+ * `servers` sub-object does NOT qualify — too generic, would match unrelated configs.
  */
 function isMcpConfig(data: Record<string, unknown>): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    "mcpServers" in data &&
-    typeof data.mcpServers === "object" &&
-    data.mcpServers !== null
-  );
+  if (!isObjectLike(data)) return false;
+  if (isObjectLike(data.mcpServers)) return true;
+  if (isObjectLike(data.context_servers)) return true;
+  if (isObjectLike(data.mcp) && isObjectLike((data.mcp as Record<string, unknown>).servers)) return true;
+  return false;
 }
 
 function verifyAndWriteMcpConfig(
@@ -301,8 +314,19 @@ function verifyAndWriteMcpConfig(
 
   // Add the Zenith entry and write back.
   try {
-    const mcpServers = data.mcpServers as Record<string, unknown>;
-    mcpServers["zenith-mcp"] = zenithServerEntry;
+    // Select destination store in priority order, validated as object-like.
+    let serverStore: Record<string, unknown>;
+    if (isObjectLike(data.mcpServers)) {
+      serverStore = data.mcpServers;
+    } else if (isObjectLike(data.context_servers)) {
+      serverStore = data.context_servers;
+    } else if (isObjectLike(data.mcp) && isObjectLike((data.mcp as Record<string, unknown>).servers)) {
+      serverStore = (data.mcp as Record<string, unknown>).servers as Record<string, unknown>;
+    } else {
+      // Should be unreachable — isMcpConfig already verified one of these shapes.
+      throw new Error(`Unexpected MCP config shape in ${filePath}`);
+    }
+    serverStore["zenith-mcp"] = makeZenithServerEntry();
     handler.write(filePath, data);
     return { status: "written", message: filePath };
   } catch {

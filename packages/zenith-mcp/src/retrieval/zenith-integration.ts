@@ -88,6 +88,28 @@ function sessionIdFromExtra(extra: unknown): string {
       : "default";
 }
 
+/**
+ * Validates args against the tool's stored Zod schema before dispatch.
+ * Returns a validation error message if invalid, or null if valid/no schema.
+ */
+function validateToolArgs(
+  mapping: { inputZodSchema?: unknown },
+  args: Record<string, unknown>,
+): string | null {
+  const schema = mapping.inputZodSchema;
+  if (!schema || typeof schema !== "object") return null;
+
+  // Zod v4+ uses safeParse; Zod v3 also uses safeParse
+  const zodLike = schema as { safeParse?: (data: unknown) => { success: boolean; error?: { message?: string; issues?: unknown[] } } };
+  if (typeof zodLike.safeParse !== "function") return null;
+
+  const result = zodLike.safeParse(args);
+  if (result.success) return null;
+
+  const errMsg = result.error?.message ?? "Invalid arguments";
+  return errMsg;
+}
+
 // ── Tool registration hook ───────────────────────────────────────────────────
 
 type RegisterToolArgs = [
@@ -117,7 +139,11 @@ export function createRetrievalAwareToolRegistrar(
       let currentName = name;
       const sync = () => {
         const tool = toListedTool(currentName, result as RegisteredToolLike);
-        registry.register(tool, (result as RegisteredToolLike).handler ?? handler);
+        registry.register(
+          tool,
+          (result as RegisteredToolLike).handler ?? handler,
+          (result as RegisteredToolLike).inputSchema ?? config.inputSchema,
+        );
         onRegistryChanged?.();
       };
 
@@ -202,38 +228,26 @@ export function installRetrievalRequestHandlers(
   pipeline: RetrievalPipeline,
   registry: ZenithToolRegistry,
 ): void {
-  const protocol = server.server as unknown as {
-    _requestHandlers: Map<string, (request: unknown, extra: unknown) => Promise<unknown>>;
-  };
-  const defaultList = protocol._requestHandlers.get("tools/list");
-  const defaultCall = protocol._requestHandlers.get("tools/call");
-
-  if (!defaultList || !defaultCall) {
-    throw new Error("MCP tool handlers are not initialized");
-  }
+  // No private SDK field access needed — the registry is the source of truth.
+  // Every tool registered via createRetrievalAwareToolRegistrar is mirrored
+  // into the registry, so listing/dispatching through the registry produces
+  // the same set of tools as the SDK's internal handler would have.
 
   const errorResult = (message: string): CallToolResult => ({
     content: [{ type: "text", text: message }],
     isError: true,
   });
 
-  server.server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
-    const full = (await defaultList(request, extra)) as { tools: Tool[] };
+  type ToolHandler = (args: Record<string, unknown>, extra: unknown) => Promise<CallToolResult>;
+
+  server.server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
+    // `getToolsForList` returns Tool[] sourced directly from registry mappings
+    // (see RetrievalPipeline.getToolsForList — every code path returns Tools
+    // pulled from registry.mappings). The objects in `selected` are already
+    // the canonical registry Tools, including the synthetic routing tool when
+    // retrieval is enabled. No further lookup is needed.
     const selected = await pipeline.getToolsForList(sessionIdFromExtra(extra));
-    const fullByName = new Map(full.tools.map((tool) => [tool.name, tool]));
-    const tools: Tool[] = [];
-
-    for (const tool of selected) {
-      if (tool.name === ROUTING_TOOL_NAME) {
-        tools.push(tool);
-        continue;
-      }
-
-      const sdkTool = fullByName.get(tool.name);
-      if (sdkTool) tools.push(sdkTool);
-    }
-
-    return { ...full, tools };
+    return { tools: selected };
   });
 
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -250,32 +264,61 @@ export function installRetrievalRequestHandlers(
       }
 
       if (args.describe === true) {
-        const full = (await defaultList({ method: "tools/list" }, extra)) as { tools: Tool[] };
-        const tool = full.tools.find((candidate) => candidate.name === mapping.tool.name) ?? mapping.tool;
         pipeline.recordRouterDescribe(sid, target);
-        return { content: [{ type: "text", text: JSON.stringify(tool, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify(mapping.tool, null, 2) }] };
       }
 
       const routedArgs = (args.arguments ?? {}) as Record<string, unknown>;
-      const proxiedRequest = {
-        ...request,
-        params: {
-          ...request.params,
-          name: mapping.tool.name,
-          arguments: routedArgs,
-        },
-      };
-      const result = (await defaultCall(proxiedRequest, extra)) as CallToolResult;
+      const handler = mapping.handler as ToolHandler | undefined;
+      if (!handler) {
+        return errorResult(`Tool ${target} has no handler`);
+      }
+
+      // Validate args against tool's Zod schema before dispatch
+      const validationErr = validateToolArgs(mapping, routedArgs);
+      if (validationErr) {
+        return errorResult(`Tool ${target} input validation failed: ${validationErr}`);
+      }
+
+      let result: CallToolResult;
+      try {
+        result = await handler(routedArgs, extra);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = errorResult(`Tool ${target} threw: ${message}`);
+      }
       if (!result.isError) {
         await pipeline.onToolCalled(sid, target, routedArgs, true);
       }
       return result;
     }
 
-    const result = (await defaultCall(request, extra)) as CallToolResult;
+    const key = makeToolKey("zenith", toolName);
+    const mapping = registry.get(key);
+    if (!mapping) {
+      return errorResult(`Tool ${toolName} not found in registry`);
+    }
+    const handler = mapping.handler as ToolHandler | undefined;
+    if (!handler) {
+      return errorResult(`Tool ${toolName} has no registered handler`);
+    }
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+
+    // Validate args against tool's Zod schema before dispatch
+    const validationErr = validateToolArgs(mapping, args);
+    if (validationErr) {
+      return errorResult(`Tool ${toolName} input validation failed: ${validationErr}`);
+    }
+
+    let result: CallToolResult;
+    try {
+      result = await handler(args, extra);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result = errorResult(`Tool ${toolName} threw: ${message}`);
+    }
     if (!result.isError) {
-      const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      await pipeline.onToolCalled(sid, makeToolKey("zenith", toolName), args, false);
+      await pipeline.onToolCalled(sid, key, args, false);
     }
     return result;
   });

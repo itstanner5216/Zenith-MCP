@@ -1,8 +1,7 @@
 import { z } from "zod";
 import fs from "fs/promises";
-import { createReadStream } from "fs";
-import { createInterface } from "readline";
-import { CHAR_BUDGET } from '../core/shared.js';
+import path from "path";
+import { getCharBudget, ripgrepAvailable, ripgrepSearch, lastRipgrepError } from '../core/shared.js';
 import { getLangForFile, findSymbol } from '../core/tree-sitter.js';
 import type { ToolServer, ToolContext } from './types.js';
 
@@ -16,88 +15,57 @@ interface SearchFileArgs {
     expandLines?: number;
 }
 
-interface OutputEntry {
-    num: number;
-    text: string;
-    isMatch: boolean;
-}
-
-interface BufferItem {
-    num: number;
-    text: string;
-}
-
 export function register(server: ToolServer, ctx: ToolContext): void {
     const handler = async (args: SearchFileArgs) => {
         const validPath = await ctx.validatePath(args.path);
-        const maxChars = Math.min(args.maxChars ?? 50000, CHAR_BUDGET);
+        const maxChars = Math.min(args.maxChars ?? 50000, getCharBudget());
         if (args.grep) {
-            const grepPattern = new RegExp(args.grep, 'i');
-            const grepContext = Math.min(Math.max(0, args.grepContext ?? 0), 30);
-            const beforeCount = grepContext;
-            const afterCount = grepContext;
-            const hasContext = beforeCount > 0 || afterCount > 0;
-            const outputEntries: OutputEntry[] = [];
-            let totalLines = 0;
-            let charCount = 0;
-            const beforeBuffer: BufferItem[] = [];
-            let afterRemaining = 0;
-            let lastEmittedLine = 0;
-            function emit(lineNum: number, line: string, isMatch: boolean): void {
-                const lastEntry = outputEntries[outputEntries.length - 1];
-                if (lastEntry !== undefined && lineNum <= lastEntry.num)
-                    return;
-                if (hasContext && lastEmittedLine > 0 && lineNum > lastEmittedLine + 1) {
-                    const sep = '---';
-                    if (charCount + sep.length + 1 <= maxChars) {
-                        outputEntries.push({ num: -1, text: sep, isMatch: false });
-                        charCount += sep.length + 1;
-                    }
-                }
-                const marker = isMatch ? '*' : '';
-                const formatted = `${lineNum}:${marker}${line}`;
-                if (charCount + formatted.length + 1 <= maxChars) {
-                    outputEntries.push({ num: lineNum, text: formatted, isMatch });
-                    charCount += formatted.length + 1;
-                    lastEmittedLine = lineNum;
-                }
+            const hasRg = await ripgrepAvailable();
+            if (!hasRg) {
+                throw new Error('Regex grep requires ripgrep. In-process regex execution is disabled for safety.');
             }
-            await new Promise<void>((resolve, reject) => {
-                const stream = createReadStream(validPath, { encoding: 'utf-8' });
-                const rl = createInterface({ input: stream, crlfDelay: Infinity });
-                rl.on('line', (line) => {
-                    totalLines++;
-                    const isMatch = grepPattern.test(line);
-                    if (isMatch) {
-                        if (hasContext) {
-                            for (const bufItem of beforeBuffer) {
-                                emit(bufItem.num, bufItem.text, false);
-                            }
-                            beforeBuffer.length = 0;
-                        }
-                        emit(totalLines, line, true);
-                        afterRemaining = afterCount;
-                    }
-                    else if (afterRemaining > 0) {
-                        emit(totalLines, line, false);
-                        afterRemaining--;
-                    }
-                    else if (beforeCount > 0) {
-                        beforeBuffer.push({ num: totalLines, text: line });
-                        if (beforeBuffer.length > beforeCount)
-                            beforeBuffer.shift();
-                    }
-                });
-                rl.on('close', resolve);
-                rl.on('error', reject);
-                stream.on('error', reject);
+
+            const grepContext = Math.min(Math.max(0, args.grepContext ?? 0), 30);
+            const rgResults = await ripgrepSearch(path.dirname(validPath), {
+                contentQuery: args.grep,
+                ignoreCase: true,
+                maxResults: 10000,
+                contextLines: grepContext,
+                fileList: [validPath],
+                includeContextLines: true,
+                skipSensitiveFilter: true,
+                maxMatchesPerFile: 500,
             });
-            const content = outputEntries.length > 0
-                ? outputEntries.map(e => e.text).join('\n')
-                : 'No matches.';
-            return {
-                content: [{ type: "text" as const, text: content }],
-            };
+
+            if (rgResults === null) {
+                const detail = lastRipgrepError ? `: ${lastRipgrepError}` : '';
+                throw new Error(`Search failed — ripgrep process error${detail}`);
+            }
+            if (rgResults.length === 0) {
+                return { content: [{ type: 'text' as const, text: 'No matches.' }] };
+            }
+
+            // Sort by line number to ensure ripgrep context events are in order
+            rgResults.sort((a, b) => a.line - b.line);
+
+            const outputLines: string[] = [];
+            let charCount = 0;
+            let prevLine = -1;
+            for (const result of rgResults) {
+                if (prevLine !== -1 && result.line > prevLine + 1) {
+                    if (charCount + 4 > maxChars) break;
+                    outputLines.push('---');
+                    charCount += 4;
+                }
+                const marker = result.isContext ? '' : '*';
+                const formatted = `${result.line}:${marker}${result.content}`;
+                if (charCount + formatted.length + 1 > maxChars) break;
+                outputLines.push(formatted);
+                charCount += formatted.length + 1;
+                prevLine = result.line;
+            }
+
+            return { content: [{ type: 'text' as const, text: outputLines.join('\n') }] };
         }
         if (args.symbol) {
             const langName = getLangForFile(validPath);

@@ -255,25 +255,38 @@ function ensureStashTables(db: Database.Database): void {
 // Singleton + integration hooks
 // ---------------------------------------------------------------------------
 
-let _instance: ProjectContext | null = null;
+let _instances = new WeakMap<FsContext, ProjectContext>();
 
 export function getProjectContext(ctx: FsContext): ProjectContext {
-    if (!_instance) {
-        _instance = new ProjectContext(ctx);
+    let instance = _instances.get(ctx);
+    if (!instance) {
+        instance = new ProjectContext(ctx);
+        _instances.set(ctx, instance);
     }
-    return _instance;
+    return instance;
 }
 
 /**
  * Hook into server.js — call this when roots change to refresh context.
+ * Pass the FsContext to refresh only that session's ProjectContext.
  */
-export function onRootsChanged(): void {
-    if (_instance) {
-        _instance.refresh();
+export function onRootsChanged(ctx?: FsContext): void {
+    if (ctx) {
+        const instance = _instances.get(ctx);
+        if (instance) {
+            instance.refresh();
+        }
+        return;
     }
+    // Without a ctx we cannot iterate a WeakMap. Callers should pass their
+    // ctx for proper per-session refresh.
 }
 
-/** Reset the singleton — for test isolation only. */
-export function resetProjectContext(): void {
-    _instance = null;
+/** Reset the context — for test isolation only. */
+export function resetProjectContext(ctx?: FsContext): void {
+    if (ctx) {
+        _instances.delete(ctx);
+        return;
+    }
+    _instances = new WeakMap<FsContext, ProjectContext>();
 }

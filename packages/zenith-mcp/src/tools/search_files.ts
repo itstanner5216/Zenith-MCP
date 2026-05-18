@@ -2,18 +2,12 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { minimatch } from "minimatch";
-import { DEFAULT_EXCLUDES, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, CHAR_BUDGET, RANK_THRESHOLD } from '../core/shared.js';
+import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
 import { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
 import { findRepoRoot, getDb, indexDirectory } from '../core/symbol-index.js';
 import { ToolServer, ToolContext } from './types.js';
-import { loadConfig } from '../config/index.js';
-// Smaller budget for content-search results (match snippets, not full files).
-// Configurable via config. Symbol/list modes still use full CHAR_BUDGET.
-const _config = loadConfig();
-const SEARCH_CHAR_BUDGET = Math.min(_config.advanced.search_char_budget, CHAR_BUDGET);
-const DEFAULT_EXCLUDE_GLOBS = DEFAULT_EXCLUDES.map(p => `**/${p}/**`);
 
 interface SymbolDbRow {
     file_path: string;
@@ -70,6 +64,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         annotations: { readOnlyHint: true }
     }, async (args: SearchFilesArgs) => {
         const rootPath = await ctx.validatePath(args.path);
+        const defaultExcludeGlobs = getDefaultExcludes().map(p => `**/${p}/**`);
         // ---- SYMBOL SEARCH / LIST MODE ----
         if (args.mode === "symbol") {
             const listAll = !args.symbolQuery;
@@ -81,7 +76,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const results = await ripgrepFindFiles(rootPath, {
                     namePattern: args.pattern || null,
                     maxResults: 2000,
-                    excludePatterns: DEFAULT_EXCLUDE_GLOBS,
+                    excludePatterns: defaultExcludeGlobs,
                 });
                 if (results)
                     filePaths = results;
@@ -102,7 +97,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         if (filePaths.length >= 2000)
                             return;
                         const fullPath = path.join(dir, entry.name); 
-                        if (DEFAULT_EXCLUDES.some(p => entry.name === p))
+                        if (getDefaultExcludes().some(p => entry.name === p))
                             continue;
                         if (isSensitive(fullPath))
                             continue;
@@ -159,7 +154,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const budgetLines: string[] = [];
                 let charCount = 0;
                 for (const line of outputLines) {
-                    if (charCount + line.length + 1 > CHAR_BUDGET)
+                    if (charCount + line.length + 1 > getCharBudget())
                         break;
                     budgetLines.push(line);
                     charCount += line.length + 1;
@@ -212,7 +207,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const budgetLines: string[] = [];
                 let charCount = 0;
                 for (const line of outputLines.slice(0, userMaxResults)) {
-                    if (charCount + line.length + 1 > CHAR_BUDGET)
+                    if (charCount + line.length + 1 > getCharBudget())
                         break;
                     budgetLines.push(line);
                     charCount += line.length + 1;
@@ -324,7 +319,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             charCount = 0;
             for (const r of top) {
                 const line = `${r.filePath}:${r.line}  [${(r.score * 100).toFixed(0)}%] ${r.name}`;
-                if (charCount + line.length + 1 > CHAR_BUDGET)
+                if (charCount + line.length + 1 > getCharBudget())
                     break;
                 outLines.push(line);
                 charCount += line.length + 1;
@@ -346,7 +341,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     namePattern: effectivePattern,
                     pathContains: args.pathContains || null,
                     maxResults: Math.min(userMaxResults * 5, 2000),
-                    excludePatterns: DEFAULT_EXCLUDE_GLOBS,
+                    excludePatterns: defaultExcludeGlobs,
                 });
                 if (results !== null)
                     rawResults = results;
@@ -369,7 +364,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         if (rawResults.length >= userMaxResults * 5)
                             return;
                         const fullPath = path.join(dir, entry.name); 
-                        if (DEFAULT_EXCLUDES.some(p => entry.name === p))
+                        if (getDefaultExcludes().some(p => entry.name === p))
                             continue;
                         if (isSensitive(fullPath))
                             continue;
@@ -402,7 +397,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             const BATCH_SIZE = 50;
             const MAX_FILE_SIZE = 512 * 1024;
-            const symbolName = args.definesSymbol!;
+            if (!args.definesSymbol) {
+                throw new Error('definesSymbol is required for definition mode.');
+            }
+            const symbolName = args.definesSymbol;
             interface DefinitionSymbol {
                 name: string;
                 type: string;
@@ -487,7 +485,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     namePattern: effectivePattern,
                     pathContains: args.pathContains || null,
                     maxResults: Math.min(userMaxResults * 2, 2000),
-                    excludePatterns: DEFAULT_EXCLUDE_GLOBS,
+                    excludePatterns: defaultExcludeGlobs,
                 });
                 if (results !== null)
                     rawResults = results;
@@ -511,7 +509,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             return;
                         const fullPath = path.join(dir, entry.name); 
                         const rel = path.relative(rootPath, fullPath);
-                        if (DEFAULT_EXCLUDES.some(p => entry.name === p))
+                        if (getDefaultExcludes().some(p => entry.name === p))
                             continue;
                         if (isSensitive(fullPath))
                             continue;
@@ -561,7 +559,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const budgetLines: string[] = [];
             let charCount = 0;
             for (const line of outputLines) {
-                if (charCount + line.length + 1 > CHAR_BUDGET)
+                if (charCount + line.length + 1 > getCharBudget())
                     break;
                 budgetLines.push(line);
                 charCount += line.length + 1;
@@ -575,21 +573,51 @@ export function register(server: ToolServer, ctx: ToolContext) {
         }
         const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 50));
         const contextLines = Math.max(0, args.contextLines ?? 0);
-        const allExcludes = DEFAULT_EXCLUDE_GLOBS;
-        const flags = 'gi';
-        const contentRegex = args.literalSearch
-            ? new RegExp(args.contentQuery!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags) 
-            : new RegExp(args.contentQuery!, flags); 
-        // ---- RIPGREP PATH ----
+        const allExcludes = defaultExcludeGlobs;
+
+        // JS fallback only supports literal search — untrusted regex compilation is a ReDoS risk
         const hasRg = await ripgrepAvailable();
+        if (!hasRg && !args.literalSearch) {
+            throw new Error('Regex content search requires ripgrep. Use literalSearch: true for the JS fallback.');
+        }
+
+        const contentRegex = args.literalSearch
+            ? new RegExp(args.contentQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            : null; // regex search is handled by ripgrep only
+
+        function contentFileFilter(fullPath: string, relativePath: string): boolean {
+            if (args.pathContains && !fullPath.toLowerCase().includes(args.pathContains.toLowerCase())) {
+                return false;
+            }
+            if (args.extensions?.length) {
+                const ext = path.extname(fullPath).toLowerCase();
+                if (!args.extensions.some(e => e.toLowerCase() === ext)) return false;
+            }
+            if (args.pattern) {
+                const pat = args.pattern;
+                const matches = minimatch(relativePath, pat, { dot: true }) ||
+                    (!pat.includes('/') && minimatch(relativePath, `**/${pat}`, { dot: true }));
+                if (!matches) return false;
+            }
+            return true;
+        }
+
+        // ---- RIPGREP PATH ----
         if (hasRg) {
+            // Do not use ripgrepCountMatches for countOnly here.
+            // ripgrep's count path reports occurrence counts, while the JS fallback
+            // counts matching lines, which makes results depend on whether ripgrep
+            // is available. Fall through so countOnly uses the shared non-shortcut
+            // behavior instead of returning environment-dependent counts.
+
             let rgResults: RipgrepResult[] | null = null;
-            if (args.contentQuery!.length > 2) {
+            if (args.contentQuery.length > 2) {
                 try {
-                    const candidateFiles = await bm25PreFilterFiles(rootPath, args.contentQuery!, 100, allExcludes);
+                    let candidateFiles = await bm25PreFilterFiles(rootPath, args.contentQuery, 100, allExcludes);
+                    candidateFiles = candidateFiles.filter(f => contentFileFilter(f, path.relative(rootPath, f)));
                     if (candidateFiles.length > 0) {
                         rgResults = await ripgrepSearch(rootPath, {
-                            contentQuery: args.contentQuery!,
+                            contentQuery: args.contentQuery,
                             filePattern: args.pattern || null,
                             ignoreCase: true,
                             maxResults: Math.max(userMaxResults, 500),
@@ -601,12 +629,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         });
                     }
                 }
-                catch {
+                catch (_err) {
+                    // BM25 pre-filter failed — fall through to full ripgrep search
                 }
             }
             if (rgResults === null) {
                 rgResults = await ripgrepSearch(rootPath, {
-                    contentQuery: args.contentQuery!,
+                    contentQuery: args.contentQuery,
                     filePattern: args.pattern || null,
                     ignoreCase: true,
                     maxResults: Math.max(userMaxResults, 500),
@@ -616,7 +645,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     includeHidden: args.includeHidden ?? false,
                 });
             }
+            if (rgResults === null && !args.literalSearch) {
+                throw new Error('Search failed — ripgrep process error.');
+            }
             if (rgResults !== null) {
+                // Apply extensions/pathContains filters to results
+                rgResults = rgResults.filter(r => contentFileFilter(r.file, path.relative(rootPath, r.file)));
                 if (rgResults.length === 0) {
                     return { content: [{ type: "text" as const, text: 'No matches.' }] };
                 }
@@ -627,14 +661,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const rawLines = rgResults.map(r => `${r.file}:${r.line}: ${r.content}`);
                 let outputLines: string[];
                 if (rawLines.length > RANK_THRESHOLD) {
-                    const { ranked } = bm25RankResults(rawLines, args.contentQuery!, SEARCH_CHAR_BUDGET);
+                    const { ranked } = bm25RankResults(rawLines, args.contentQuery, getSearchCharBudget());
                     outputLines = ranked;
                 }
                 else {
                     outputLines = [];
                     let charCount = 0;
                     for (const line of rawLines) {
-                        if (charCount + line.length + 1 > SEARCH_CHAR_BUDGET)
+                        if (charCount + line.length + 1 > getSearchCharBudget())
                             break;
                         outputLines.push(line);
                         charCount += line.length + 1;
@@ -644,12 +678,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
         }
         // ------------------------------------------------------------------
-        // JS fallback (content mode)
+        // JS fallback (content mode — literal search only)
         // ------------------------------------------------------------------
         const contentResults: string[] = [];
         const maxJsFallback = Math.min(200, userMaxResults);
         async function grepFile(filePath: string) {
-            if (contentResults.length >= maxJsFallback)
+            if (contentResults.length >= maxJsFallback || !contentRegex)
                 return;
             try {
                 const content = await fs.readFile(filePath, 'utf-8');
@@ -659,12 +693,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     lineNumber++;
                     if (contentResults.length >= maxJsFallback)
                         break;
+                    contentRegex.lastIndex = 0; // Reset stateful regex before each test
                     if (contentRegex.test(line)) {
                         contentResults.push(`${filePath}:${lineNumber}: ${line.trim().slice(0, 500)}`);
                     }
                 }
             }
-            catch { /* skip binary/unreadable */ }
+            catch (_err) { /* skip binary/unreadable files */ }
         }
         async function walk(dir: string) {
             if (contentResults.length >= maxJsFallback)
@@ -673,11 +708,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
             try {
                 entries = await fs.readdir(dir, { withFileTypes: true });
             }
-            catch {
+            catch (_err) {
                 return;
-            } 
+            }
             for (const entry of entries) {
-                const fullPath = path.join(dir, entry.name); 
+                const fullPath = path.join(dir, entry.name);
                 const rel = path.relative(rootPath, fullPath);
                 const excluded = allExcludes.some(pat => minimatch(rel, pat, { dot: true }) ||
                     minimatch(rel, pat.replace(/^\*\*\//, ''), { dot: true }));
@@ -689,8 +724,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     await walk(fullPath);
                 }
                 else if (entry.isFile()) {
-                    if (!args.pattern || minimatch(rel, args.pattern, { dot: true }))
+                    if (contentFileFilter(fullPath, rel)) {
                         await grepFile(fullPath);
+                    }
                 }
             }
         }
@@ -701,14 +737,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
         }
         let finalOutput: string[];
         if (contentResults.length > RANK_THRESHOLD) {
-            const { ranked } = bm25RankResults(contentResults, args.contentQuery!, SEARCH_CHAR_BUDGET);
+            const { ranked } = bm25RankResults(contentResults, args.contentQuery, getSearchCharBudget());
             finalOutput = ranked;
         }
         else {
             finalOutput = [];
             let charCount = 0;
             for (const line of contentResults) {
-                if (charCount + line.length + 1 > SEARCH_CHAR_BUDGET)
+                if (charCount + line.length + 1 > getSearchCharBudget())
                     break;
                 finalOutput.push(line);
                 charCount += line.length + 1;

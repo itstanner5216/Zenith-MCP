@@ -8,8 +8,8 @@ import { ProjectRegistry } from '../core/project-registry.js';
 //
 // Resolution ladder (in order):
 //   1. Git repo detection from the file path itself
-//   2. MCP roots / allowed directories → git detection on each, with single-dir fallback
-//   3. Marker-based detection (deepest marker within git root, or nearest without git)
+//   2. Marker-based detection (deepest marker within git root, or nearest without git)
+//   3. MCP roots / allowed directories → git detection on each, with single-dir fallback
 //   4. ProjectRegistry matching (from provided entries or allowed directories)
 //   5. Global fallback (null)
 // ---------------------------------------------------------------------------
@@ -47,7 +47,39 @@ const MARKER_EXCLUDE_DIRS = new Set([
   'coverage',
 ]);
 
+const MAX_CACHE_ENTRIES = 512;
 const _cache = new Map<string, string | null>();
+
+function buildCacheKey(absPath: string, options?: ResolveOptions): string {
+    const allowed = [...(options?.allowedDirectories ?? [])]
+        .map(dir => path.resolve(dir))
+        .sort()
+        .join('|');
+    const registry = [...(options?.registryEntries ?? [])]
+        .map(entry => path.resolve(entry.project_root))
+        .sort()
+        .join('|');
+    return `${absPath}::${allowed}::${registry}`;
+}
+
+function getCached(key: string): string | null | undefined {
+    const value = _cache.get(key);
+    if (value === undefined) return undefined;
+    // LRU: move to end
+    _cache.delete(key);
+    _cache.set(key, value);
+    return value;
+}
+
+function setCached(key: string, value: string | null): string | null {
+    if (_cache.has(key)) _cache.delete(key);
+    _cache.set(key, value);
+    if (_cache.size > MAX_CACHE_ENTRIES) {
+        const oldestKey = _cache.keys().next().value;
+        if (oldestKey !== undefined) _cache.delete(oldestKey);
+    }
+    return value;
+}
 
 export interface ResolveOptions {
   /** Allowed directories (from MCP roots or CLI args) */
@@ -65,49 +97,81 @@ export interface ResolveOptions {
  * @param options — optional allowed directories and registry entries
  * @returns the resolved project root, or null if no project found
  */
+function getMostSpecificAllowedRoot(absPath: string, allowedDirectories?: string[]): string | null {
+    if (!allowedDirectories?.length) return null;
+    const match = [...allowedDirectories]
+        .map(dir => path.resolve(dir))
+        .filter(dir => isWithinProject(absPath, dir))
+        .sort((a, b) => b.length - a.length)[0];
+    return match ?? null;
+}
+
+function clampToAllowed(candidate: string | null, absPath: string, allowedDirectories?: string[]): string | null {
+    if (!allowedDirectories?.length) return candidate;
+    const allowedRoot = getMostSpecificAllowedRoot(absPath, allowedDirectories);
+    if (!allowedRoot) return null;
+    if (!candidate) return null;
+
+    // If the candidate is within or equal to ANY allowed directory, return it as-is.
+    // This prevents over-clamping when e.g. both /repo and /repo/packages/pkg are
+    // allowed and the git root is /repo — without this check, getMostSpecificAllowedRoot
+    // returns /repo/packages/pkg and clamps /repo down to it incorrectly.
+    const resolvedAllowed = allowedDirectories.map(dir => path.resolve(dir));
+    if (resolvedAllowed.some(dir => isWithinProject(candidate, dir))) return candidate;
+
+    // Candidate is above (contains) the allowed root — clamp down
+    if (isWithinProject(allowedRoot, candidate)) return allowedRoot;
+    // Candidate is within the allowed root — keep it
+    if (isWithinProject(candidate, allowedRoot)) return candidate;
+    return null;
+}
+
 export function resolveProjectRoot(filePath: string, options?: ResolveOptions): string | null {
-  const absPath = path.resolve(filePath);
+    const absPath = path.resolve(filePath);
+    const cacheKey = buildCacheKey(absPath, options);
 
-  // Check cache unless bypassed
-  if (!options?.noCache && _cache.has(absPath)) {
-    return _cache.get(absPath)!;
-  }
-
-  // Step 1: Git repo detection from the file path itself
-  try {
-    const gitRoot = findRepoRoot(absPath);
-    if (gitRoot) {
-      _cache.set(absPath, gitRoot);
-      return gitRoot;
+    if (!options?.noCache) {
+        const cached = getCached(cacheKey);
+        if (cached !== undefined) return cached;
     }
-  } catch {
-    // Continue to next steps
-  }
 
-  // Step 2: MCP roots / allowed directories
-  const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
-  if (allowedRoot) {
-    _cache.set(absPath, allowedRoot);
-    return allowedRoot;
-  }
+    // If allowed directories are set and the path is outside all of them, short-circuit
+    if (options?.allowedDirectories?.length) {
+        const allowedRoot = getMostSpecificAllowedRoot(absPath, options.allowedDirectories);
+        if (!allowedRoot) return setCached(cacheKey, null);
+    }
 
-  // Step 3: Marker-based detection
-  const markerRoot = _resolveFromMarkers(absPath);
-  if (markerRoot) {
-    _cache.set(absPath, markerRoot);
-    return markerRoot;
-  }
+    // Step 1: Git root from the file path
+    let gitRoot: string | null = null;
+    try {
+        gitRoot = clampToAllowed(findRepoRoot(absPath), absPath, options?.allowedDirectories);
+    } catch (_err) {
+        // findRepoRoot may throw for non-git paths
+    }
 
-  // Step 4: Registry matching (from explicit entries)
-  const registryRoot = _resolveFromRegistry(absPath, options?.registryEntries);
-  if (registryRoot) {
-    _cache.set(absPath, registryRoot);
-    return registryRoot;
-  }
+    // Step 2: Marker-based detection — finds the deepest marker root.
+    // Within a git repo this finds the deepest package root (e.g. monorepo package).
+    // Without git this finds the nearest marker walking up.
+    const markerRoot = clampToAllowed(_resolveFromMarkers(absPath), absPath, options?.allowedDirectories);
 
-  // Step 5: Global fallback
-  _cache.set(absPath, null);
-  return null;
+    // Prefer the deepest (most specific) root between git and markers.
+    // In a monorepo, markerRoot (e.g. /repo/packages/app) is deeper than gitRoot (/repo).
+    if (markerRoot && gitRoot) {
+        const result = markerRoot.length >= gitRoot.length ? markerRoot : gitRoot;
+        return setCached(cacheKey, result);
+    }
+    if (markerRoot) return setCached(cacheKey, markerRoot);
+    if (gitRoot) return setCached(cacheKey, gitRoot);
+
+    // Step 3: MCP roots / allowed directories (broad fallback)
+    const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
+    if (allowedRoot) return setCached(cacheKey, allowedRoot);
+
+    // Step 4: Registry matching
+    const registryRoot = _resolveFromRegistry(absPath, options?.registryEntries);
+    if (registryRoot) return setCached(cacheKey, registryRoot);
+
+    return setCached(cacheKey, null);
 }
 
 /**
@@ -141,7 +205,7 @@ export function clearProjectScopeCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Step 2: Resolve from allowed directories (MCP roots / CLI args).
+ * Step 3: Resolve from allowed directories (MCP roots / CLI args).
  *
  * For each allowed directory:
  *   - Try git detection
@@ -154,37 +218,38 @@ function _resolveFromAllowedDirectories(
 ): string | null {
   if (!allowedDirectories || allowedDirectories.length === 0) return null;
 
+  // Sort to match cache key ordering — ensures same result regardless of input order
+  const sortedDirs = [...allowedDirectories].map(d => path.resolve(d)).sort();
+
   // Try git detection on each allowed directory
-  for (const dir of allowedDirectories) {
+  for (const resolvedDir of sortedDirs) {
     try {
-      const gitRoot = findRepoRoot(dir);
+      const gitRoot = findRepoRoot(resolvedDir);
       if (gitRoot) {
-        // Check if the file path is within this git root
-        if (isWithinProject(absPath, gitRoot)) {
-          return gitRoot;
+        // Clamp: if the git root escapes above the allowed directory, use the allowed directory.
+        // This guards new-file paths where findRepoRoot(absPath) fails but findRepoRoot(allowedDir)
+        // succeeds and resolves to a parent repo root outside the sandbox.
+        const effectiveRoot = isWithinProject(resolvedDir, gitRoot) ? resolvedDir : gitRoot;
+        if (isWithinProject(absPath, effectiveRoot)) {
+          return effectiveRoot;
         }
       }
-    } catch {
-      // Continue to next dir
+    } catch (err) {
+      void err; // findRepoRoot may fail for non-git dirs — skip
     }
   }
 
   // If exactly one allowed dir and the file is inside it, use it
-  if (allowedDirectories.length === 1) {
-    const [onlyDir] = allowedDirectories;
-    if (onlyDir === undefined) {
-      throw new Error("Invariant: allowedDirectories.length === 1 but element [0] is undefined");
-    }
-    const dir = path.resolve(onlyDir);
-    if (isWithinProject(absPath, dir)) {
-      return dir;
+  if (sortedDirs.length === 1) {
+    const onlyDir = sortedDirs[0];
+    if (onlyDir !== undefined && isWithinProject(absPath, onlyDir)) {
+      return onlyDir;
     }
   }
 
   // If file path is inside any allowed dir, return the most specific (longest) match
   let best: string | null = null;
-  for (const dir of allowedDirectories) {
-    const resolved = path.resolve(dir);
+  for (const resolved of sortedDirs) {
     if (isWithinProject(absPath, resolved)) {
       if (!best || resolved.length > best.length) {
         best = resolved;
@@ -196,51 +261,52 @@ function _resolveFromAllowedDirectories(
 }
 
 /**
- * Step 3: Walk up from a file path looking for project markers.
+ * Step 2: Walk up from a file path looking for project markers.
  *
  * With git:    returns the DEEPEST marker still at or below the git root
  * Without git: returns the NEAREST marker (first one walking up).
+ *
+ * Uses targeted existsSync per marker (~15 checks) rather than reading the
+ * full directory listing, which is more efficient for large directories.
  */
 function _resolveFromMarkers(absPath: string): string | null {
-  let ceiling: string;
-  try {
-    const gitRoot = findRepoRoot(absPath);
-    ceiling = gitRoot || path.parse(absPath).root;
-  } catch {
-    ceiling = path.parse(absPath).root;
-  }
-
-  const candidates: string[] = [];
-  let dir = path.dirname(absPath);
-  const fsRoot = path.parse(absPath).root;
-
-  while (dir.length >= ceiling.length && dir !== fsRoot) {
-    const basename = path.basename(dir);
-
-    if (MARKER_EXCLUDE_DIRS.has(basename)) {
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-      continue;
+    let ceiling: string;
+    try {
+        const gitRoot = findRepoRoot(absPath);
+        ceiling = gitRoot ?? path.parse(absPath).root;
+    } catch (_err) {
+        ceiling = path.parse(absPath).root;
     }
 
-    if (PROJECT_MARKERS.some((m) => fs.existsSync(path.join(dir, m)))) {
-      candidates.push(dir);
+    const candidates: string[] = [];
+    let dir = path.dirname(absPath);
+    const fsRoot = path.parse(absPath).root;
 
-      // No git root: nearest marker wins immediately
-      if (!ceiling || ceiling === fsRoot) {
-        return dir;
-      }
+    while (dir.length >= ceiling.length && dir !== fsRoot) {
+        const basename = path.basename(dir);
+
+        if (MARKER_EXCLUDE_DIRS.has(basename)) {
+            const parent = path.dirname(dir);
+            if (parent === dir) break;
+            dir = parent;
+            continue;
+        }
+
+        try {
+            if (PROJECT_MARKERS.some(m => fs.existsSync(path.join(dir, m)))) {
+                candidates.push(dir);
+                if (!ceiling || ceiling === fsRoot) return dir;
+            }
+        } catch (_err) {
+            // Unreadable directory — skip
+        }
+
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
     }
 
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-
-  // Git root present: return the deepest candidate (closest to file)
-  const [first] = candidates;
-  return first ?? null;
+    return candidates[0] ?? null;
 }
 
 /**

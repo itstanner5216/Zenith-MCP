@@ -1,10 +1,15 @@
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { describe, expect, it } from 'vitest';
 import {
     formatSize,
     normalizeLineEndings,
     countOccurrences,
+    applyFileEdits,
     createUnifiedDiff,
     createMinimalDiff,
+    tailFile,
 } from '../dist/core/lib.js';
 
 describe('lib formatSize', () => {
@@ -86,6 +91,57 @@ describe('lib countOccurrences', () => {
 
     it('counts correctly when needle appears at start and end', () => {
         expect(countOccurrences('xyzhelloxyz', 'xyz')).toBe(2);
+    });
+
+    it('rejects empty search strings', () => {
+        expect(() => countOccurrences('hello world', '')).toThrow('countOccurrences: search must not be empty');
+    });
+});
+
+describe('lib applyFileEdits', () => {
+    it('rejects empty oldText before attempting to match', async () => {
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lib-utils-'));
+        const filePath = path.join(tempDir, 'sample.txt');
+        try {
+            await fs.writeFile(filePath, 'hello world\n', 'utf-8');
+            await expect(
+                applyFileEdits(filePath, [{ oldText: '', newText: 'replacement' }], true)
+            ).rejects.toThrow('applyFileEdits: oldText must not be empty');
+        } finally {
+            try { await fs.rm(tempDir, { recursive: true, force: true }); } catch {}
+        }
+    });
+});
+
+describe('lib tailFile', () => {
+    // Covers large-file branch and guards against O(n²)-style repeated string
+    // prepending regressions by requiring correct tail output across many chunks.
+    it('returns the requested final lines from a large file without scanning output order incorrectly', async () => {
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tail-file-test-'));
+        const filePath = path.join(tempDir, 'large.log');
+        try {
+            const lines = Array.from({ length: 30_000 }, (_, i) => `line-${i + 1}`);
+            await fs.writeFile(filePath, lines.join('\n'), 'utf-8');
+
+            const result = await tailFile(filePath, 4);
+
+            expect(result).toBe('line-29997\nline-29998\nline-29999\nline-30000');
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
+    });
+
+    it('returns empty string for non-positive requested line counts', async () => {
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tail-file-empty-test-'));
+        const filePath = path.join(tempDir, 'sample.log');
+        try {
+            await fs.writeFile(filePath, 'line-1\nline-2', 'utf-8');
+
+            await expect(tailFile(filePath, 0)).resolves.toBe('');
+            await expect(tailFile(filePath, -1)).resolves.toBe('');
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
     });
 });
 

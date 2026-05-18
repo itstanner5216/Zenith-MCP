@@ -4,7 +4,7 @@ import path from 'path';
 
 export const DEFAULT_COMPRESSION_KEEP_RATIO = 0.70;
 
-const _BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'toon_bridge.js');
+const _BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'toon_bridge_cli.js');
 
 export function computeCompressionBudget(rawLength: number, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): number {
     if (!Number.isFinite(rawLength) || rawLength <= 0) return 0;
@@ -14,7 +14,8 @@ export function computeCompressionBudget(rawLength: number, maxChars: number, ke
 }
 
 export function isCompressionUseful(rawText: string, compressedText: string | null, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): compressedText is string {
-    if (compressedText === null || compressedText.length === 0 || rawText.length === 0) return false;
+    if (typeof rawText !== 'string' || typeof compressedText !== 'string') return false;
+    if (compressedText.length === 0 || rawText.length === 0) return false;
 
     // If raw text length exactly equals maxChars, it already fits the budget — no compression needed
     const boundedMaxChars = Math.max(0, Math.floor(maxChars));

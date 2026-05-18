@@ -1,19 +1,44 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { normalizePath } from './path-utils.js';
 
 async function parseRootUri(rootUri: string) {
     try {
-        const rawPath = rootUri.startsWith('file://') ? rootUri.slice(7) : rootUri;
-        const expandedPath = rawPath.startsWith('~/') || rawPath === '~'
+        let rawPath: string;
+        if (rootUri.startsWith('file:')) {
+            const afterScheme = rootUri.slice('file:'.length);
+            // Handle non-standard file:~ and file:~/... forms before URL parsing,
+            // because new URL('file:~/repo') normalizes the path to '/~' and loses
+            // the home-directory expansion semantics.
+            const pathPart = afterScheme.startsWith('///')
+                ? afterScheme.slice(2)
+                : afterScheme.startsWith('//')
+                    ? afterScheme.slice(afterScheme.indexOf('/', 2))
+                    : afterScheme;
+            if (pathPart === '~' || pathPart.startsWith('~/')) {
+                rawPath = pathPart;
+            } else {
+                try {
+                    rawPath = fileURLToPath(new URL(rootUri));
+                } catch (urlError) {
+                    void urlError;
+                    rawPath = pathPart;
+                }
+            }
+        } else {
+            rawPath = rootUri;
+        }
+
+        const expandedPath = rawPath === '~' || rawPath.startsWith('~/')
             ? path.join(os.homedir(), rawPath.slice(1))
             : rawPath;
+
         const absolutePath = path.resolve(expandedPath);
         const resolvedPath = await fs.realpath(absolutePath);
         return normalizePath(resolvedPath);
-    }
-    catch {
+    } catch {
         return null;
     }
 }

@@ -7,7 +7,7 @@ class RaycastAdapter extends MCPConfigAdapter {
   toolName = "raycast";
   displayName = "Raycast";
   configFormat = "json" as const;
-  supportedPlatforms: ("macos" | "linux" | "windows")[] = ["macos", "linux"];
+  supportedPlatforms: ("macos" | "linux" | "windows")[] = ["macos"];
 
   configPath() {
     return join(homedir(), ".config", "raycast", "mcp.json");

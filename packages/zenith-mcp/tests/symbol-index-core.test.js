@@ -240,6 +240,62 @@ describe('symbol-index — restoreVersion', () => {
     });
 });
 
+describe('symbol-index — ensureIndexFresh stale purge', () => {
+    let repoDir;
+    let db;
+
+    beforeEach(() => {
+        repoDir = mkTmpGitRepo();
+        db = new Database(':memory:');
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS files (
+                path TEXT PRIMARY KEY,
+                hash TEXT,
+                last_indexed INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS symbols (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                kind TEXT,
+                type TEXT,
+                file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
+                line INTEGER,
+                end_line INTEGER,
+                column INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                container_def_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+                referenced_name TEXT
+            );
+        `);
+    });
+
+    afterEach(() => {
+        try { db.close(); } catch {}
+        try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
+    });
+
+    // Covers edge case missing from symbol-index tests: freshness checks must
+    // remove stale rows when a previously indexed file has been deleted.
+    it('purges stale file and symbol rows when an indexed file has been deleted', async () => {
+        const { indexFile, ensureIndexFresh } = await importSymbolIndex();
+        const filePath = path.join(repoDir, 'stale.js');
+        fs.writeFileSync(filePath, 'function staleSymbol() { return 1; }\n');
+        await indexFile(db, repoDir, filePath);
+
+        expect(db.prepare('SELECT path FROM files WHERE path = ?').get('stale.js')).toBeTruthy();
+        expect(db.prepare('SELECT name FROM symbols WHERE name = ?').get('staleSymbol')).toBeTruthy();
+
+        fs.unlinkSync(filePath);
+        const reindexed = await ensureIndexFresh(db, repoDir, [filePath]);
+
+        expect(reindexed).toBe(0);
+        expect(db.prepare('SELECT path FROM files WHERE path = ?').get('stale.js')).toBeUndefined();
+        expect(db.prepare('SELECT name FROM symbols WHERE name = ?').get('staleSymbol')).toBeUndefined();
+    });
+});
+
 describe('symbol-index — pruneOldSessions', () => {
     let db;
 

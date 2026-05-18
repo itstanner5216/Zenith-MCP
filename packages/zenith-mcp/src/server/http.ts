@@ -29,13 +29,20 @@ import {
     validateDirectories,
 } from '../core/server.js';
 import { ripgrepAvailable } from '../core/shared.js';
-import { configExists, runFirstRunWizard, loadConfig } from '../config/index.js';
+import { configExists, loadConfig } from '../config/index.js';
 
 // ---------------------------------------------------------------------------
 // First-run wizard — ensure config exists before proceeding
 // ---------------------------------------------------------------------------
 if (!configExists()) {
-    await runFirstRunWizard();
+    console.error(
+        'FATAL: No Zenith-MCP config found.\n' +
+        'Run the stdio server once interactively to complete first-time setup:\n' +
+        '  npx zenith-mcp /path/to/your/project\n' +
+        '(replace /path/to/your/project with an absolute path to a directory you want the server to access)\n' +
+        'Then restart the HTTP server.',
+    );
+    process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +104,11 @@ type SessionEntry = StreamableSession | SSESession;
 const sessions = new Map<string, SessionEntry>();
 // session id -> { type: 'streamable'|'sse', transport, server, ctx }
 
+function writeErrorLog(message: string, err: unknown): void {
+    const detail = err instanceof Error && err.stack ? err.stack : String(err);
+    process.stderr.write(`${message} ${detail}\n`);
+}
+
 function removeSession(sessionId: string): void {
     const entry = sessions.get(sessionId);
     if (entry) {
@@ -131,6 +143,24 @@ function createSessionPair() {
     const server = createFilesystemServer(ctx);
     attachRootsHandlers(server, ctx);
     return { ctx, server };
+}
+
+// ---------------------------------------------------------------------------
+// Helper: sanitize x-forwarded-prefix header value
+// ---------------------------------------------------------------------------
+function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
+    if (!raw) return '';
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (!value) return '';
+    const trimmed = value.trim();
+
+    // Reject invalid prefixes: must start with single '/', no schemes/hosts
+    if (!trimmed.startsWith('/')) return '';
+    if (trimmed.startsWith('//')) return '';
+    if (trimmed.includes('://') || /^\/[^/]*:/.test(trimmed)) return '';
+
+    // Normalize: single leading slash, no trailing slash
+    return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +212,7 @@ app.post('/mcp', async (req, res) => {
             entry.lastSeenAt = Date.now();
             await entry.transport.handleRequest(req, res, req.body);
         } catch (err) {
-            console.error(`[session:${(sessionId as string).slice(0, 8)}] POST error:`, err);
+            writeErrorLog(`[session:${(sessionId as string).slice(0, 8)}] POST error:`, err);
             if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
         }
         return;
@@ -196,28 +226,47 @@ app.post('/mcp', async (req, res) => {
 
     const { ctx, server } = createSessionPair();
 
+    const sid = randomUUID();
+
     const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
+        sessionIdGenerator: () => sid,
     });
 
     // Session cleanup when the transport closes.
     // SDK's connect() chains any pre-existing onclose handler, so this fires
     // alongside the SDK's internal cleanup (_onclose) on disconnect.
     transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid) removeSession(sid);
+        removeSession(sid);
     };
 
     await server.connect(transport);
 
-    // Handle the initialize request — this sets transport.sessionId
-    await transport.handleRequest(req, res, req.body);
+    // Pre-register so the session is discoverable if a concurrent request arrives
+    // after the initialize response is sent but before this handler returns.
+    sessions.set(sid, {
+        type: 'streamable',
+        transport,
+        server,
+        ctx,
+        lastSeenAt: Date.now(),
+    });
+    console.error(`[session:${sid.slice(0, 8)}] opened (streamable)`);
 
-    // Store the session
-    const sid = transport.sessionId;
-    if (sid) {
-        sessions.set(sid, { type: 'streamable', transport, server, ctx, lastSeenAt: Date.now() });
-        console.error(`[session:${sid.slice(0, 8)}] opened (streamable)`);
+    try {
+        await transport.handleRequest(req, res, req.body);
+
+        // If the SDK rejected initialization (e.g. bad headers, protocol error)
+        // it returns an error response without throwing. In that case the transport
+        // never adopts the session ID and the client never receives it — clean up.
+        if (transport.sessionId !== sid) {
+            removeSession(sid);
+            try { await transport.close(); } catch { /* already dead */ }
+        }
+    } catch (err) {
+        removeSession(sid);
+        try { await transport.close(); } catch { /* best effort — already closed */ }
+        writeErrorLog(`[session:${sid.slice(0, 8)}] initialize error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     }
 });
 
@@ -238,7 +287,7 @@ app.get('/mcp', async (req, res) => {
         await entry.transport.handleRequest(req, res);
     } catch (err) {
         const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
-        console.error(`[session:${safeId}] GET error:`, err);
+        writeErrorLog(`[session:${safeId}] GET error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     }
 });
@@ -265,13 +314,8 @@ app.delete('/mcp', async (req, res) => {
 // ── Legacy SSE: GET /sse ──────────────────────────────────────────────────────
 app.get('/sse', async (req, res) => {
     const { ctx, server } = createSessionPair();
-    const forwardedPrefix = typeof req.headers['x-forwarded-prefix'] === 'string'
-        ? req.headers['x-forwarded-prefix'].trim()
-        : '';
-    const normalizedPrefix = forwardedPrefix
-        ? (forwardedPrefix.endsWith('/') ? forwardedPrefix.slice(0, -1) : forwardedPrefix)
-        : '';
-    const messageEndpoint = normalizedPrefix ? `${normalizedPrefix}/messages` : '/messages';
+    const prefix = sanitizeForwardedPrefix(req.headers['x-forwarded-prefix']);
+    const messageEndpoint = prefix ? `${prefix}/messages` : '/messages';
     const transport = new SSEServerTransport(messageEndpoint, res);
     const sid = transport.sessionId;
 
@@ -308,7 +352,7 @@ app.post('/messages', async (req, res) => {
         await entry.transport.handlePostMessage(req, res, req.body);
     } catch (err) {
         const safeId = sessionId.replace(/[^\w-]/g, '').slice(0, 8);
-        console.error(`[session:${safeId}] POST /messages error:`, err);
+        writeErrorLog(`[session:${safeId}] POST /messages error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     }
 });

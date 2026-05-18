@@ -51,6 +51,7 @@ export type ToolServer = {
 export type ToolContext = {
     sessionId?: string;
     validatePath(inputPath: string): Promise<string>;
+    validateNewFilePath(inputPath: string): Promise<string>;
     getAllowedDirectories: () => string[];
     setAllowedDirectories: (directories: string[]) => void;
 };
