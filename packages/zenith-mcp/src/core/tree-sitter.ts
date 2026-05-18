@@ -584,7 +584,7 @@ async function loadLanguage(langName: string): Promise<Language | null> {
         isIncompatible = await isIncompatiblePicSideModule(wasmPath);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`[tree-sitter] Failed to inspect ${langName} grammar; skipping:`, message);
+        process.stderr.write(`[tree-sitter] Failed to inspect ${langName} grammar; skipping: ${message}\n`);
         _languageCache.set(langName, null);
         return null;
     }
@@ -606,7 +606,7 @@ async function loadLanguage(langName: string): Promise<Language | null> {
         return language;
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`Failed to load grammar for ${langName}:`, message);
+        process.stderr.write(`Failed to load grammar for ${langName}: ${message}\n`);
         _languageCache.set(langName, null);
         return null;
     }
@@ -658,7 +658,7 @@ async function getCompiledQuery(langName: string): Promise<Query | null> {
         return query;
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`Failed to compile query for ${langName}:`, message);
+        process.stderr.write(`Failed to compile query for ${langName}: ${message}\n`);
         _compiledQueryCache.set(langName, null);
         return null;
     }

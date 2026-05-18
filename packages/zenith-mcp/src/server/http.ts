@@ -97,6 +97,11 @@ type SessionEntry = StreamableSession | SSESession;
 const sessions = new Map<string, SessionEntry>();
 // session id -> { type: 'streamable'|'sse', transport, server, ctx }
 
+function writeErrorLog(message: string, err: unknown): void {
+    const detail = err instanceof Error && err.stack ? err.stack : String(err);
+    process.stderr.write(`${message} ${detail}\n`);
+}
+
 function removeSession(sessionId: string): void {
     const entry = sessions.get(sessionId);
     if (entry) {
@@ -182,7 +187,7 @@ app.post('/mcp', async (req, res) => {
             entry.lastSeenAt = Date.now();
             await entry.transport.handleRequest(req, res, req.body);
         } catch (err) {
-            console.error(`[session:${(sessionId as string).slice(0, 8)}] POST error:`, err);
+            writeErrorLog(`[session:${(sessionId as string).slice(0, 8)}] POST error:`, err);
             if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
         }
         return;
@@ -238,7 +243,7 @@ app.get('/mcp', async (req, res) => {
         await entry.transport.handleRequest(req, res);
     } catch (err) {
         const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
-        console.error(`[session:${safeId}] GET error:`, err);
+        writeErrorLog(`[session:${safeId}] GET error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     }
 });
@@ -308,7 +313,7 @@ app.post('/messages', async (req, res) => {
         await entry.transport.handlePostMessage(req, res, req.body);
     } catch (err) {
         const safeId = sessionId.replace(/[^\w-]/g, '').slice(0, 8);
-        console.error(`[session:${safeId}] POST /messages error:`, err);
+        writeErrorLog(`[session:${safeId}] POST /messages error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     }
 });
