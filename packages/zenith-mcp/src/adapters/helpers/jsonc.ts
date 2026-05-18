@@ -25,8 +25,7 @@ export function readJsonc(path: string): Record<string, unknown> {
     const formatted = errors
       .map((e) => `${printParseErrorCode(e.error)}@${e.offset}`)
       .join(", ");
-    console.warn(`[jsonc] Parse errors in ${path} (${formatted}); returning empty config`);
-    return {};
+    throw new Error(`Invalid JSONC in ${path}: ${formatted}`);
   }
 
   return assertRecord(data);
