@@ -369,7 +369,7 @@ export async function tailFile(filePath: string, numLines: number) {
             }
         }
 
-        const lines = tail.split('\n');
+        const lines = tail.replace(/\r\n/g, '\n').split('\n');
         if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
         const result = lines.slice(-cap);
         return result.join('\n');
