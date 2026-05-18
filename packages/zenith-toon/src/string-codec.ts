@@ -24,6 +24,11 @@ const _ERROR_KEYWORDS: ReadonlySet<string> = new Set([
 // Python: re.compile(r'^\s+(at\s+|File\s+")', re.MULTILINE)
 const _FRAME_RE = /^\s+(at\s+|File\s+")/;
 
+// Stack-trace header detection: language-agnostic structural signal.
+// Matches Python "Traceback (most recent call last):", JVM "Caused by:" chains,
+// and class names ending in Error/Exception/Fault/Panic at line start.
+const _STACK_HEADER_RE = /^(?:Traceback \(most recent call last\):|Caused by:\s|[\w.$]+(?:Error|Exception|Fault|Panic)(?::|$))/;
+
 // Python: re.compile(r'(java\.|javax\.|sun\.|org\.springframework\.|org\.python\.|importlib\.|_bootstrap|site-packages)')
 const _USER_FRAME_EXCLUDES =
   /(java\.|javax\.|sun\.|org\.springframework\.|org\.python\.|importlib\.|_bootstrap|site-packages)/;
@@ -74,21 +79,39 @@ const _MIN_OMISSION_THRESHOLD = 3;
 // Content Type Detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Detects whether text is a multi-line stack trace (not a single-line error).
+ *
+ * Design decision: single-line error messages like "TypeError: Cannot read
+ * property 'x' of undefined" are NOT stack traces — they're error strings that
+ * should flow through normal text compression. This function identifies actual
+ * structural stack traces (multiple frames, exception chains) that benefit from
+ * the dedicated stack-trace formatting path.
+ */
 function _isStackTrace(text: string): boolean {
-  // Python: bool(_STACK_TRACE_RE.search(text[:2000]))
-  // The Python regex uses MULTILINE, so ^ matches start of each line.
-  // Equivalent: search in first 2000 chars. We check for the patterns.
-  // The Python regex has ^\s+at\s+ and ^\s+File\s+" with MULTILINE, meaning
-  // they match at start of any line. In JS, we handle by searching the substring.
   const sample = text.slice(0, 2000);
-  // Test for single-line patterns first
-  if (/(Traceback|Exception|Error|Caused by:)/.test(sample)) {
-    return true;
+  const lines = sample.split('\n').slice(0, 80);
+
+  let headerCount = 0;
+  let frameCount = 0;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (_STACK_HEADER_RE.test(line)) headerCount += 1;
+    if (_FRAME_RE.test(rawLine)) frameCount += 1;
   }
-  // Test for frame patterns (^\s+at\s+ and ^\s+File\s+" with MULTILINE)
-  if (/^\s+at\s+/m.test(sample) || /^\s+File\s+"/m.test(sample)) {
-    return true;
-  }
+
+  // Primary: frames-with-or-without-header (Python tracebacks, JS stack traces).
+  if (frameCount >= 2) return true;
+  if (headerCount >= 1 && frameCount >= 1) return true;
+
+  // Tertiary: chained-exception header pattern (JVM "Caused by:" chains can
+  // appear with no leading indent on the per-frame "at" lines, in which case
+  // _FRAME_RE won't match. Multiple headers in a small window strongly imply
+  // a chained exception even without parseable frames.
+  if (headerCount >= 2) return true;
+
   return false;
 }
 

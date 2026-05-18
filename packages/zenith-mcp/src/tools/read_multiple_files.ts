@@ -1,7 +1,7 @@
 import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
-import { CHAR_BUDGET } from '../core/shared.js';
+import { getCharBudget } from '../core/shared.js';
 import { compressTextFile, computeCompressionBudget, truncateToBudget } from '../core/compression.js';
 import type { ToolServer, ToolContext } from './types.js';
 
@@ -88,7 +88,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         });
         // Phase 2: Calculate per-file budgets
         const validFiles = fileInfos.filter((f): f is FileInfoValid => f.error === null);
-        const totalBudget = CHAR_BUDGET - (fileCount * 200);
+        const totalBudget = getCharBudget() - (fileCount * 200);
         let perFileBudget: number | null;
         if (args.maxCharsPerFile) {
             perFileBudget = Math.min(args.maxCharsPerFile, totalBudget);
@@ -169,8 +169,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
         });
         const text = results.join('\n\n');
-        const finalText = text.length > CHAR_BUDGET
-            ? text.slice(0, CHAR_BUDGET) + '\n[truncated]'
+        const finalText = text.length > getCharBudget()
+            ? text.slice(0, getCharBudget()) + '\n[truncated]'
             : text;
         return {
             content: [{ type: "text" as const, text: finalText }],

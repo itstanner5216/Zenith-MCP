@@ -32,6 +32,23 @@ describe('getValidRootDirectories', () => {
         }
     });
 
+    // Covers edge case missing from existing valid URI tests: non-standard
+    // file:~/... roots must preserve the tilde before URL parsing.
+    it('expands file:~ and file:~/... roots before URL parsing normalizes tilde', async () => {
+        const homeDir = os.homedir();
+        const homeChild = await fs.mkdtemp(path.join(homeDir, 'roots-tilde-test-'));
+        const childName = path.basename(homeChild);
+        try {
+            const homeResult = await getValidRootDirectories([{ uri: 'file:~' }]);
+            expect(homeResult).toEqual([homeDir]);
+
+            const childResult = await getValidRootDirectories([{ uri: `file:~/${childName}` }]);
+            expect(childResult).toEqual([homeChild]);
+        } finally {
+            await fs.rm(homeChild, { recursive: true, force: true });
+        }
+    });
+
     it('skips non-existent paths', async () => {
         const result = await getValidRootDirectories([
             { uri: '/nonexistent/path/that/does/not/exist' },

@@ -10,13 +10,18 @@ import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
+import type { ZenithConfig } from '../config/index.js';
 // ---------------------------------------------------------------------------
-// Module-level constants
+// Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
-const _config = loadConfig();
-const MAX_CHARS = _config.advanced.refactor_max_chars;
+let _rbConfig: ZenithConfig | null = null;
+function getRbConfig(): ZenithConfig {
+    if (!_rbConfig) _rbConfig = loadConfig();
+    return _rbConfig;
+}
+function getMaxChars(): number { return getRbConfig().advanced.refactor_max_chars; }
 const DEFAULT_CONTEXT = 5;
-const MAX_CONTEXT_LINES = Math.min(30, _config.advanced.refactor_max_context);
+function getMaxContextLines(): number { return Math.min(30, getRbConfig().advanced.refactor_max_context); }
 // ---------------------------------------------------------------------------
 // Local interfaces
 // ---------------------------------------------------------------------------
@@ -249,8 +254,6 @@ function parsePayload(payload: string): ParsedPayloadGroup[] {
 // Registration
 // ---------------------------------------------------------------------------
 export function register(server: ToolServer, ctx: ToolContext) {
-    // FsContext only needs getAllowedDirectories; validatePath is optional there.
-    const fsCtx = { getAllowedDirectories: () => ctx.getAllowedDirectories() };
     server.registerTool<RefactorBatchArgs>("refactor_batch", {
         title: "Refactor Batch",
         description: "Apply one edit pattern across multiple similar symbols, with rollback. Core pipeline: loadDiff (symbol bodies + context) → apply (write edits). query is optional — you can skip it and call loadDiff directly with explicit {symbol, file} pairs if you already know the targets (e.g. from search_files). After a successful apply: reapply sends the same cached edit to new targets, restore rolls back any symbol to a prior snapshot. Every apply/reapply/restore snapshots pre-edit text automatically. No default mode — mode is always required.",
@@ -262,25 +265,25 @@ export function register(server: ToolServer, ctx: ToolContext) {
             depth: z.number().int().min(1).max(5).default(1).describe("query: How many hops to traverse the call graph. 1 = direct callers/callees only."),
             selection: z.array(z.union([
                 z.number().int().min(1),
-                z.object({ symbol: z.string(), file: z.string().optional() }),
+                z.object({ symbol: z.string(), file: z.string().optional() }).strict(),
             ])).optional().describe("loadDiff: Which symbols to load. Either numeric indices from a prior query result, or explicit {symbol, file?} pairs. You can skip query and go straight to loadDiff with explicit pairs."),
-            contextLines: z.number().int().min(0).max(MAX_CONTEXT_LINES).default(DEFAULT_CONTEXT).describe("loadDiff: How many lines above and below each symbol body to include as read-only context. Context lines are marked with │ so you can distinguish them from the editable body."),
+            contextLines: z.number().int().min(0).max(getMaxContextLines()).default(DEFAULT_CONTEXT).describe("loadDiff: How many lines above and below each symbol body to include as read-only context. Context lines are marked with │ so you can distinguish them from the editable body."),
             loadMore: z.boolean().default(false).describe("loadDiff: When a prior loadDiff was truncated at the char budget, call loadDiff again with loadMore=true to get the next page."),
             payload: z.string().optional().describe("apply: The edited diff you're sending back. Format: one or more groups, each starting with a header line 'symbolName idx1,idx2 [ack:N]' followed by the new function body on subsequent lines. Example: 'validateCard 1,2,3 ack:3\\nfunction validateCard(card) { ... }'. Indices match the [N] tags from loadDiff output."),
             dryRun: z.boolean().default(false).describe("apply/reapply/restore: Validate everything (syntax gate, outlier checks, char budget) without writing any files. Returns what would happen."),
             symbolGroup: z.string().optional().describe("reapply: The symbol name from a prior successful apply. The server caches the edit body and reuses it on newTargets."),
             newTargets: z.array(z.union([
                 z.string(),
-                z.object({ symbol: z.string(), file: z.string().optional() }),
+                z.object({ symbol: z.string(), file: z.string().optional() }).strict(),
             ])).optional().describe("reapply: Symbols to apply the cached edit pattern to. Same format as loadDiff selection — names or {symbol, file?} pairs."),
             ack: z.array(z.number().int().min(1)).optional().describe("reapply: When the server flags structurally different targets as outliers, provide their indices here to acknowledge and proceed anyway."),
             symbol: z.string().optional().describe("restore/history: The symbol name. restore rolls it back to a prior snapshot; history lists available snapshots."),
             file: z.string().optional().describe("restore/history: File containing the symbol. Required for restore, optional filter for history."),
             version: z.number().int().min(0).optional().describe("restore: Which version index to restore (from history output). Omit to list available versions instead of restoring."),
-        }),
+        }).strict(),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: RefactorBatchArgs) => {
-        const pc = getProjectContext(fsCtx);
+        const pc = getProjectContext(ctx);
         // =================================================================
         // QUERY
         // =================================================================
@@ -511,7 +514,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
             }
             // -----------------------------------------------------------------
-            // Emit blocks, honour MAX_CHARS without splitting a symbol.
+            // Emit blocks, honour getMaxChars() without splitting a symbol.
             // -----------------------------------------------------------------
             const blocks: string[] = [];
             const fileCounts = new Map<string, number>();
@@ -534,7 +537,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     ? `${occ.symbol} [${globalIndex}] ${occ.relFile} ⚠ ${flag}`
                     : `${occ.symbol} [${globalIndex}] ${occ.relFile}`;
                 const block = `${header}\n${body}\n`;
-                if (totalChars > 0 && (totalChars + block.length) > MAX_CHARS) {
+                if (totalChars > 0 && (totalChars + block.length) > getMaxChars()) {
                     cutAt = i;
                     break;
                 }
@@ -642,7 +645,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let totalBudget = 0;
             for (const g of groups)
                 totalBudget += g.body.length * g.indices.length;
-            if (totalBudget > MAX_CHARS) {
+            if (totalBudget > getMaxChars()) {
                 return { content: [{ type: 'text' as const, text: 'Over char budget. Split the apply into smaller groups.' }] };
             }
             // Gate: syntax.
@@ -1045,7 +1048,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             catch { /* best-effort */ }
             // Char budget.
-            if (cachedPayload.body.length * targets.length > MAX_CHARS) {
+            if (cachedPayload.body.length * targets.length > getMaxChars()) {
                 return { content: [{ type: 'text' as const, text: 'Over char budget. Split the apply into smaller groups.' }] };
             }
             // Build per-file bundles.

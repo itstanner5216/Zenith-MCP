@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { bm25RankResults, CHAR_BUDGET } from '../dist/core/shared.js';
+import { bm25RankResults, getCharBudget } from '../dist/core/shared.js';
 
 // ---------------------------------------------------------------------------
 // Basic contract
@@ -74,7 +74,7 @@ describe('bm25RankResults — ranking behavior', () => {
 
     it('only returns lines matching the query when budget allows all', () => {
         const lines = ['match this query', 'nothing here', 'query found'];
-        const result = bm25RankResults(lines, 'query', CHAR_BUDGET);
+        const result = bm25RankResults(lines, 'query', getCharBudget());
         // At minimum the query lines should appear in results
         const hasMatch = result.ranked.some(l => l.includes('query'));
         expect(hasMatch).toBe(true);
@@ -82,7 +82,7 @@ describe('bm25RankResults — ranking behavior', () => {
 
     it('returns lines from the original array', () => {
         const lines = ['alpha search', 'beta search', 'gamma other'];
-        const result = bm25RankResults(lines, 'search', CHAR_BUDGET);
+        const result = bm25RankResults(lines, 'search', getCharBudget());
         for (const r of result.ranked) {
             expect(lines).toContain(r);
         }
@@ -95,7 +95,7 @@ describe('bm25RankResults — ranking behavior', () => {
 
 describe('bm25RankResults — charBudget enforcement', () => {
     it('respects default charBudget', () => {
-        // Generate content larger than CHAR_BUDGET
+        // Generate content larger than getCharBudget()
         const longLine = 'x'.repeat(1000);
         const lines = Array.from({ length: 1000 }, () => longLine);
         const result = bm25RankResults(lines, 'x');

@@ -131,15 +131,26 @@ function findOccurrence(haystack: string, needle: string, nearLine: number | und
 }
 
 function mapTrimmedIndex(original: string, trimmed: string, trimmedIdx: number): number {
-    const trimmedBefore = trimmed.slice(0, trimmedIdx);
-    const lineNum = trimmedBefore.split('\n').length - 1;
     const normalizedOrig = normalizeLineEndings(original);
+    const trimmedBefore = trimmed.slice(0, trimmedIdx);
+
+    const lineNum = trimmedBefore.split('\n').length - 1;
+    const lastNewline = trimmedBefore.lastIndexOf('\n');
+    const trimmedColumn = lastNewline === -1
+        ? trimmedBefore.length
+        : trimmedBefore.length - lastNewline - 1;
+
     const origLines = normalizedOrig.split('\n');
     let origIdx = 0;
     for (let i = 0; i < lineNum; i++) {
         origIdx += origLines[i]!.length + 1; // nosemgrep
     }
-    return origIdx;
+
+    // Map the column: the trimmed column maps to the same column in the original
+    // (trailing whitespace is only removed from the end, not the start)
+    const originalLine = origLines[lineNum] ?? '';
+    const boundedColumn = Math.min(trimmedColumn, originalLine.length);
+    return origIdx + boundedColumn;
 }
 
 function findOriginalEnd(content: string, startIdx: number, numLines: number): number {
@@ -198,9 +209,17 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
         // continues, consistent with how the other modes handle missing fields.
         // The guard has been applied to the live dist already; implement it here properly.
         if (edit.mode === 'block') {
+            if (!edit.block_start || !edit.block_end || edit.replacement_block === undefined) {
+                errors.push({
+                    i,
+                    msg: `${tag}block mode requires block_start, block_end, and replacement_block.`,
+                });
+                continue;
+            }
+
             const lines = workingContent.split('\n');
-            const expectedStart = edit.block_start!.trim();
-            const expectedEnd = edit.block_end!.trim();
+            const expectedStart = edit.block_start.trim();
+            const expectedEnd = edit.block_end.trim();
 
             const candidates: Array<{ start: number; end: number }> = [];
             for (let s = 0; s < lines.length; s++) {
@@ -236,7 +255,7 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                 }
             }
 
-            const normalizedNew = normalizeLineEndings(edit.replacement_block!);
+            const normalizedNew = normalizeLineEndings(edit.replacement_block);
             lines.splice(chosen.start, chosen.end - chosen.start + 1, ...normalizedNew.split('\n'));
             workingContent = lines.join('\n');
             continue;

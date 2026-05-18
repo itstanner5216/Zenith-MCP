@@ -2,6 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { execFileSync } from 'child_process';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
 import { resetProjectContext } from '../dist/core/project-context.js';
@@ -47,9 +48,10 @@ let ctx;
 beforeAll(async () => {
     resetProjectContext();
     tmpRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'refactor-batch-'));
-    // Init as a git repo so findRepoRoot resolves here
-    await fs.mkdir(path.join(tmpRepo, '.git'));
-    await fs.writeFile(path.join(tmpRepo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    // Init as a real git repo so findRepoRoot resolves here
+    execFileSync('git', ['init'], { cwd: tmpRepo, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: tmpRepo, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: tmpRepo, stdio: 'pipe' });
 
     // Write three files with different flavors of validateCard so outlier
     // detection has something to do.

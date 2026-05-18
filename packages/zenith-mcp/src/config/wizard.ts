@@ -5,6 +5,22 @@ import { saveConfig } from "./loader.js";
 import { autoWriteToMcpConfigs, formatAutoWriteSummary } from "./auto-write.js";
 
 // ---------------------------------------------------------------------------
+// WizardIO — parameterize I/O so callers can route stdout/stderr appropriately.
+// In a stdio MCP server, process.stdout is the JSON transport pipe — wizard
+// output must be redirected (typically to stderr) to keep that pipe clean.
+// ---------------------------------------------------------------------------
+
+export interface WizardIO {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+}
+
+const defaultIO: WizardIO = {
+  input: process.stdin,
+  output: process.stdout,
+};
+
+// ---------------------------------------------------------------------------
 // ANSI styling — zero dependencies, red/black/white/gray theme
 // ---------------------------------------------------------------------------
 
@@ -55,12 +71,17 @@ function note(text: string): string {
   return `${S.dim}${S.gray}    ${text}${S.reset}`;
 }
 
+/** Write a single line to the WizardIO output. */
+function writeLine(io: WizardIO, text: string): void {
+  io.output.write(text + "\n");
+}
+
 // ---------------------------------------------------------------------------
 // Readline helper
 // ---------------------------------------------------------------------------
 
-function createQuestionHelper() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+function createQuestionHelper(io: WizardIO) {
+  const rl = createInterface({ input: io.input, output: io.output });
   const question = (p: string) =>
     new Promise<string>((resolve) => rl.question(p, resolve));
   return { rl, question };
@@ -70,7 +91,7 @@ function createQuestionHelper() {
 // Banner
 // ---------------------------------------------------------------------------
 
-function printBanner(): void {
+function printBanner(io: WizardIO): void {
   const lines = [
     "",
     `${S.dim}${S.red}  ┌──────────────────────────────────────────────────┐${S.reset}`,
@@ -83,42 +104,43 @@ function printBanner(): void {
     `${S.dim}${S.red}  └──────────────────────────────────────────────────┘${S.reset}`,
     "",
   ];
-  for (const line of lines) console.log(line);
+  for (const line of lines) writeLine(io, line);
 }
 
 // ---------------------------------------------------------------------------
 // Completion banner
 // ---------------------------------------------------------------------------
 
-function printComplete(configPath: string): void {
-  console.log("");
-  console.log(divider());
-  console.log("");
-  console.log(`  ${S.bold}${S.brightRed}>${S.reset} ${S.bold}${S.white}Configuration saved.${S.reset}`);
-  console.log(note(configPath));
-  console.log(note("Edit this file anytime to change settings."));
-  console.log("");
-  console.log(divider());
-  console.log("");
+function printComplete(io: WizardIO, configPath: string): void {
+  writeLine(io, "");
+  writeLine(io, divider());
+  writeLine(io, "");
+  writeLine(io, `  ${S.bold}${S.brightRed}>${S.reset} ${S.bold}${S.white}Configuration saved.${S.reset}`);
+  writeLine(io, note(configPath));
+  writeLine(io, note("Edit this file anytime to change settings."));
+  writeLine(io, "");
+  writeLine(io, divider());
+  writeLine(io, "");
 }
 
 // ---------------------------------------------------------------------------
 // runFirstRunWizard
 // ---------------------------------------------------------------------------
 
-export async function runFirstRunWizard(): Promise<ZenithConfig> {
-  const { rl, question } = createQuestionHelper();
+export async function runFirstRunWizard(io: WizardIO = defaultIO): Promise<ZenithConfig> {
+  const { rl, question } = createQuestionHelper(io);
 
   try {
-    printBanner();
+    printBanner(io);
 
     // ── Auto-write ──────────────────────────────────────────────────────
-    console.log(sectionHeader("Auto-Write"));
-    console.log(note("Register Zenith in your other AI tools automatically."));
-    console.log(note("Zenith will back up each config file before touching it."));
-    console.log("");
+    writeLine(io, sectionHeader("Auto-Write"));
+    writeLine(io, note("Register Zenith in your other AI tools automatically."));
+    writeLine(io, note("Zenith will back up each config file before touching it."));
+    writeLine(io, "");
 
     const autoWriteEnabled = await askYesNo(
+      io,
       question,
       prompt("Enable auto-write? ") + gray("[y/N] "),
       false,
@@ -129,17 +151,17 @@ export async function runFirstRunWizard(): Promise<ZenithConfig> {
     let backupDir: string = DEFAULT_CONFIG.auto_write.backup_dir;
 
     if (autoWriteEnabled) {
-      console.log("");
-      console.log(sectionHeader("Backup Mode"));
-      console.log(note("How should Zenith store config backups?"));
-      console.log("");
-      console.log(option("1", "File backups", "~/.zenith-mcp/mcp_backups/  (default)"));
-      console.log(option("2", "SQLite", "auto-deleted after 24 hours"));
-      console.log(option("3", "Custom path", "you choose the directory"));
-      console.log(option("4", "No backups", "not recommended"));
-      console.log("");
+      writeLine(io, "");
+      writeLine(io, sectionHeader("Backup Mode"));
+      writeLine(io, note("How should Zenith store config backups?"));
+      writeLine(io, "");
+      writeLine(io, option("1", "File backups", "~/.zenith-mcp/mcp_backups/  (default)"));
+      writeLine(io, option("2", "SQLite", "auto-deleted after 24 hours"));
+      writeLine(io, option("3", "Custom path", "you choose the directory"));
+      writeLine(io, option("4", "No backups", "not recommended"));
+      writeLine(io, "");
 
-      const backupChoice = await askBackupMode(question);
+      const backupChoice = await askBackupMode(io, question);
       backupMode = backupChoice.mode;
       backupDir = backupChoice.dir;
     }
@@ -148,31 +170,31 @@ export async function runFirstRunWizard(): Promise<ZenithConfig> {
     let customMcpPaths: string[] = [];
 
     if (autoWriteEnabled) {
-      console.log("");
-      console.log(sectionHeader("Custom MCP Paths"));
-      console.log(note("Extra config files or directories for Zenith to register in."));
-      console.log(note("Leave blank if your tools use standard locations."));
-      console.log("");
+      writeLine(io, "");
+      writeLine(io, sectionHeader("Custom MCP Paths"));
+      writeLine(io, note("Extra config files or directories for Zenith to register in."));
+      writeLine(io, note("Leave blank if your tools use standard locations."));
+      writeLine(io, "");
 
       customMcpPaths = await askCustomMcpPaths(question);
     }
 
     // ── Port ────────────────────────────────────────────────────────────
-    console.log("");
-    console.log(sectionHeader("Server Port"));
-    console.log(note("Network port for HTTP mode. Doesn't matter for stdio."));
-    console.log("");
+    writeLine(io, "");
+    writeLine(io, sectionHeader("Server Port"));
+    writeLine(io, note("Network port for HTTP mode. Doesn't matter for stdio."));
+    writeLine(io, "");
 
-    const port = await askPort(question);
+    const port = await askPort(io, question);
 
     // ── Character budget ────────────────────────────────────────────────
-    console.log("");
-    console.log(sectionHeader("Character Budget"));
-    console.log(note("Max characters Zenith returns per file read."));
-    console.log(note("Higher = more content but uses more context window."));
-    console.log("");
+    writeLine(io, "");
+    writeLine(io, sectionHeader("Character Budget"));
+    writeLine(io, note("Max characters Zenith returns per file read."));
+    writeLine(io, note("Higher = more content but uses more context window."));
+    writeLine(io, "");
 
-    const charBudget = await askCharBudget(question);
+    const charBudget = await askCharBudget(io, question);
 
     // ── Build config ────────────────────────────────────────────────────
     const config: ZenithConfig = structuredClone(DEFAULT_CONFIG);
@@ -185,30 +207,30 @@ export async function runFirstRunWizard(): Promise<ZenithConfig> {
 
     // ── Persist ─────────────────────────────────────────────────────────
     saveConfig(config);
-    printComplete("~/.zenith-mcp/config");
+    printComplete(io, "~/.zenith-mcp/config");
 
     // ── Run auto-write if enabled ───────────────────────────────────────
     if (autoWriteEnabled) {
-      console.log(`  ${S.bold}${S.brightRed}>${S.reset} ${S.white}Running auto-write...${S.reset}`);
-      console.log("");
+      writeLine(io, `  ${S.bold}${S.brightRed}>${S.reset} ${S.white}Running auto-write...${S.reset}`);
+      writeLine(io, "");
       const result = autoWriteToMcpConfigs(config);
       const summary = formatAutoWriteSummary(result);
 
       if (result.errors.length === 0 && result.written.length > 0) {
-        console.log(`  ${S.bold}${S.brightRed}>${S.reset} ${S.white}${summary}${S.reset}`);
+        writeLine(io, `  ${S.bold}${S.brightRed}>${S.reset} ${S.white}${summary}${S.reset}`);
       } else if (result.errors.length > 0) {
-        console.log(`  ${S.brightRed}! ${summary}${S.reset}`);
+        writeLine(io, `  ${S.brightRed}! ${summary}${S.reset}`);
       } else {
-        console.log(`  ${S.dim}${S.gray}${summary}${S.reset}`);
+        writeLine(io, `  ${S.dim}${S.gray}${summary}${S.reset}`);
       }
 
       if (result.written.length > 0) {
         for (const path of result.written) {
-          console.log(note(`  written: ${path}`));
+          writeLine(io, note(`  written: ${path}`));
         }
       }
 
-      console.log("");
+      writeLine(io, "");
     }
 
     return config;
@@ -222,6 +244,7 @@ export async function runFirstRunWizard(): Promise<ZenithConfig> {
 // ---------------------------------------------------------------------------
 
 async function askYesNo(
+  io: WizardIO,
   question: (p: string) => Promise<string>,
   styledPrompt: string,
   defaultValue: boolean,
@@ -233,7 +256,7 @@ async function askYesNo(
     if (answer === "y" || answer === "yes") return true;
     if (answer === "n" || answer === "no") return false;
 
-    console.log(errorMsg('Enter "y" or "n".'));
+    writeLine(io, errorMsg('Enter "y" or "n".'));
   }
 }
 
@@ -242,6 +265,7 @@ async function askYesNo(
 // ---------------------------------------------------------------------------
 
 async function askBackupMode(
+  io: WizardIO,
   question: (p: string) => Promise<string>,
 ): Promise<{ mode: "file" | "sqlite" | "none"; dir: string }> {
   for (;;) {
@@ -256,7 +280,7 @@ async function askBackupMode(
     }
 
     if (choice === "3") {
-      const customDir = await askCustomPath(question);
+      const customDir = await askCustomPath(io, question);
       return { mode: "file", dir: customDir };
     }
 
@@ -264,7 +288,7 @@ async function askBackupMode(
       return { mode: "none", dir: DEFAULT_CONFIG.auto_write.backup_dir };
     }
 
-    console.log(errorMsg("Enter 1, 2, 3, or 4."));
+    writeLine(io, errorMsg("Enter 1, 2, 3, or 4."));
   }
 }
 
@@ -273,12 +297,13 @@ async function askBackupMode(
 // ---------------------------------------------------------------------------
 
 async function askCustomPath(
+  io: WizardIO,
   question: (p: string) => Promise<string>,
 ): Promise<string> {
   for (;;) {
     const path = (await question(prompt("Backup path: "))).trim();
     if (path !== "") return path;
-    console.log(errorMsg("Path cannot be empty."));
+    writeLine(io, errorMsg("Path cannot be empty."));
   }
 }
 
@@ -306,6 +331,7 @@ async function askCustomMcpPaths(
 // ---------------------------------------------------------------------------
 
 async function askPort(
+  io: WizardIO,
   question: (p: string) => Promise<string>,
 ): Promise<number> {
   for (;;) {
@@ -320,7 +346,7 @@ async function askPort(
       return parsed;
     }
 
-    console.log(errorMsg("Enter a valid port (1–65535)."));
+    writeLine(io, errorMsg("Enter a valid port (1–65535)."));
   }
 }
 
@@ -329,6 +355,7 @@ async function askPort(
 // ---------------------------------------------------------------------------
 
 async function askCharBudget(
+  io: WizardIO,
   question: (p: string) => Promise<string>,
 ): Promise<number> {
   for (;;) {
@@ -346,6 +373,6 @@ async function askCharBudget(
       return parsed;
     }
 
-    console.log(errorMsg("Enter a number between 10,000 and 2,000,000."));
+    writeLine(io, errorMsg("Enter a number between 10,000 and 2,000,000."));
   }
 }

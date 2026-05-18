@@ -6,42 +6,106 @@ import path from "path";
 import os from "os";
 import { minimatch } from "minimatch";
 import { loadConfig } from '../config/index.js';
+import type { ZenithConfig } from '../config/index.js';
 
-const _config = loadConfig();
+let _config: ZenithConfig | null = null;
 
-export const CHAR_BUDGET: number = (() => {
-    const val = _config.advanced.char_budget;
+function getConfig(): ZenithConfig {
+    if (!_config) {
+        _config = loadConfig();
+    }
+    return _config;
+}
+
+export function getCharBudget(): number {
+    const val = getConfig().advanced.char_budget;
     if (typeof val === 'number' && !isNaN(val) && val >= 10_000 && val <= 2_000_000) return val;
     return 400_000;
-})();
+}
 export const RANK_THRESHOLD = 50;
 
-export const DEFAULT_EXCLUDES: string[] = (() => {
-    const raw = _config.advanced.default_excludes;
-    if (raw && typeof raw === 'string') {
-        const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
-        if (parsed.length > 0) return parsed;
+export function getSearchCharBudget(): number {
+    const val = getConfig().advanced.search_char_budget;
+    if (typeof val === 'number' && !isNaN(val) && val >= 1_000 && val <= 2_000_000) {
+        return Math.min(val, getCharBudget());
     }
-    return 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
-        .split(',').map(p => p.trim()).filter(Boolean);
-})();
+    return Math.min(15_000, getCharBudget());
+}
 
-export const SENSITIVE_PATTERNS: string[] = (() => {
-    const raw = _config.advanced.sensitive_patterns;
+export function getRefactorVersionTtlMs(): number {
+    return getConfig().advanced.refactor_version_ttl_hours * 60 * 60 * 1000;
+}
+
+let _defaultExcludesCache: string[] | null = null;
+let _sensitivePatternsCache: string[] | null = null;
+let _cachedConfigRef: ZenithConfig | null = null;
+
+function invalidateCachesIfNeeded(): void {
+    const current = getConfig();
+    if (_cachedConfigRef !== current) {
+        _defaultExcludesCache = null;
+        _sensitivePatternsCache = null;
+        _cachedConfigRef = current;
+    }
+}
+
+export function getDefaultExcludes(): string[] {
+    invalidateCachesIfNeeded();
+    if (_defaultExcludesCache) return _defaultExcludesCache;
+    const raw = getConfig().advanced.default_excludes;
     if (raw && typeof raw === 'string') {
         const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
-        if (parsed.length > 0) return parsed;
+        if (parsed.length > 0) {
+            _defaultExcludesCache = parsed;
+            return parsed;
+        }
     }
-    return '**/.env,**/*.pem,**/*.key,**/*.crt,**/*credentials*,**/*secret*,**/docker-compose.yaml,**/docker-compose.yml,**/.config/**'
+    _defaultExcludesCache = 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
         .split(',').map(p => p.trim()).filter(Boolean);
-})();
+    return _defaultExcludesCache;
+}
+
+export function getSensitivePatterns(): string[] {
+    invalidateCachesIfNeeded();
+    if (_sensitivePatternsCache) return _sensitivePatternsCache;
+    const raw = getConfig().advanced.sensitive_patterns;
+    if (raw && typeof raw === 'string') {
+        const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
+        if (parsed.length > 0) {
+            _sensitivePatternsCache = parsed;
+            return parsed;
+        }
+    }
+    _sensitivePatternsCache = '**/.env,**/*.pem,**/*.key,**/*.crt,**/*credentials*,**/*secret*,**/docker-compose.yaml,**/docker-compose.yml,**/.config/**'
+        .split(',').map(p => p.trim()).filter(Boolean);
+    return _sensitivePatternsCache;
+}
 
 export function isSensitive(filePath: string): boolean {
-    const rel = path.relative(os.homedir(), filePath);
-    return SENSITIVE_PATTERNS.some(pat =>
-        minimatch(rel, pat, { dot: true, nocase: true }) ||
-        minimatch(path.basename(filePath), pat.replace(/\*\*\//g, ''), { dot: true, nocase: true })
-    );
+    const absPath = path.resolve(filePath);
+    const rel = path.relative(os.homedir(), absPath);
+    const basename = path.basename(absPath);
+    // Test patterns against: home-relative path, basename, and absolute path segments
+    // This ensures patterns like .config/** work regardless of file location
+    return getSensitivePatterns().some(pat => {
+        const barePattern = pat.replace(/\*\*\//g, '');
+        if (minimatch(rel, pat, { dot: true, nocase: true })) return true;
+        if (minimatch(basename, barePattern, { dot: true, nocase: true })) return true;
+        // For directory-based patterns (e.g. **/.config/**), check if any path segment matches
+        if (pat.includes('/')) {
+            const segments = absPath.split(path.sep);
+            const patParts = pat.replace(/^\*\*\//, '').split('/');
+            const dirPart = patParts[0];
+            if (dirPart && segments.some(seg => seg === dirPart)) {
+                // Rebuild relative path from the matching segment onward
+                const idx = segments.lastIndexOf(dirPart);
+                const fromDir = segments.slice(idx).join('/');
+                const innerPat = patParts.join('/');
+                if (minimatch(fromDir, innerPat, { dot: true, nocase: true })) return true;
+            }
+        }
+        return false;
+    });
 }
 
 const WORD_RE = /[a-z0-9_]+/g;
@@ -162,7 +226,8 @@ export class BM25Index {
     }
 }
 
-export function bm25RankResults(lines: string[], query: string, charBudget = CHAR_BUDGET) {
+export function bm25RankResults(lines: string[], query: string, charBudget?: number) {
+    const budget = charBudget ?? getCharBudget();
     const index = new BM25Index();
     const docs = lines.map((line, i) => ({ id: String(i), text: line }));
     index.build(docs);
@@ -172,7 +237,7 @@ export function bm25RankResults(lines: string[], query: string, charBudget = CHA
     for (const { id } of ranked) {
         const line = lines[Number(id)];
         if (line === undefined) continue;
-        if (charCount + line.length + 1 > charBudget) break;
+        if (charCount + line.length + 1 > budget) break;
         result.push(line);
         charCount += line.length + 1;
     }
@@ -183,7 +248,8 @@ export async function bm25PreFilterFiles(rootPath: string, query: string, topK =
     const docs: Array<{ id: string; text: string }> = [];
     const MAX_FILE_SIZE = 512 * 1024;
     const MAX_FILES = 5000;
-    const defaultExcludeGlobs = DEFAULT_EXCLUDES.map(p => `**/${p}/**`);
+    const defaultExcludes = getDefaultExcludes();
+    const defaultExcludeGlobs = defaultExcludes.flatMap(p => [`**/${p}`, `**/${p}/**`]);
     const allExcludes = [...excludePatterns, ...defaultExcludeGlobs];
     const textExts = new Set(['.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte', '.html', '.css', '.scss', '.less', '.json', '.yaml', '.yml', '.toml', '.xml', '.md', '.txt', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.sql', '.graphql', '.proto', '.tf', '.hcl', '.lua', '.ex', '.exs', '.erl', '.hs', '.ml', '.clj', '.r', '.dockerfile', '.makefile', '.cmake', '.gradle', '.sbt', '.env.example', '.gitignore', '.editorconfig']);
     const hasRg = await ripgrepAvailable();
@@ -201,7 +267,7 @@ export async function bm25PreFilterFiles(rootPath: string, query: string, topK =
                 if (filePaths.length >= MAX_FILES) return;
                 const fullPath = path.join(dir, entry.name);
                 const rel = path.relative(rootPath, fullPath);
-                if (DEFAULT_EXCLUDES.some(p => entry.name === p)) continue;
+                if (defaultExcludes.some(p => entry.name === p)) continue;
                 const excluded = allExcludes.some(pat => minimatch(rel, pat, { dot: true }) || minimatch(rel, pat.replace(/^\*\*\//, ''), { dot: true }));
                 if (excluded) continue;
                 if (isSensitive(fullPath)) continue;
@@ -236,6 +302,9 @@ export async function bm25PreFilterFiles(rootPath: string, query: string, topK =
 
 export const RG_PATH = '/usr/bin/rg';
 
+/** Last ripgrep error message — populated when ripgrepSearch returns null. */
+export let lastRipgrepError: string | null = null;
+
 export async function ripgrepAvailable() {
     try {
         await fs.access(RG_PATH, fsConstants.X_OK);
@@ -247,6 +316,7 @@ export interface RipgrepResult {
     file: string;
     line: number;
     content: string;
+    isContext?: boolean;
 }
 
 export async function ripgrepSearch(rootPath: string, options: {
@@ -259,9 +329,18 @@ export async function ripgrepSearch(rootPath: string, options: {
     literalSearch?: boolean;
     includeHidden?: boolean;
     fileList?: string[] | null;
+    includeContextLines?: boolean;
+    skipSensitiveFilter?: boolean;
+    maxMatchesPerFile?: number | null;
 } = {}): Promise<RipgrepResult[] | null> {
-    const { contentQuery, filePattern = null, ignoreCase = true, maxResults = 50, excludePatterns = [], contextLines = 0, literalSearch = false, includeHidden = false, fileList = null } = options;
-    const rgArgs = ['--json', '--max-count', '100', '-m', '500'];
+    const {
+        contentQuery, filePattern = null, ignoreCase = true, maxResults = 50,
+        excludePatterns = [], contextLines = 0, literalSearch = false, includeHidden = false,
+        fileList = null, includeContextLines = false, skipSensitiveFilter = false,
+        maxMatchesPerFile = 500,
+    } = options;
+    const rgArgs = ['--json'];
+    if (maxMatchesPerFile !== null && maxMatchesPerFile > 0) rgArgs.push('-m', String(maxMatchesPerFile));
     if (ignoreCase) rgArgs.push('-i');
     if (literalSearch) rgArgs.push('-F');
     if (includeHidden) rgArgs.push('--hidden');
@@ -276,6 +355,8 @@ export async function ripgrepSearch(rootPath: string, options: {
     return new Promise<RipgrepResult[] | null>((resolveP) => {
         const results: RipgrepResult[] = [];
         let stderr = '';
+        let killed = false;
+        lastRipgrepError = null;
         const proc = spawn(RG_PATH, rgArgs, { timeout: 30000 });
         let buffer = '';
         proc.stdout.on('data', (chunk) => {
@@ -284,28 +365,43 @@ export async function ripgrepSearch(rootPath: string, options: {
             buffer = lines.pop() ?? '';
             for (const line of lines) {
                 if (!line.trim()) continue;
+                if (results.length >= maxResults) {
+                    if (!killed) { killed = true; proc.kill('SIGTERM'); }
+                    break;
+                }
                 try {
                     const msg = JSON.parse(line);
-                    if (msg.type === 'match' && results.length < maxResults) {
+                    if (msg.type === 'match') {
                         const d = msg.data;
                         const filePath = d.path?.text;
-                        if (filePath && !isSensitive(filePath)) {
+                        if (filePath && (skipSensitiveFilter || !isSensitive(filePath))) {
                             results.push({ file: filePath, line: d.line_number, content: d.lines?.text?.replace(/\n$/, '') || '' });
                         }
+                    } else if (includeContextLines && msg.type === 'context') {
+                        const d = msg.data;
+                        const filePath = d.path?.text;
+                        if (filePath && (skipSensitiveFilter || !isSensitive(filePath))) {
+                            results.push({ file: filePath, line: d.line_number, content: d.lines?.text?.replace(/\n$/, '') || '', isContext: true });
+                        }
                     }
-                } catch { }
+                } catch (_err) { }
             }
         });
         proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
         proc.on('close', (code) => {
-            if ((code ?? 0) > 1) {
-                console.error('ripgrep exited with code ' + code, stderr.slice(0, 200));
+            if (!killed && (code ?? 0) > 1) {
+                lastRipgrepError = stderr.slice(0, 200) || `ripgrep exited with code ${code}`;
                 resolveP(null);
                 return;
             }
-            resolveP(results);
+            resolveP(results.slice(0, maxResults));
         });
-        proc.on('error', () => resolveP(null));
+        proc.on('error', (err) => {
+            if (!killed) {
+                lastRipgrepError = err.message || 'ripgrep process error';
+                resolveP(null);
+            }
+        });
     });
 }
 
@@ -317,7 +413,7 @@ export async function ripgrepFindFiles(rootPath: string, options: {
 } = {}): Promise<string[] | null> {
     const { namePattern = null, pathContains = null, maxResults = 100, excludePatterns = [] } = options;
     const rgArgs = ['--files'];
-    for (const p of DEFAULT_EXCLUDES) {
+    for (const p of getDefaultExcludes()) {
         rgArgs.push('--glob', `!**/${p}`);
         rgArgs.push('--glob', `!**/${p}/**`);
     }
@@ -340,6 +436,85 @@ export async function ripgrepFindFiles(rootPath: string, options: {
             }
         });
         proc.on('close', () => resolveP(results));
+        proc.on('error', () => resolveP(null));
+    });
+}
+
+export interface RipgrepCountResult {
+    matchCount: number;
+    fileCount: number;
+}
+
+export async function ripgrepCountMatches(
+    rootPath: string,
+    options: {
+        contentQuery: string;
+        filePattern?: string | null;
+        extensions?: string[];
+        pathContains?: string | null;
+        excludePatterns?: string[];
+        literalSearch?: boolean;
+        includeHidden?: boolean;
+        fileList?: string[] | null;
+    },
+): Promise<RipgrepCountResult | null> {
+    const {
+        contentQuery,
+        filePattern = null,
+        extensions = [],
+        pathContains = null,
+        excludePatterns = [],
+        literalSearch = false,
+        includeHidden = false,
+        fileList = null,
+    } = options;
+
+    const baseArgs: string[] = ['-i'];
+    if (literalSearch) baseArgs.push('-F');
+    if (includeHidden) baseArgs.push('--hidden');
+    for (const pat of excludePatterns) baseArgs.push('--glob', `!${pat}`);
+    for (const pat of getSensitivePatterns()) baseArgs.push('--glob', `!${pat}`);
+    if (filePattern) {
+        const includeGlob = filePattern.includes('/') ? filePattern : `**/${filePattern}`;
+        baseArgs.push('--glob', includeGlob);
+    }
+    for (const ext of extensions) {
+        const e = ext.startsWith('.') ? ext : `.${ext}`;
+        baseArgs.push('--glob', `**/*${e}`);
+    }
+
+    const targets = fileList && fileList.length > 0 ? fileList : [rootPath];
+    const countArgs = ['--count-matches', '--with-filename', '--no-messages', ...baseArgs, '--', contentQuery, ...targets];
+
+    return new Promise<RipgrepCountResult | null>((resolveP) => {
+        let matchCount = 0;
+        let fileCount = 0;
+        let buffer = '';
+        const proc = spawn(RG_PATH, countArgs, { timeout: 30000 });
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                const lastColon = trimmed.lastIndexOf(':');
+                if (lastColon === -1) continue;
+                const filePath = trimmed.slice(0, lastColon);
+                const count = Number(trimmed.slice(lastColon + 1));
+                if (isNaN(count) || count <= 0) continue;
+                if (isSensitive(filePath)) continue;
+                if (pathContains && !filePath.toLowerCase().includes(pathContains.toLowerCase())) continue;
+                matchCount += count;
+                fileCount++;
+            }
+        });
+
+        proc.on('close', (code) => {
+            if ((code ?? 0) > 1) { resolveP(null); return; }
+            resolveP({ matchCount, fileCount });
+        });
         proc.on('error', () => resolveP(null));
     });
 }

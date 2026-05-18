@@ -19,6 +19,16 @@ function getSpecificity(scored: ScoredTool): number {
   return 0;
 }
 
+function flushGroup(group: ScoredTool[], ranked: ScoredTool[]): void {
+  group.sort((a, b) => {
+    const sa = getSpecificity(a);
+    const sb = getSpecificity(b);
+    if (sb !== sa) return sb - sa;
+    return a.toolKey.localeCompare(b.toolKey);
+  });
+  ranked.push(...group);
+}
+
 export class RelevanceRanker {
   rank(tools: ScoredTool[]): ScoredTool[] {
     if (tools.length === 0) return [];
@@ -31,35 +41,22 @@ export class RelevanceRanker {
 
     const ranked: ScoredTool[] = [];
     let tiedGroup: ScoredTool[] = [];
-    let groupScore: number | null = null;
+    let groupAnchor: number | null = null;
 
     for (const tool of byScore) {
-      if (groupScore === null || Math.abs(groupScore - tool.score) < SCORE_TOLERANCE) {
+      if (groupAnchor === null || Math.abs(groupAnchor - tool.score) < SCORE_TOLERANCE) {
         tiedGroup.push(tool);
-        if (groupScore === null) groupScore = tool.score;
+        if (groupAnchor === null) groupAnchor = tool.score;
         continue;
       }
 
-      tiedGroup.sort((a, b) => {
-        const sa = getSpecificity(a);
-        const sb = getSpecificity(b);
-        if (sb !== sa) return sb - sa;
-        return a.toolKey.localeCompare(b.toolKey);
-      });
-      ranked.push(...tiedGroup);
+      flushGroup(tiedGroup, ranked);
       tiedGroup = [tool];
-      groupScore = tool.score;
+      groupAnchor = tool.score;
     }
 
-    tiedGroup.sort((a, b) => {
-      const sa = getSpecificity(a);
-      const sb = getSpecificity(b);
-      if (sb !== sa) return sb - sa;
-      return a.toolKey.localeCompare(b.toolKey);
-    });
-    ranked.push(...tiedGroup);
+    flushGroup(tiedGroup, ranked);
 
     return ranked;
   }
 }
-

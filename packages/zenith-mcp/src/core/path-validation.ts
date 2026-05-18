@@ -10,8 +10,11 @@ export { normalizePath, expandHome } from './path-utils.js';
 export function isPathWithinAllowedDirectories(filePath: string, allowedDirectories: string[]): boolean {
     const normalized = _normalizePath(filePath);
     const resolved = path.resolve(normalized);
+    const sep = path.sep;
     return allowedDirectories.some(dir => {
         const normalizedDir = path.resolve(_normalizePath(dir));
-        return resolved === normalizedDir || resolved.startsWith(normalizedDir + '/');
+        if (resolved === normalizedDir) return true;
+        const prefix = normalizedDir.endsWith(sep) ? normalizedDir : normalizedDir + sep;
+        return resolved.startsWith(prefix);
     });
 }

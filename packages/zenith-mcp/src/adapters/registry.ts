@@ -3,7 +3,9 @@ import { adapter as antigravityAdapter } from "./platforms/antigravity.js";
 import { adapter as claudeDesktopAdapter } from "./platforms/claude-desktop.js";
 import { adapter as clineAdapter } from "./platforms/cline.js";
 import { adapter as codexCliAdapter } from "./platforms/codex-cli.js";
-import { adapter as codexDesktopAdapter } from "./platforms/codex-desktop.js";
+// codex-desktop adapter is intentionally NOT registered: its config path matches
+// codex_cli, so registering both would write the entry twice. The adapter module
+// is retained at platforms/codex-desktop.ts pending a distinct path discovery.
 import { adapter as continueDevAdapter } from "./platforms/continue-dev.js";
 import { adapter as geminiCliAdapter } from "./platforms/gemini-cli.js";
 import { adapter as githubCopilotAdapter } from "./platforms/github-copilot.js";
@@ -21,7 +23,6 @@ const _adapters: Record<string, MCPConfigAdapter> = {
   claude_desktop: claudeDesktopAdapter,
   cline: clineAdapter,
   codex_cli: codexCliAdapter,
-  codex_desktop: codexDesktopAdapter,
   continue_dev: continueDevAdapter,
   gemini_cli: geminiCliAdapter,
   github_copilot: githubCopilotAdapter,

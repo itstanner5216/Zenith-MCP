@@ -25,6 +25,7 @@ function captureHandler() {
 function mkCtx(repoDir) {
     return {
         validatePath: async (p) => path.resolve(p),
+        validateNewFilePath: async (p) => path.resolve(p),
         getAllowedDirectories: () => [repoDir],
     };
 }
@@ -91,9 +92,8 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
 
     // BUG: findResumeOffset fails to detect overlap when existing file ends with \n
     // because split('\n') produces a trailing empty string '' that breaks the line comparison.
-    // The overlap check compares existingLines[1+2]='' with incomingLines[2]='ddd' which fails,
-    // causing the entire incoming content to be appended without overlap detection.
-    it('overlap detection fails when existing file ends with newline (BUG)', async () => {
+    // Trailing empty line from split('\n') is stripped before comparison so overlap is detected correctly.
+    it('correctly deduplicates overlapping content when file ends with newline', async () => {
         const filePath = path.join(repoDir, 'overlap.txt');
         fs.writeFileSync(filePath, 'aaa\nbbb\nccc\n');
         const result = await handler({
@@ -106,9 +106,9 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         expect(written).toContain('aaa');
         expect(written).toContain('ddd');
         expect(written).toContain('eee');
-        // BUG: overlap detection fails, so bbb and ccc are duplicated
+        // Overlap of 'bbb\nccc' is detected correctly — no duplication
         const bbbCount = (written.match(/bbb/g) || []).length;
-        expect(bbbCount).toBe(2); // should be 1 if overlap detection worked
+        expect(bbbCount).toBe(1);
     });
 
     it('creates parent directories automatically', async () => {

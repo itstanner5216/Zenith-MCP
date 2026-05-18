@@ -26,25 +26,18 @@ interface BackupRow {
 }
 
 // ---------------------------------------------------------------------------
-// Lazy SQLite initialisation — reuses the shared global-stash.db
+// Lazy singleton DB connection — one open per process lifetime
 // ---------------------------------------------------------------------------
 
 let _db: Database.Database | null = null;
-let _tableReady = false;
 
 function getDb(): Database.Database {
-    if (_db) return _db;
+    if (_db !== null) return _db;
     mkdirSync(ZENITH_HOME, { recursive: true });
-    _db = new Database(GLOBAL_DB_PATH);
-    _db.pragma('journal_mode = WAL');
-    _db.pragma('synchronous = NORMAL');
-    _db.pragma('busy_timeout = 5000');
-    return _db;
-}
-
-function ensureTable(): void {
-    if (_tableReady) return;
-    const db = getDb();
+    const db = new Database(GLOBAL_DB_PATH);
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('busy_timeout = 5000');
     db.exec(`
         CREATE TABLE IF NOT EXISTS config_backups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +47,21 @@ function ensureTable(): void {
             expires_at TEXT NOT NULL
         );
     `);
-    _tableReady = true;
+    _db = db;
+    return db;
+}
+
+/** Exported for test teardown / clean shutdown. */
+export function closeDb(): void {
+    if (_db !== null) {
+        _db.close();
+        _db = null;
+    }
+}
+
+// withDb signature preserved so callers are unchanged.
+function withDb<T>(work: (db: Database.Database) => T): T {
+    return work(getDb());
 }
 
 // ---------------------------------------------------------------------------
@@ -92,25 +99,25 @@ export function backupFile(
     }
 
     // mode === 'sqlite'
-    ensureTable();
-    const db = getDb();
-    const content = readFileSync(originalPath, 'utf-8');
-    const now = new Date();
-    const createdAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + TTL_MS).toISOString();
+    return withDb((db) => {
+        const content = readFileSync(originalPath, 'utf-8');
+        const now = new Date();
+        const createdAt = now.toISOString();
+        const expiresAt = new Date(now.getTime() + TTL_MS).toISOString();
 
-    const result = db
-        .prepare(
-            'INSERT INTO config_backups (original_path, backup_content, created_at, expires_at) VALUES (?, ?, ?, ?)',
-        )
-        .run(originalPath, content, createdAt, expiresAt);
+        const result = db
+            .prepare(
+                'INSERT INTO config_backups (original_path, backup_content, created_at, expires_at) VALUES (?, ?, ?, ?)',
+            )
+            .run(originalPath, content, createdAt, expiresAt);
 
-    const rowId = String(result.lastInsertRowid);
+        const rowId = String(result.lastInsertRowid);
 
-    return {
-        backupId: rowId,
-        message: `Backup stored in SQLite (row ${rowId}). Expires in 24 hours.`,
-    };
+        return {
+            backupId: rowId,
+            message: `Backup stored in SQLite (row ${rowId}). Expires in 24 hours.`,
+        };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -126,17 +133,17 @@ export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string
     }
 
     // mode === 'sqlite'
-    ensureTable();
-    const db = getDb();
-    const row = db
-        .prepare<unknown[], BackupRow>('SELECT * FROM config_backups WHERE id = ?')
-        .get(Number(backupId));
+    return withDb((db) => {
+        const row = db
+            .prepare<unknown[], BackupRow>('SELECT * FROM config_backups WHERE id = ?')
+            .get(Number(backupId));
 
-    if (!row) {
-        throw new Error(`No SQLite backup found for row ID ${backupId}`);
-    }
+        if (!row) {
+            throw new Error(`No SQLite backup found for row ID ${backupId}`);
+        }
 
-    return row.backup_content;
+        return row.backup_content;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -144,11 +151,11 @@ export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string
 // ---------------------------------------------------------------------------
 
 export function cleanupExpiredBackups(): number {
-    ensureTable();
-    const db = getDb();
-    const now = new Date().toISOString();
-    const result = db
-        .prepare('DELETE FROM config_backups WHERE expires_at < ?')
-        .run(now);
-    return result.changes;
+    return withDb((db) => {
+        const now = new Date().toISOString();
+        const result = db
+            .prepare('DELETE FROM config_backups WHERE expires_at < ?')
+            .run(now);
+        return result.changes;
+    });
 }

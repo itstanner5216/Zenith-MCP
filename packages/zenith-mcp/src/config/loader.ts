@@ -167,8 +167,12 @@ export function patchToolsInConfig(tools: Record<string, boolean>): void {
   let fileContent: string;
   try {
     fileContent = readFileSync(CONFIG_PATH, "utf-8");
-  } catch {
-    // No config file yet — full save is fine for first creation
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT") {
+      throw error;
+    }
+    // File genuinely does not exist yet — first-time creation is safe
     const config = loadConfig();
     config.tools = tools;
     saveConfig(config);

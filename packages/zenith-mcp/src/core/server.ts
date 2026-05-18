@@ -130,7 +130,7 @@ export function attachRootsHandlers(server: McpServer, ctx: FilesystemContext): 
     const validatedRootDirs = await getValidRootDirectories(requestedRoots);
     if (validatedRootDirs.length > 0) {
       ctx.setAllowedDirectories(validatedRootDirs);
-      onRootsChanged();
+      onRootsChanged(ctx);
       console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
     } else {
       console.error("No valid root directories provided by client");

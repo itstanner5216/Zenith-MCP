@@ -4,6 +4,8 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 
+import { minimatch } from "minimatch";
+
 import type { RootEvidence, WorkspaceEvidence } from "../models.js";
 import { MANIFEST_LANGUAGE_MAP, LOCKFILE_NAMES, buildTokens } from "./tokens.js";
 import { fingerprintEvidence, mergeEvidence } from "./evidence.js";
@@ -43,9 +45,15 @@ const ALL_ALLOWED_FILES: Set<string> = new Set([
 ]);
 
 // ── Denylist ─────────────────────────────────────────────────────────────────
+// Patterns are matched against file/directory NAMES (not paths) using minimatch
+// with { dot: true }. Each `*` matches any characters within the name (no `/`
+// crossing needed since we match basenames only). These are intentionally anchored
+// (must match the whole name) for precision — broader than the old substring
+// matcher where needed via explicit leading/trailing wildcards.
 const DENIED_PATTERNS: string[] = [
-  ".env",
-  ".env.*",
+  ".env",        // exact: the well-known ".env" file
+  ".env.*",      // ".env.production", ".env.local", etc.
+  "*.env",       // any file whose name ends in ".env" (e.g. "myapp.env")
   "*.pem",
   "*.key",
   "*.p12",
@@ -56,11 +64,12 @@ const DENIED_PATTERNS: string[] = [
   "id_ed25519.*",
   "id_dsa",
   "id_ecdsa",
+  "*credentials*",   // any filename containing "credentials" (broad: security-critical)
+  "*secret*",        // any filename containing "secret"
+  "*secrets*",       // any filename containing "secrets"
   "*.aws_credentials",
-  "credentials",
   ".aws",
-  "*.secret",
-  "*.secrets",
+  ".credentials",
 ];
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
@@ -72,25 +81,13 @@ function _isDenied(name: string): boolean {
   const lower = name.toLowerCase();
   for (const pattern of DENIED_PATTERNS) {
     if (
-      _fnmatch(name, pattern) ||
-      _fnmatch(lower, pattern.toLowerCase())
+      minimatch(name, pattern, { dot: true, nocase: false }) ||
+      minimatch(lower, pattern.toLowerCase(), { dot: true, nocase: false })
     ) {
       return true;
     }
   }
   return false;
-}
-
-function _fnmatch(name: string, pattern: string): boolean {
-  const parts = pattern.split("*");
-  let idx = 0;
-  for (const part of parts) {
-    if (part === "") continue;
-    const found = name.indexOf(part, idx);
-    if (found === -1) return false;
-    idx = found + part.length;
-  }
-  return true;
 }
 
 function _uriToPath(uri: string): string | null {

@@ -285,6 +285,22 @@ export function compress(
 // Stage 2: Self-Scoring & Relevance Ranking (5-Phase Algorithm)
 // ---------------------------------------------------------------------------
 
+function medianOfSorted(values: number[]): number {
+  const n = values.length;
+  if (n === 0) throw new Error("medianOfSorted: empty array");
+  const mid = Math.floor(n / 2);
+  const center = values[mid];
+  if (center === undefined) {
+    throw new Error(`medianOfSorted: index ${mid} missing (n=${n})`);
+  }
+  if (n % 2 === 1) return center;
+  const left = values[mid - 1];
+  if (left === undefined) {
+    throw new Error(`medianOfSorted: index ${mid - 1} missing (n=${n})`);
+  }
+  return (left + center) / 2;
+}
+
 /**
  * Stage 2: 5-phase centrality + relevance scoring.
  *
@@ -471,22 +487,11 @@ function _scoreEntries(
   // Cisco 2026: median/MAD z-score detection outperforms mean-based.
   // Radovanović et al. (JMLR 2010): hubs distort centrality.
   const sorted_ss = [...self_scores].sort((a, b) => a - b);
-  const median_ss = sorted_ss[Math.floor(n / 2)];
-  if (median_ss === undefined) {
-    throw new Error(
-      `invariant: sorted_ss[${Math.floor(n / 2)}] undefined (n=${n})`,
-    );
-  }
+  const median_ss = medianOfSorted(sorted_ss);
   const abs_devs = self_scores
     .map((s) => Math.abs(s - median_ss))
     .sort((a, b) => a - b);
-  const abs_dev_mid = abs_devs[Math.floor(n / 2)];
-  if (abs_dev_mid === undefined) {
-    throw new Error(
-      `invariant: abs_devs[${Math.floor(n / 2)}] undefined (n=${n})`,
-    );
-  }
-  const mad = abs_dev_mid * 1.4826; // MAD to std conversion factor
+  const mad = medianOfSorted(abs_devs) * 1.4826; // MAD to std conversion factor
 
   const hubs: number[] = [];
   if (mad > 0) {

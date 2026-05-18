@@ -37,6 +37,7 @@
     "js-yaml": "^4.1.0",
     "json-schema-typed": "^8.0.2",
     "json5": "^2.2.3",
+    "jsonc-parser": "^3.3.1",
     "minimatch": "^10.0.1",
     "web-tree-sitter": "^0.26.8",
     "zenith-toon": "workspace:*",

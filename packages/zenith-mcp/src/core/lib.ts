@@ -18,6 +18,7 @@ export interface FilesystemContext {
     getAllowedDirectories(): string[];
     setAllowedDirectories(directories: string[]): void;
     validatePath(requestedPath: string): Promise<string>;
+    validateNewFilePath(requestedPath: string): Promise<string>;
 }
 
 export function createFilesystemContext(initialAllowedDirectories: string[] = []): FilesystemContext {
@@ -60,7 +61,10 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
                         throw new Error(`Access denied - parent directory outside allowed directories: ${realParentPath} not in ${_allowedDirectories.join(', ')}`);
                     }
                     return absolute;
-                } catch {
+                } catch (parentError) {
+                    // Re-throw access-denied and other non-filesystem errors unchanged.
+                    // Wrap filesystem errors (ENOENT, EACCES, etc.) with a friendlier message.
+                    if (!hasCode(parentError)) throw parentError;
                     throw new Error(`Parent directory does not exist: ${parentDir}`);
                 }
             }
@@ -68,43 +72,94 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         }
     }
 
-    return { getAllowedDirectories, setAllowedDirectories, validatePath };
+    async function resolveNearestExistingAncestor(targetPath: string): Promise<{ realAncestor: string; missingSegments: string[] }> {
+        const missingSegments: string[] = [];
+        let cursor = path.resolve(targetPath);
+        while (true) {
+            try {
+                return { realAncestor: await fs.realpath(cursor), missingSegments };
+            } catch (error: unknown) {
+                if (!hasCode(error) || error.code !== 'ENOENT') throw error;
+                const parent = path.dirname(cursor);
+                if (parent === cursor) {
+                    throw new Error(`No existing ancestor found for path: ${targetPath}`);
+                }
+                missingSegments.unshift(path.basename(cursor));
+                cursor = parent;
+            }
+        }
+    }
+
+    async function validateNewFilePath(requestedPath: string): Promise<string> {
+        const expandedPath = expandHome(requestedPath);
+        const absolute = path.isAbsolute(expandedPath)
+            ? path.resolve(expandedPath)
+            : path.resolve(process.cwd(), expandedPath);
+        const normalizedRequested = normalizePath(absolute);
+        if (!isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
+            throw new Error('Access denied — path is outside allowed directories.');
+        }
+        const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
+        const normalizedAncestor = normalizePath(realAncestor);
+        if (!isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
+            throw new Error('Access denied — resolved path is outside allowed directories.');
+        }
+        return missingSegments.reduce(
+            (currentPath, segment) => path.join(currentPath, segment),
+            realAncestor,
+        );
+    }
+
+    return { getAllowedDirectories, setAllowedDirectories, validatePath, validateNewFilePath };
 }
 
 export function formatSize(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) {
+        throw new RangeError(`bytes must be a non-negative finite number: ${bytes}`);
+    }
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    if (bytes === 0)
-        return '0 B';
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    if (i < 0 || i === 0)
-        return `${bytes} ${units[0]}`;
-    const unitIndex = Math.min(i, units.length - 1);
+    if (bytes === 0) return '0 B';
+    const unitIndex = Math.min(
+        Math.floor(Math.log(bytes) / Math.log(1024)),
+        units.length - 1,
+    );
+    if (unitIndex <= 0) return `${bytes} ${units[0]}`;
     return `${(bytes / Math.pow(1024, unitIndex)).toFixed(2)} ${units[unitIndex]}`;
+}
+
+function trimTerminalEmptyLine(lines: string[]): string[] {
+    return lines.length > 0 && lines[lines.length - 1] === ''
+        ? lines.slice(0, -1)
+        : lines;
 }
 
 /**
  * Detect how many incoming lines overlap with the tail of an existing file.
  * Used by append-mode writes to avoid duplicating content on resume.
+ * Trailing empty lines (artifacts of split('\n') on newline-terminated files)
+ * are stripped from both arrays before comparison.
  */
 export function findResumeOffset(existingTailLines: string[], incomingLines: string[]): number {
-    if (!existingTailLines.length || !incomingLines.length)
+    const existing = trimTerminalEmptyLine(existingTailLines);
+    const incoming = trimTerminalEmptyLine(incomingLines);
+    if (!existing.length || !incoming.length)
         return 0;
     const trim = (s: string) => s.trimEnd();
-    const firstIncomingRaw = incomingLines[0];
+    const firstIncomingRaw = incoming[0];
     if (firstIncomingRaw === undefined)
         throw new Error('findResumeOffset: incomingLines[0] missing despite non-empty check');
     const firstIncoming = trim(firstIncomingRaw);
-    for (let i = 0; i < existingTailLines.length; i++) {
-        const existingAtI = existingTailLines[i];
+    for (let i = 0; i < existing.length; i++) {
+        const existingAtI = existing[i];
         if (existingAtI === undefined)
             throw new Error(`findResumeOffset: existingTailLines[${i}] out of range`);
         if (trim(existingAtI) !== firstIncoming)
             continue;
-        const overlapLen = Math.min(existingTailLines.length - i, incomingLines.length);
+        const overlapLen = Math.min(existing.length - i, incoming.length);
         let matched = true;
         for (let j = 0; j < overlapLen; j++) {
-            const existingAtIJ = existingTailLines[i + j];
-            const incomingAtJ = incomingLines[j];
+            const existingAtIJ = existing[i + j];
+            const incomingAtJ = incoming[j];
             if (existingAtIJ === undefined || incomingAtJ === undefined)
                 throw new Error(`findResumeOffset: index out of range at i=${i}, j=${j}`);
             if (trim(existingAtIJ) !== trim(incomingAtJ)) {
@@ -112,8 +167,7 @@ export function findResumeOffset(existingTailLines: string[], incomingLines: str
                 break;
             }
         }
-        if (matched)
-            return overlapLen;
+        if (matched) return overlapLen;
     }
     return 0;
 }
@@ -163,7 +217,7 @@ export async function writeFileContent(filePath: string, content: string) {
                 await fs.writeFile(tempPath, content, 'utf-8');
                 await fs.rename(tempPath, filePath);
             } catch (renameError) {
-                try { await fs.unlink(tempPath); } catch { }
+                try { await fs.unlink(tempPath); } catch (unlinkErr) { void unlinkErr; /* temp file cleanup after rename failure */ }
                 throw renameError;
             }
         } else {
@@ -178,13 +232,23 @@ export async function applyFileEdits(filePath: string, edits: Array<{ oldText: s
     for (const edit of edits) {
         const normalizedOld = normalizeLineEndings(edit.oldText);
         const normalizedNew = normalizeLineEndings(edit.newText);
-        if (modifiedContent.includes(normalizedOld)) {
+        if (normalizedOld.length === 0) {
+            throw new Error('applyFileEdits: oldText must not be empty');
+        }
+
+        const exactMatches = countOccurrences(modifiedContent, normalizedOld);
+        if (exactMatches > 1) {
+            throw new Error(`Ambiguous edit: found ${exactMatches} exact matches for:\n${edit.oldText}`);
+        }
+        if (exactMatches === 1) {
             modifiedContent = modifiedContent.replace(normalizedOld, normalizedNew);
             continue;
         }
+
+        // Whitespace-tolerant fallback: collect all candidate positions first
         const oldLines = normalizedOld.split('\n');
         const contentLines = modifiedContent.split('\n');
-        let matchFound = false;
+        const candidateIndexes: number[] = [];
         for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
             const potentialMatch = contentLines.slice(i, i + oldLines.length);
             const isMatch = oldLines.every((oldLine, j) => {
@@ -193,30 +257,36 @@ export async function applyFileEdits(filePath: string, edits: Array<{ oldText: s
                     throw new Error(`applyFileEdits: potentialMatch[${j}] missing for window at i=${i}`);
                 return oldLine.trim() === contentLine.trim();
             });
-            if (isMatch) {
-                const firstContentLine = contentLines[i];
-                if (firstContentLine === undefined)
-                    throw new Error(`applyFileEdits: contentLines[${i}] missing despite matched window`);
-                const originalIndent = firstContentLine.match(/^\s*/)?.[0] || '';
-                const newLines = normalizedNew.split('\n').map((line, j) => {
-                    if (j === 0) return originalIndent + line.trimStart();
-                    const oldIndent = oldLines[j]?.match(/^\s*/)?.[0] || '';
-                    const newIndent = line.match(/^\s*/)?.[0] || '';
-                    if (oldIndent && newIndent) {
-                        const relativeIndent = newIndent.length - oldIndent.length;
-                        return originalIndent + ' '.repeat(Math.max(0, relativeIndent)) + line.trimStart();
-                    }
-                    return line;
-                });
-                contentLines.splice(i, oldLines.length, ...newLines);
-                modifiedContent = contentLines.join('\n');
-                matchFound = true;
-                break;
-            }
+            if (isMatch) candidateIndexes.push(i);
         }
-        if (!matchFound) {
+        if (candidateIndexes.length === 0) {
             throw new Error(`Could not find exact match for edit:\n${edit.oldText}`);
         }
+        if (candidateIndexes.length > 1) {
+            throw new Error(
+                `Ambiguous whitespace-tolerant edit: found ${candidateIndexes.length} matches for:\n${edit.oldText}`
+            );
+        }
+        const matchIndex = candidateIndexes[0];
+        if (matchIndex === undefined) {
+            throw new Error('applyFileEdits: internal error — candidateIndexes[0] missing after length check');
+        }
+        const firstContentLine = contentLines[matchIndex];
+        if (firstContentLine === undefined)
+            throw new Error(`applyFileEdits: contentLines[${matchIndex}] missing despite matched window`);
+        const originalIndent = firstContentLine.match(/^\s*/)?.[0] ?? '';
+        const newLines = normalizedNew.split('\n').map((line, j) => {
+            if (j === 0) return originalIndent + line.trimStart();
+            const oldIndent = oldLines[j]?.match(/^\s*/)?.[0] ?? '';
+            const newIndent = line.match(/^\s*/)?.[0] ?? '';
+            if (oldIndent && newIndent) {
+                const relativeIndent = newIndent.length - oldIndent.length;
+                return originalIndent + ' '.repeat(Math.max(0, relativeIndent)) + line.trimStart();
+            }
+            return line;
+        });
+        contentLines.splice(matchIndex, oldLines.length, ...newLines);
+        modifiedContent = contentLines.join('\n');
     }
     const diff = createUnifiedDiff(content, modifiedContent, filePath);
     let numBackticks = 3;
@@ -228,7 +298,7 @@ export async function applyFileEdits(filePath: string, edits: Array<{ oldText: s
             await fs.writeFile(tempPath, modifiedContent, 'utf-8');
             await fs.rename(tempPath, filePath);
         } catch (error) {
-            try { await fs.unlink(tempPath); } catch { }
+            try { await fs.unlink(tempPath); } catch (unlinkErr) { void unlinkErr; /* temp file cleanup after failed atomic write */ }
             throw error;
         }
     }
@@ -240,6 +310,9 @@ export function countOccurrences(text: string, search: string): number {
     let pos = 0;
     const normText = normalizeLineEndings(text);
     const normSearch = normalizeLineEndings(search);
+    if (normSearch.length === 0) {
+        throw new Error('countOccurrences: search must not be empty');
+    }
     while (true) {
         const idx = normText.indexOf(normSearch, pos);
         if (idx === -1) break;
@@ -250,101 +323,103 @@ export function countOccurrences(text: string, search: string): number {
 }
 
 export async function tailFile(filePath: string, numLines: number) {
-    const CHUNK_SIZE = 1024;
-    const stats = await fs.stat(filePath);
-    const fileSize = stats.size;
-    if (fileSize === 0) return '';
-    const fileHandle = await fs.open(filePath, 'r');
-    try {
-        const lines = [];
-        let position = fileSize;
-        let chunk = Buffer.alloc(CHUNK_SIZE);
-        let linesFound = 0;
-        let remainingText = '';
-        while (position > 0 && linesFound < numLines) {
-            const size = Math.min(CHUNK_SIZE, position);
-            position -= size;
-            const { bytesRead } = await fileHandle.read(chunk, 0, size, position);
-            if (!bytesRead) break;
-            const readData = chunk.slice(0, bytesRead).toString('utf-8');
-            const chunkText = readData + remainingText;
-            const chunkLines = normalizeLineEndings(chunkText).split('\n');
-            if (position > 0) {
-                const firstChunkLine = chunkLines[0];
-                if (firstChunkLine === undefined)
-                    throw new Error('tailFile: split produced empty array unexpectedly');
-                remainingText = firstChunkLine;
-                chunkLines.shift();
+    const n = Math.floor(numLines);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const cap = Math.min(n, 50_000);
+
+    const stat = await fs.stat(filePath);
+    if (stat.size <= 131_072) {
+        const stream = createReadStream(filePath, { encoding: 'utf-8' });
+        const rl = createInterface({ input: stream, crlfDelay: Infinity });
+        const ring = new Array<string>(cap);
+        let count = 0;
+        try {
+            for await (const line of rl) {
+                ring[count % cap] = line;
+                count++;
             }
-            for (let i = chunkLines.length - 1; i >= 0 && linesFound < numLines; i--) {
-                lines.unshift(chunkLines[i]);
-                linesFound++;
-            }
+        } finally {
+            rl.close();
+            stream.destroy();
         }
-        return lines.join('\n');
+        if (count === 0) return '';
+        if (count <= cap) return ring.slice(0, count).join('\n');
+        const start = count % cap;
+        return [...ring.slice(start), ...ring.slice(0, start)].join('\n');
+    }
+
+    const CHUNK_SIZE = 65_536;
+    const handle = await fs.open(filePath, 'r');
+    try {
+        let position = stat.size;
+        const chunks: string[] = [];
+        let lineCount = 0;
+
+        while (position > 0 && lineCount <= cap) {
+            const readSize = Math.min(CHUNK_SIZE, position);
+            position -= readSize;
+            const buf = Buffer.alloc(readSize);
+            await handle.read(buf, 0, readSize, position);
+            const chunk = buf.toString('utf-8');
+            for (let i = 0; i < chunk.length; i++) {
+                if (chunk[i] === '\n') lineCount++;
+            }
+            chunks.push(chunk);
+        }
+
+        // Reverse chunks (read back-to-front) and join once
+        chunks.reverse();
+        const tail = chunks.join('');
+        const lines = tail.replace(/\r\n/g, '\n').split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        const result = lines.slice(-cap);
+        return result.join('\n');
     } finally {
-        await fileHandle.close();
+        await handle.close();
     }
 }
 
 export async function headFile(filePath: string, numLines: number) {
-    const fileHandle = await fs.open(filePath, 'r');
+    if (numLines <= 0) return '';
+    const stream = createReadStream(filePath, { encoding: 'utf-8' });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    const lines: string[] = [];
     try {
-        const lines = [];
-        let buffer = '';
-        let bytesRead = 0;
-        const chunk = Buffer.alloc(1024);
-        while (lines.length < numLines) {
-            const result = await fileHandle.read(chunk, 0, chunk.length, bytesRead);
-            if (result.bytesRead === 0) break;
-            bytesRead += result.bytesRead;
-            buffer += chunk.slice(0, result.bytesRead).toString('utf-8');
-            const newLineIndex = buffer.lastIndexOf('\n');
-            if (newLineIndex !== -1) {
-                const completeLines = buffer.slice(0, newLineIndex).split('\n');
-                buffer = buffer.slice(newLineIndex + 1);
-                for (const line of completeLines) {
-                    lines.push(line);
-                    if (lines.length >= numLines) break;
-                }
-            }
-        }
-        if (buffer.length > 0 && lines.length < numLines) {
-            lines.push(buffer);
+        for await (const line of rl) {
+            lines.push(line);
+            if (lines.length >= numLines) break;
         }
         return lines.join('\n');
     } finally {
-        await fileHandle.close();
+        rl.close();
+        stream.destroy();
     }
 }
 
 export async function offsetReadFile(filePath: string, offset: number, length: number) {
-    return new Promise((resolveP, rejectP) => {
-        const stream = createReadStream(filePath, { encoding: 'utf-8' });
-        const rl = createInterface({ input: stream, crlfDelay: Infinity });
-        let lineNum = 0;
-        const collected: string[] = [];
-        let totalLines = 0;
-
-        rl.on('line', (line) => {
-            totalLines++;
-            if (lineNum >= offset && collected.length < length) {
-                collected.push(line);
+    if (length <= 0) return { content: '', linesReturned: 0, hasMore: false };
+    const stream = createReadStream(filePath, { encoding: 'utf-8' });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    const collected: string[] = [];
+    let lineNum = 0;
+    let hasMore = false;
+    try {
+        for await (const line of rl) {
+            if (lineNum >= offset) {
+                if (collected.length < length) {
+                    collected.push(line);
+                } else {
+                    hasMore = length > 0;
+                    break;
+                }
             }
             lineNum++;
-            if (collected.length >= length) {
-                rl.close();
-                stream.destroy();
-            }
-        });
-
-        rl.on('close', () => {
-            resolveP({ content: collected.join('\n'), totalLines, linesReturned: collected.length });
-        });
-
-        rl.on('error', rejectP);
-        stream.on('error', rejectP);
-    });
+        }
+        return { content: collected.join('\n'), linesReturned: collected.length, hasMore };
+    } finally {
+        rl.close();
+        stream.destroy();
+    }
 }
 
 export async function searchFilesWithValidation(rootPath: string, pattern: string, allowedDirectories: string[], options: { excludePatterns?: string[] } = {}) {

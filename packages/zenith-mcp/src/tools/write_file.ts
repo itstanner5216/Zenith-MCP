@@ -27,14 +27,18 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         },
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: WriteFileArgs) => {
-        const validPath = await ctx.validatePath(args.path);
+        const validPath = await ctx.validateNewFilePath(args.path);
         const normalizedContent = normalizeLineEndings(args.content);
         let existed = false;
         try {
             await fs.stat(validPath);
             existed = true;
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code !== 'ENOENT') {
+                throw new Error(`Cannot access file: ${code ?? 'unknown error'}`);
+            }
         }
-        catch { /* file doesn't exist */ }
         if (args.failIfExists && existed) {
             throw new Error(`File already exists.`);
         }
@@ -84,7 +88,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             try {
                 await fs.unlink(tempPath);
             }
-            catch { /* ignore cleanup failure */ }
+            catch (err) { void err; /* temp file cleanup after failed write */ }
             const stashId = stashWrite(ctx, validPath, normalizedContent, args.append ? 'append' : 'write');
             throw new Error(`Write failed. Cached as stash:${stashId}.`);
         }

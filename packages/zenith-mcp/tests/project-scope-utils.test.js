@@ -182,6 +182,50 @@ describe('resolveProjectRoot — marker detection with allowedDirectories', () =
 // clearProjectScopeCache
 // ---------------------------------------------------------------------------
 
+describe('resolveProjectRoot — monorepo marker preference', () => {
+    let repoDir;
+
+    beforeEach(() => {
+        repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'monorepo-scope-test-'));
+        execFileSync('git', ['init'], { cwd: repoDir, stdio: 'pipe' });
+        execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: repoDir, stdio: 'pipe' });
+        execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir, stdio: 'pipe' });
+        clearProjectScopeCache();
+    });
+
+    afterEach(() => {
+        clearProjectScopeCache();
+        try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
+    });
+
+    // Covers edge case missing from broad marker tests: an existing file inside
+    // a marked package should resolve to the deepest marker, not the git root.
+    it('prefers deepest package marker over git root for existing files', () => {
+        fs.writeFileSync(path.join(repoDir, 'package.json'), '{}');
+        const packageRoot = path.join(repoDir, 'packages', 'app');
+        fs.mkdirSync(path.join(packageRoot, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(packageRoot, 'package.json'), '{}');
+        const file = path.join(packageRoot, 'src', 'index.ts');
+        fs.writeFileSync(file, 'export const value = 1;\n');
+
+        const result = resolveProjectRoot(file, { allowedDirectories: [repoDir], noCache: true });
+
+        expect(result).toBe(packageRoot);
+    });
+
+    it('prefers deepest package marker over git root for new files whose parent exists', () => {
+        fs.writeFileSync(path.join(repoDir, 'package.json'), '{}');
+        const packageRoot = path.join(repoDir, 'packages', 'app');
+        fs.mkdirSync(path.join(packageRoot, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(packageRoot, 'package.json'), '{}');
+        const newFile = path.join(packageRoot, 'src', 'new-file.ts');
+
+        const result = resolveProjectRoot(newFile, { allowedDirectories: [repoDir], noCache: true });
+
+        expect(result).toBe(packageRoot);
+    });
+});
+
 describe('clearProjectScopeCache', () => {
     it('clears the cache without throwing', () => {
         expect(() => clearProjectScopeCache()).not.toThrow();

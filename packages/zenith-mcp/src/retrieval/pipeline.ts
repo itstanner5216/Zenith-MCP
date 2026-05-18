@@ -6,11 +6,11 @@
  * Session IDs always passed in as plain strings (HAZARD 2).
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 import type {
+  FrequencyPriorSource,
   RankingEvent,
   RetrievalConfig,
   RetrievalContext,
@@ -27,20 +27,11 @@ import type { TelemetryScanner } from "./telemetry/scanner.js";
 import type { RetrievalLogger } from "./observability/logger.js";
 import type { RollingMetrics } from "./observability/metrics.js";
 import { buildRoutingToolSchema } from "./routing-tool.js";
+import { RelevanceRanker } from "./ranking/ranker.js";
 import { STATIC_CATEGORIES, TIER6_NAMESPACE_PRIORITY } from "./static-categories.js";
 
-// ── Optional fusion module (Tier 1) ──────────────────────────────────────────
-
-let _weightedRrf: ((env: ScoredTool[], conv: ScoredTool[], alpha: number) => ScoredTool[]) | null = null;
-let _computeAlpha: ((
-  turn: number, workspaceConfidence: number, convConfidence: number,
-  rootsChanged?: boolean, explicitToolMention?: boolean,
-) => number) | null = null;
-
-import("./ranking/fusion.js").then((f) => {
-  _weightedRrf = f.weightedRrf;
-  _computeAlpha = f.computeAlpha;
-}).catch(() => { /* Tier 1 unavailable — falls through to Tier 2+ */ });
+// ── Fusion module (Tier 1) ────────────────────────────────────────────────────
+import { weightedRrf as _weightedRrf, computeAlpha as _computeAlpha } from "./ranking/fusion.js";
 
 // ── Conversation term extraction ─────────────────────────────────────────────
 
@@ -97,6 +88,16 @@ export function extractConversationTerms(raw: string): string {
   return fin.join(" ");
 }
 
+// ── FrequencyPriorSource typeguard ───────────────────────────────────────────
+
+function isFrequencyPriorSource(x: unknown): x is FrequencyPriorSource {
+  return (
+    typeof x === "object" && x !== null &&
+    "readRankingEvents" in x &&
+    typeof (x as Record<string, unknown>).readRankingEvents === "function"
+  );
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────────────────
 
 export class RetrievalPipeline {
@@ -110,6 +111,7 @@ export class RetrievalPipeline {
 
   /** Tier-3 keyword retriever — set externally if available. */
   public keywordRetriever: ToolRetriever | null = null;
+  private readonly ranker = new RelevanceRanker();
 
   // Per-session maps
   private _turns             = new Map<string, number>();
@@ -121,6 +123,10 @@ export class RetrievalPipeline {
   private _routerProxies     = new Map<string, string[]>();
   /** Direct-call ledger — ONLY non-proxy calls (HAZARD 5). */
   private _directCalls       = new Map<string, string[]>();
+  // Per-turn ledgers — reset at the start of each getToolsForList call
+  private _turnDirectCalls       = new Map<string, string[]>();
+  private _turnRouterDescribes   = new Map<string, string[]>();
+  private _turnRouterProxies     = new Map<string, string[]>();
   private _curTurnUsed       = new Map<string, Set<string>>();
   private _prevTurnUsed      = new Map<string, Set<string>>();
   private _states            = new Map<string, SessionRoutingState>();
@@ -173,12 +179,14 @@ export class RetrievalPipeline {
 
   private hasKw(): boolean { return this.keywordRetriever !== null; }
 
+  private rotateTurnLedgers(sid: string): void {
+    this._turnDirectCalls.set(sid, []);
+    this._turnRouterDescribes.set(sid, []);
+    this._turnRouterProxies.set(sid, []);
+  }
+
   private hasFreq(): boolean {
-    if ('getLogPath' in this.logger && typeof (this.logger as Record<string, unknown>).getLogPath === 'function') {
-      const p = (this.logger as unknown as { getLogPath(): string | null }).getLogPath();
-      return p != null && existsSync(p);
-    }
-    return false;
+    return isFrequencyPriorSource(this.logger);
   }
 
   // ── Tier 4 ────────────────────────────────────────────────────────────
@@ -231,46 +239,35 @@ export class RetrievalPipeline {
 
   // ── Tier 5 ────────────────────────────────────────────────────────────
 
-  private freqPrior(k: number): ScoredTool[] {
-    let p: string | null = null;
-    if ('getLogPath' in this.logger && typeof (this.logger as Record<string, unknown>).getLogPath === 'function') {
-      p = (this.logger as unknown as { getLogPath(): string | null }).getLogPath();
-    }
-    if (!p || !existsSync(p)) return [];
+  private async freqPrior(k: number): Promise<ScoredTool[]> {
+    if (!isFrequencyPriorSource(this.logger)) return [];
 
     const cutoff = Date.now() / 1000 - 7 * 86400;
+    const events = await this.logger.readRankingEvents(cutoff);
+
     const scores = new Map<string, number>();
-
-    try {
-      for (const line of readFileSync(p, "utf-8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let ev: Record<string, unknown>;
-        try { ev = JSON.parse(trimmed) as Record<string, unknown>; } catch { continue; }
-        if (ev.type === "alert" || ev.group === "shadow") continue;
-
-        const ts = typeof ev.timestamp === "number" ? ev.timestamp : undefined;
-        let days: number;
-        if (ts != null) {
-          if (ts < cutoff) continue;
-          days = (Date.now() / 1000 - ts) / 86400;
-        } else {
-          days = 0;
-        }
-        const decay = Math.exp(-0.1 * days);
-        const directCalls = Array.isArray(ev.directToolCalls) ? ev.directToolCalls as string[] : [];
-        const proxies = Array.isArray(ev.routerProxies) ? ev.routerProxies as string[] : [];
-        for (const t of directCalls) scores.set(t, (scores.get(t) ?? 0) + decay);
-        for (const t of proxies)     scores.set(t, (scores.get(t) ?? 0) + decay);
+    for (const ev of events) {
+      const days = (Date.now() / 1000 - ev.timestamp) / 86400;
+      const decay = Math.exp(-0.1 * days);
+      const used = [
+        ...(ev.directToolCalls ?? []),
+        ...(ev.routerProxies ?? []),
+      ];
+      for (const toolId of used) {
+        scores.set(toolId, (scores.get(toolId) ?? 0) + decay);
       }
-    } catch { return []; }
+    }
 
-    if (!scores.size) return [];
-    return [...scores.entries()]
-      .sort((a, b) => b[1] - a[1])
+    return Object.entries(this.reg)
+      .filter(([key]) => scores.has(key))
+      .sort(([a], [b]) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0))
       .slice(0, k)
-      .filter(([key]) => key in this.reg)
-      .map(([key, score]) => ({ toolKey: key, toolMapping: this.reg[key], score, tier: "full" as const }));
+      .map(([key, mapping]) => ({
+        toolKey: key,
+        toolMapping: mapping,
+        score: scores.get(key) ?? 0,
+        tier: "full" as const,
+      }));
   }
 
   // ── Tier 6 ────────────────────────────────────────────────────────────
@@ -415,7 +412,7 @@ export class RetrievalPipeline {
     const convCtx: RetrievalContext = { sessionId: sid, query: convQ, queryMode: "nl", toolCallHistory: this._toolHist.get(sid) ?? [] };
 
     // Tier 1: BMXF blend
-    if (!scored && this.idxOk() && envQ && convQ && turn > 0 && _weightedRrf && _computeAlpha) {
+    if (!scored && this.idxOk() && envQ && convQ && turn > 0) {
       try {
         const eR = await this.retriever.retrieve(envCtx, candidates);
         const cR = await this.retriever.retrieve(convCtx, candidates);
@@ -448,15 +445,15 @@ export class RetrievalPipeline {
 
     // Tier 5: Frequency prior
     if (!scored && this.hasFreq()) {
-      const f = this.freqPrior(dK);
+      const f = await this.freqPrior(dK);
       if (f.length) { scored = f; tier = 5; }
     }
 
     // Tier 6: Universal fallback
     if (!scored) { scored = this.universal(); tier = 6; }
 
-    // 14. Sort descending
-    scored.sort((a, b) => b.score - a.score);
+    // 14. Rank with specificity-aware tiebreaking
+    scored = this.ranker.rank(scored);
 
     // 15. Promote
     const curActive = this.ssm.getActiveTools(sid);
@@ -528,9 +525,9 @@ export class RetrievalPipeline {
       fallbackTier:      tier,
       activeToolIds:     [...state.activeToolIds],
       routerEnumSize:    state.routerEnumToolIds.length,
-      directToolCalls:   [...(this._directCalls.get(sid) ?? [])],
-      routerDescribes:   [...(this._routerDescribes.get(sid) ?? [])],
-      routerProxies:     [...(this._routerProxies.get(sid) ?? [])],
+      directToolCalls:   [...(this._turnDirectCalls.get(sid) ?? [])],
+      routerDescribes:   [...(this._turnRouterDescribes.get(sid) ?? [])],
+      routerProxies:     [...(this._turnRouterProxies.get(sid) ?? [])],
       scorerLatencyMs:   latencyMs,
       group,
       timestamp:         Date.now() / 1000,
@@ -539,10 +536,13 @@ export class RetrievalPipeline {
     // 20. Log
     await this.logger.log(event);
 
-    // 21. Mark mid-turn
+    // 21. Rotate turn ledgers after event capture
+    this.rotateTurnLedgers(sid);
+
+    // 22. Mark mid-turn
     this._inTurn.set(sid, true);
 
-    // 22. Return
+    // 23. Return
     if (isFiltered) {
       const capped = state.activeToolIds.slice(0, directK);
       const demIds = state.routerEnumToolIds;
@@ -601,6 +601,9 @@ export class RetrievalPipeline {
       let d = this._directCalls.get(sid);
       if (!d) { d = []; this._directCalls.set(sid, d); }
       d.push(toolName);
+      const turnDirect = this._turnDirectCalls.get(sid) ?? [];
+      turnDirect.push(toolName);
+      this._turnDirectCalls.set(sid, turnDirect);
     }
 
     // Router proxy accounting (CF-2)
@@ -608,6 +611,9 @@ export class RetrievalPipeline {
       let rp = this._routerProxies.get(sid);
       if (!rp) { rp = []; this._routerProxies.set(sid, rp); }
       rp.push(toolName);
+      const turnProxy = this._turnRouterProxies.get(sid) ?? [];
+      turnProxy.push(toolName);
+      this._turnRouterProxies.set(sid, turnProxy);
 
       const state = this._states.get(sid);
       if (state) {
@@ -628,6 +634,9 @@ export class RetrievalPipeline {
     let d = this._routerDescribes.get(sid);
     if (!d) { d = []; this._routerDescribes.set(sid, d); }
     d.push(toolName);
+    const turnDescribe = this._turnRouterDescribes.get(sid) ?? [];
+    turnDescribe.push(toolName);
+    this._turnRouterDescribes.set(sid, turnDescribe);
   }
 
   // ── Session cleanup ───────────────────────────────────────────────────
@@ -641,6 +650,9 @@ export class RetrievalPipeline {
     this._routerDescribes.delete(sid);
     this._routerProxies.delete(sid);
     this._directCalls.delete(sid);
+    this._turnDirectCalls.delete(sid);
+    this._turnRouterDescribes.delete(sid);
+    this._turnRouterProxies.delete(sid);
     this._curTurnUsed.delete(sid);
     this._prevTurnUsed.delete(sid);
     this._states.delete(sid);
