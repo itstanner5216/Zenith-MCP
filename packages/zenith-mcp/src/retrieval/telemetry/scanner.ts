@@ -60,8 +60,13 @@ const DENIED_PATTERNS: string[] = [
   "id_dsa",
   "id_ecdsa",
   "*.aws_credentials",
-  "credentials",     // exact: a file literally named "credentials"
-  "*credentials*",   // any file whose name contains "credentials" (e.g. "aws-credentials", "gcp_credentials.json")
+  "credentials",       // exact: a file literally named "credentials"
+  "*-credentials",     // separator-based secret filenames such as "aws-credentials"
+  "*-credentials.*",   // suffixed secret filenames such as "aws-credentials.json"
+  "*_credentials",     // separator-based secret filenames such as "gcp_credentials"
+  "*_credentials.*",   // suffixed secret filenames such as "gcp_credentials.json"
+  "*.credentials",     // dedicated credentials extension such as "prod.credentials"
+  ".credentials",      // hidden credentials file
   ".aws",
   "*.secret",
   "*.secrets",
