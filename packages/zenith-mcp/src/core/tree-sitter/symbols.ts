@@ -185,8 +185,9 @@ export async function getSymbols(source: string, langName: string, options: Symb
  * Apply optional filters to a symbol list.
  */
 function applyFilters(symbols: SymbolInfo[], options: SymbolFilterOptions): SymbolInfo[] {
+    const cloneOne = (s: SymbolInfo): SymbolInfo => ({ ...s });
     if (!options.kindFilter && !options.nameFilter && !options.typeFilter && !options.excludeNames) {
-        return symbols;
+        return symbols.map(cloneOne);
     }
 
     return symbols.filter(sym => {
@@ -195,7 +196,7 @@ function applyFilters(symbols: SymbolInfo[], options: SymbolFilterOptions): Symb
         if (options.nameFilter && !sym.name.toLowerCase().includes(options.nameFilter.toLowerCase())) return false;
         if (options.excludeNames && options.excludeNames.includes(sym.name)) return false;
         return true;
-    });
+    }).map(cloneOne);
 }
 
 /**

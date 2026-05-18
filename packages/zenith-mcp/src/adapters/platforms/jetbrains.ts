@@ -82,8 +82,12 @@ class JetBrainsAdapter extends MCPConfigAdapter {
 
   discoverServers() {
     const result: Record<string, Record<string, unknown>> = {};
+    const errors: { path: string; message: string }[] = [];
+    let attempted = 0;
+
     for (const p of this.configPaths()) {
       if (!existsSync(p)) continue;
+      attempted++;
       try {
         const data = JSON.parse(readFileSync(p, "utf-8"));
         if (typeof data !== "object" || data === null || Array.isArray(data)) continue;
@@ -92,12 +96,20 @@ class JetBrainsAdapter extends MCPConfigAdapter {
           Object.assign(result, servers as Record<string, Record<string, unknown>>);
         }
       } catch (error) {
-        console.warn(
-          `Skipping malformed JetBrains MCP config at ${p}: ${(error as Error).message}`,
-        );
-        continue;
+        const message = (error as Error).message;
+        console.warn(`Skipping malformed JetBrains MCP config at ${p}: ${message}`);
+        errors.push({ path: p, message });
       }
     }
+
+    // If every attempted config failed to parse, surface the error rather than
+    // silently returning an empty result — restores pre-PR rethrow behavior.
+    if (attempted > 0 && errors.length === attempted && Object.keys(result).length === 0) {
+      throw new Error(
+        `All JetBrains MCP configs malformed (${errors.length} files): ${errors.map((e) => e.path).join(", ")}`,
+      );
+    }
+
     return result;
   }
 }

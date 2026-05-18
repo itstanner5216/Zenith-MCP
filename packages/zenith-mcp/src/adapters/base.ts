@@ -12,11 +12,17 @@ export abstract class MCPConfigAdapter {
 
   isSupported(): boolean {
     const plat = platform();
-    const mapped =
-      plat === "darwin" ? "macos" : plat === "win32" ? "windows" : "linux";
-    return this.supportedPlatforms.includes(
-      mapped as (typeof this.supportedPlatforms)[number],
-    );
+    let mapped: "macos" | "linux" | "windows";
+    if (plat === "darwin") {
+      mapped = "macos";
+    } else if (plat === "win32") {
+      mapped = "windows";
+    } else if (plat === "linux") {
+      mapped = "linux";
+    } else {
+      return false;
+    }
+    return this.supportedPlatforms.includes(mapped);
   }
 
   protected ensureParentDir(filePath: string): void {

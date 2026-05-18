@@ -40,6 +40,14 @@ export interface AutoWriteResult {
 }
 
 // ---------------------------------------------------------------------------
+// isObjectLike — shared helper for validating object-shaped config fields
+// ---------------------------------------------------------------------------
+
+function isObjectLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ---------------------------------------------------------------------------
 // autoWriteToMcpConfigs
 // ---------------------------------------------------------------------------
 
@@ -244,18 +252,16 @@ function getFormatHandler(filePath: string): FormatHandler | null {
 
 /**
  * Check if parsed data looks like an MCP configuration file.
- * Recognises both `mcpServers` (Claude, Cursor, etc.) and `mcp` (OpenCode, Zed).
+ * Recognises `mcpServers` (Claude, Cursor, etc.), `context_servers` (Zed),
+ * and `mcp.servers` (OpenCode, generic mcp). A bare `mcp: {}` without a
+ * `servers` sub-object does NOT qualify — too generic, would match unrelated configs.
  */
 function isMcpConfig(data: Record<string, unknown>): boolean {
-  if (typeof data !== "object" || data === null) return false;
-  const hasServers =
-    ("mcpServers" in data &&
-      typeof data.mcpServers === "object" &&
-      data.mcpServers !== null) ||
-    ("mcp" in data &&
-      typeof data.mcp === "object" &&
-      data.mcp !== null);
-  return hasServers;
+  if (!isObjectLike(data)) return false;
+  if (isObjectLike(data.mcpServers)) return true;
+  if (isObjectLike(data.context_servers)) return true;
+  if (isObjectLike(data.mcp) && isObjectLike((data.mcp as Record<string, unknown>).servers)) return true;
+  return false;
 }
 
 function verifyAndWriteMcpConfig(
@@ -308,9 +314,18 @@ function verifyAndWriteMcpConfig(
 
   // Add the Zenith entry and write back.
   try {
-    // Support both mcpServers (Claude, Cursor, etc.) and mcp (OpenCode, Zed)
-    const serverStoreKey = "mcpServers" in data ? "mcpServers" : "mcp";
-    const serverStore = data[serverStoreKey] as Record<string, unknown>;
+    // Select destination store in priority order, validated as object-like.
+    let serverStore: Record<string, unknown>;
+    if (isObjectLike(data.mcpServers)) {
+      serverStore = data.mcpServers;
+    } else if (isObjectLike(data.context_servers)) {
+      serverStore = data.context_servers;
+    } else if (isObjectLike(data.mcp) && isObjectLike((data.mcp as Record<string, unknown>).servers)) {
+      serverStore = (data.mcp as Record<string, unknown>).servers as Record<string, unknown>;
+    } else {
+      // Should be unreachable — isMcpConfig already verified one of these shapes.
+      throw new Error(`Unexpected MCP config shape in ${filePath}`);
+    }
     serverStore["zenith-mcp"] = makeZenithServerEntry();
     handler.write(filePath, data);
     return { status: "written", message: filePath };

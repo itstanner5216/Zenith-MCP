@@ -93,7 +93,17 @@ function _isStackTrace(text: string): boolean {
     if (_FRAME_RE.test(rawLine)) frameCount += 1;
   }
 
-  return frameCount >= 2 || (headerCount >= 1 && frameCount >= 1);
+  // Primary: frames-with-or-without-header (Python tracebacks, JS stack traces).
+  if (frameCount >= 2) return true;
+  if (headerCount >= 1 && frameCount >= 1) return true;
+
+  // Tertiary: chained-exception header pattern (JVM "Caused by:" chains can
+  // appear with no leading indent on the per-frame "at" lines, in which case
+  // _FRAME_RE won't match. Multiple headers in a small window strongly imply
+  // a chained exception even without parseable frames.
+  if (headerCount >= 2) return true;
+
+  return false;
 }
 
 function _isJsonString(text: string): boolean {

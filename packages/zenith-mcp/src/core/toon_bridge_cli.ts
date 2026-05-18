@@ -2,13 +2,19 @@
 import fs from 'node:fs';
 import { compressToon } from './toon_bridge.js';
 
+function parseBudget(raw: string | undefined): number | null {
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    if (!/^\d+$/.test(raw)) return null;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+}
+
 async function main(): Promise<void> {
     const [filePath, budgetRaw] = process.argv.slice(2);
-    const budget = Number.parseInt(budgetRaw ?? '', 10);
-
-    if (!filePath || !Number.isFinite(budget) || budget <= 0) {
-        process.exit(1);
-    }
+    if (!filePath) process.exit(1);
+    const budget = parseBudget(budgetRaw);
+    if (budget === null) process.exit(1);
 
     const content = fs.readFileSync(filePath, 'utf8');
     process.stdout.write(await compressToon(content, budget, filePath));

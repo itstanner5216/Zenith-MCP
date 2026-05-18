@@ -14,7 +14,11 @@ function isRankingEventShape(obj: unknown): obj is RankingEvent {
   return (
     typeof r.sessionId === "string" &&
     typeof r.turnNumber === "number" &&
-    typeof r.timestamp === "number"
+    typeof r.timestamp === "number" &&
+    Array.isArray(r.activeToolIds) &&
+    Array.isArray(r.directToolCalls) &&
+    Array.isArray(r.routerDescribes) &&
+    Array.isArray(r.routerProxies)
   );
 }
 
@@ -57,7 +61,9 @@ export class FileRetrievalLogger implements RetrievalLogger {
 
   constructor(logPath: string) {
     this._path = logPath;
-    this._ready = mkdir(dirname(logPath), { recursive: true }).then(() => undefined);
+    this._ready = mkdir(dirname(logPath), { recursive: true })
+      .then(() => undefined)
+      .catch(() => undefined);
   }
 
   getLogPath(): string {

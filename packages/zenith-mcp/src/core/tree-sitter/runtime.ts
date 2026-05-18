@@ -35,7 +35,7 @@ export const TS_WASM_PATH = path.join(_dirname, '..', '..', 'grammars', 'tree-si
 // ---------------------------------------------------------------------------
 
 let _initPromise: Promise<void> | null = null;
-const _languageCache: Map<string, Language | null> = new Map();
+const _languageCache: Map<string, Promise<Language | null>> = new Map();
 const _queryStringCache: Map<string, string | null> = new Map();
 const _compiledQueryCache: Map<string, Query | null> = new Map();
 
@@ -226,77 +226,79 @@ export async function ensureInit(): Promise<void> {
 /**
  * Load a Language grammar (WASM), cached permanently.
  * Returns null if the grammar file doesn't exist.
+ *
+ * The cache stores the in-flight Promise so that concurrent callers for the
+ * same language share a single Language.load() call rather than racing to
+ * each start their own load.
  */
 export async function loadLanguage(langName: string): Promise<Language | null> {
-    if (_languageCache.has(langName)) {
-        return _languageCache.get(langName) ?? null;
-    }
+    const cached = _languageCache.get(langName);
+    if (cached) return cached;
 
-    await ensureInit();
+    const promise = (async (): Promise<Language | null> => {
+        await ensureInit();
 
-    const wasmPath = path.join(GRAMMARS_DIR, `tree-sitter-${langName}.wasm`);
-    // R_OK (not the default F_OK) so a file that exists but is unreadable —
-    // permission flip, mid-write, NFS hiccup — is caught here rather than
-    // surfacing later as a silent fallthrough to Language.load().
-    try {
-        await fs.access(wasmPath, fsConstants.R_OK);
-    } catch {
-        _languageCache.set(langName, null);
-        return null;
-    }
+        const wasmPath = path.join(GRAMMARS_DIR, `tree-sitter-${langName}.wasm`);
+        // R_OK (not the default F_OK) so a file that exists but is unreadable —
+        // permission flip, mid-write, NFS hiccup — is caught here rather than
+        // surfacing later as a silent fallthrough to Language.load().
+        try {
+            await fs.access(wasmPath, fsConstants.R_OK);
+        } catch {
+            return null;
+        }
 
-    // Pre-screen: detect Emscripten PIC side-modules before calling Language.load().
-    //
-    // web-tree-sitter@0.26.8 uses a process-global GOT dict. If Language.load() is
-    // called with a PIC side-module WASM (one that imports scanner functions via
-    // GOT.func), the loader populates that dict with `required=true, value=0`
-    // entries for each scanner symbol. The load then fails (the symbols cannot be
-    // resolved), but the GOT entries persist — poisoning every subsequent
-    // Language.load() call in the same process, regardless of which grammar is
-    // loaded next.
-    //
-    // By detecting and skipping the incompatible WASM here, we never call
-    // Language.load() on it, so the GOT is never touched and all subsequent
-    // grammar loads remain healthy. The return value (null) is identical to what
-    // the caller would have received after the load failure anyway.
-    //
-    // If the inspect itself fails (read error after access() passed —
-    // unusual, but possible with concurrent writes or transient FS issues),
-    // we treat the grammar as unusable and cache null. We do NOT fall through
-    // to Language.load() with an un-screened WASM, because if the unreadable
-    // file IS a PIC side-module the GOT poisoning we're trying to prevent
-    // would still happen.
-    let isIncompatible: boolean;
-    try {
-        isIncompatible = await isIncompatiblePicSideModule(wasmPath);
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[tree-sitter] Failed to inspect ${langName} grammar; skipping:`, message);
-        _languageCache.set(langName, null);
-        return null;
-    }
-    if (isIncompatible) {
-        console.error(
-            `[tree-sitter] Skipping ${langName} grammar: WASM is an Emscripten PIC ` +
-            `side-module with unresolvable GOT.func imports for external_scanner_* ` +
-            `symbols. Loading it would poison the web-tree-sitter GOT and break all ` +
-            `subsequent grammar loads in this process. The ${langName} grammar will ` +
-            `be unavailable for this session.`
-        );
-        _languageCache.set(langName, null);
-        return null;
-    }
+        // Pre-screen: detect Emscripten PIC side-modules before calling Language.load().
+        //
+        // web-tree-sitter@0.26.8 uses a process-global GOT dict. If Language.load() is
+        // called with a PIC side-module WASM (one that imports scanner functions via
+        // GOT.func), the loader populates that dict with `required=true, value=0`
+        // entries for each scanner symbol. The load then fails (the symbols cannot be
+        // resolved), but the GOT entries persist — poisoning every subsequent
+        // Language.load() call in the same process, regardless of which grammar is
+        // loaded next.
+        //
+        // By detecting and skipping the incompatible WASM here, we never call
+        // Language.load() on it, so the GOT is never touched and all subsequent
+        // grammar loads remain healthy. The return value (null) is identical to what
+        // the caller would have received after the load failure anyway.
+        //
+        // If the inspect itself fails (read error after access() passed —
+        // unusual, but possible with concurrent writes or transient FS issues),
+        // we treat the grammar as unusable and return null. We do NOT fall through
+        // to Language.load() with an un-screened WASM, because if the unreadable
+        // file IS a PIC side-module the GOT poisoning we're trying to prevent
+        // would still happen.
+        let isIncompatible: boolean;
+        try {
+            isIncompatible = await isIncompatiblePicSideModule(wasmPath);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error(`[tree-sitter] Failed to inspect ${langName} grammar; skipping:`, message);
+            return null;
+        }
+        if (isIncompatible) {
+            console.error(
+                `[tree-sitter] Skipping ${langName} grammar: WASM is an Emscripten PIC ` +
+                `side-module with unresolvable GOT.func imports for external_scanner_* ` +
+                `symbols. Loading it would poison the web-tree-sitter GOT and break all ` +
+                `subsequent grammar loads in this process. The ${langName} grammar will ` +
+                `be unavailable for this session.`
+            );
+            return null;
+        }
 
-    try {
-        const language = await Language.load(wasmPath);
-        _languageCache.set(langName, language);
-        return language;
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`Failed to load grammar for ${langName}:`, message);
-        _languageCache.set(langName, null);
-        return null;
-    }
+        try {
+            return await Language.load(wasmPath);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error(`Failed to load grammar for ${langName}:`, message);
+            return null;
+        }
+    })();
+
+    _languageCache.set(langName, promise);
+    return promise;
 }
 
 /**

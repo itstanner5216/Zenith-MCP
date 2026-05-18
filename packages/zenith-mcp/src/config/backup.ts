@@ -26,29 +26,42 @@ interface BackupRow {
 }
 
 // ---------------------------------------------------------------------------
-// withDb — open a fresh SQLite connection per operation and guarantee close
+// Lazy singleton DB connection — one open per process lifetime
 // ---------------------------------------------------------------------------
 
-function withDb<T>(work: (db: Database.Database) => T): T {
+let _db: Database.Database | null = null;
+
+function getDb(): Database.Database {
+    if (_db !== null) return _db;
     mkdirSync(ZENITH_HOME, { recursive: true });
     const db = new Database(GLOBAL_DB_PATH);
-    try {
-        db.pragma('journal_mode = WAL');
-        db.pragma('synchronous = NORMAL');
-        db.pragma('busy_timeout = 5000');
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS config_backups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                original_path TEXT NOT NULL,
-                backup_content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL
-            );
-        `);
-        return work(db);
-    } finally {
-        db.close();
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('busy_timeout = 5000');
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS config_backups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_path TEXT NOT NULL,
+            backup_content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+    `);
+    _db = db;
+    return db;
+}
+
+/** Exported for test teardown / clean shutdown. */
+export function closeDb(): void {
+    if (_db !== null) {
+        _db.close();
+        _db = null;
     }
+}
+
+// withDb signature preserved so callers are unchanged.
+function withDb<T>(work: (db: Database.Database) => T): T {
+    return work(getDb());
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
-  applyEdits,
-  format,
-  modify,
   parse,
   printParseErrorCode,
   type ParseError,
@@ -28,7 +25,8 @@ export function readJsonc(path: string): Record<string, unknown> {
     const formatted = errors
       .map((e) => `${printParseErrorCode(e.error)}@${e.offset}`)
       .join(", ");
-    throw new Error(`Invalid JSONC in ${path}: ${formatted}`);
+    console.warn(`[jsonc] Parse errors in ${path} (${formatted}); returning empty config`);
+    return {};
   }
 
   return assertRecord(data);
@@ -38,18 +36,9 @@ export function writeJsonc(
   path: string,
   data: Record<string, unknown>,
 ): void {
-  const previous = existsSync(path) ? readFileSync(path, "utf-8") : "{}\n";
-  const edits = modify(previous, [], data, {
-    formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
-  });
-  const next = applyEdits(previous, edits);
-  const formatted = applyEdits(
-    next,
-    format(next, undefined, { insertSpaces: true, tabSize: 2, eol: "\n" }),
-  );
-  writeFileSync(
-    path,
-    formatted.endsWith("\n") ? formatted : `${formatted}\n`,
-    "utf-8",
-  );
+  // Note: this writer produces valid JSONC (subset of JSON). It does NOT preserve
+  // comments or original formatting from a pre-existing file — that would require
+  // per-key modify edits against the parsed prior state, which is out of scope.
+  // Callers wanting comment preservation should use a dedicated edit pipeline.
+  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }

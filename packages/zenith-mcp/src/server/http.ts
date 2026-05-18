@@ -38,7 +38,8 @@ if (!configExists()) {
     console.error(
         'FATAL: No Zenith-MCP config found.\n' +
         'Run the stdio server once interactively to complete first-time setup:\n' +
-        '  npx zenith-mcp <allowed-directory>\n' +
+        '  npx zenith-mcp /path/to/your/project\n' +
+        '(replace /path/to/your/project with an absolute path to a directory you want the server to access)\n' +
         'Then restart the HTTP server.',
     );
     process.exit(1);
@@ -238,7 +239,14 @@ app.post('/mcp', async (req, res) => {
     });
     console.error(`[session:${sid.slice(0, 8)}] opened (streamable)`);
 
-    await transport.handleRequest(req, res, req.body);
+    try {
+        await transport.handleRequest(req, res, req.body);
+    } catch (err) {
+        removeSession(sid);
+        try { await transport.close(); } catch { /* best effort — already closed */ }
+        console.error(`[session:${sid.slice(0, 8)}] initialize error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
 });
 
 // ── Streamable HTTP: GET /mcp (SSE notification stream) ───────────────────────

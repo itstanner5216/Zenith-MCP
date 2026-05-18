@@ -41,18 +41,18 @@ export class RelevanceRanker {
 
     const ranked: ScoredTool[] = [];
     let tiedGroup: ScoredTool[] = [];
-    let previousScore: number | null = null;
+    let groupAnchor: number | null = null;
 
     for (const tool of byScore) {
-      if (previousScore === null || Math.abs(previousScore - tool.score) < SCORE_TOLERANCE) {
+      if (groupAnchor === null || Math.abs(groupAnchor - tool.score) < SCORE_TOLERANCE) {
         tiedGroup.push(tool);
-        previousScore = tool.score;
+        if (groupAnchor === null) groupAnchor = tool.score;
         continue;
       }
 
       flushGroup(tiedGroup, ranked);
       tiedGroup = [tool];
-      previousScore = tool.score;
+      groupAnchor = tool.score;
     }
 
     flushGroup(tiedGroup, ranked);

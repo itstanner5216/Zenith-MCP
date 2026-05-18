@@ -333,7 +333,7 @@ export async function getCompressionStructure(source?: string, langName?: string
             if (rule !== undefined && shouldCaptureAnchor(node, parent, rule)) {
                 const startLine = node.startPosition.row;
                 const rawEndLine = node.endPosition.row;
-                const endLine = rawEndLine <= startLine + 1 ? rawEndLine : startLine;
+                const endLine = rawEndLine;
                 assignAnchorToInnermostBlock(blocks, startLine, endLine, rule.kind, rule.priority);
             }
 

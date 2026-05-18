@@ -81,7 +81,14 @@ export function computeStructuralSimilarity(fingerprintA: string[], fingerprintB
     const gramsA = buildNgrams(fingerprintA, 3);
     const gramsB = buildNgrams(fingerprintB, 3);
 
-    if (gramsA.size === 0 && gramsB.size === 0) return 1.0;
+    if (gramsA.size === 0 && gramsB.size === 0) {
+        // Both fingerprints too short for 3-grams — direct sequence equality.
+        if (fingerprintA.length !== fingerprintB.length) return 0.0;
+        for (let i = 0; i < fingerprintA.length; i++) {
+            if (fingerprintA[i] !== fingerprintB[i]) return 0.0;
+        }
+        return 1.0;
+    }
     if (gramsA.size === 0 || gramsB.size === 0) return 0.0;
 
     let intersection = 0;
@@ -136,7 +143,8 @@ export async function getSymbolStructure(source: string, langName: string, start
         const foundNode: Node = defNode;
 
         const params: string[] = [];
-        function collectParams(node: Node): boolean {
+        function collectParams(node: Node, isRoot: boolean): boolean {
+            if (!isRoot && DEF_TYPES.has(node.type)) return false;
             if (/parameters?$/.test(node.type) || node.type === 'formal_parameters') {
                 for (let i = 0; i < node.childCount; i++) {
                     const c = node.child(i);
@@ -148,11 +156,11 @@ export async function getSymbolStructure(source: string, langName: string, start
             }
             for (let i = 0; i < node.childCount; i++) {
                 const child = node.child(i);
-                if (child && collectParams(child)) return true;
+                if (child && collectParams(child, false)) return true;
             }
             return false;
         }
-        collectParams(foundNode);
+        collectParams(foundNode, true);
 
         let returnKind: string | null = null;
         for (let i = 0; i < foundNode.childCount; i++) {
@@ -198,6 +206,7 @@ export async function getSymbolStructure(source: string, langName: string, start
         const MODIFIER_TYPES = new Set(['async', 'static', 'public', 'private', 'protected', 'readonly', '*']);
         const modifiers = new Set<string>();
         function collectModifiers(node: Node): void {
+            if (DEF_TYPES.has(node.type)) return;
             if (MODIFIER_TYPES.has(node.type)) modifiers.add(node.type);
             for (let i = 0; i < node.childCount; i++) {
                 const child = node.child(i);

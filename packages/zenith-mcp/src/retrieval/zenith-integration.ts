@@ -6,7 +6,6 @@
  * HAZARD 2: Session IDs always passed in by caller.
  */
 
-import { randomUUID } from "node:crypto";
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Root, Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -86,7 +85,7 @@ function sessionIdFromExtra(extra: unknown): string {
     ? maybe.sessionId
     : typeof maybe?.requestId === "string"
       ? maybe.requestId
-      : randomUUID();
+      : "default";
 }
 
 // ── Tool registration hook ───────────────────────────────────────────────────
@@ -213,7 +212,7 @@ export function installRetrievalRequestHandlers(
     isError: true,
   });
 
-  type ToolHandler = (args: Record<string, unknown>) => Promise<CallToolResult>;
+  type ToolHandler = (args: Record<string, unknown>, extra: unknown) => Promise<CallToolResult>;
 
   server.server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
     // `getToolsForList` returns Tool[] sourced directly from registry mappings
@@ -248,7 +247,13 @@ export function installRetrievalRequestHandlers(
       if (!handler) {
         return errorResult(`Tool ${target} has no handler`);
       }
-      const result = await handler(routedArgs);
+      let result: CallToolResult;
+      try {
+        result = await handler(routedArgs, extra);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = errorResult(`Tool ${target} threw: ${message}`);
+      }
       if (!result.isError) {
         await pipeline.onToolCalled(sid, target, routedArgs, true);
       }
@@ -265,7 +270,13 @@ export function installRetrievalRequestHandlers(
       return errorResult(`Tool ${toolName} has no registered handler`);
     }
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    const result = await handler(args);
+    let result: CallToolResult;
+    try {
+      result = await handler(args, extra);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result = errorResult(`Tool ${toolName} threw: ${message}`);
+    }
     if (!result.isError) {
       await pipeline.onToolCalled(sid, key, args, false);
     }

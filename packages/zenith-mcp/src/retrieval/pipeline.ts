@@ -249,7 +249,11 @@ export class RetrievalPipeline {
     for (const ev of events) {
       const days = (Date.now() / 1000 - ev.timestamp) / 86400;
       const decay = Math.exp(-0.1 * days);
-      for (const toolId of ev.activeToolIds ?? []) {
+      const used = [
+        ...(ev.directToolCalls ?? []),
+        ...(ev.routerProxies ?? []),
+      ];
+      for (const toolId of used) {
         scores.set(toolId, (scores.get(toolId) ?? 0) + decay);
       }
     }
@@ -312,6 +316,9 @@ export class RetrievalPipeline {
   // ── Main entry: getToolsForList ────────────────────────────────────────
 
   async getToolsForList(sid: string, conversationContext?: string): Promise<Tool[]> {
+    // Rotate per-turn ledgers FIRST — before any await, before tool calls can arrive.
+    this.rotateTurnLedgers(sid);
+
     // 1. Kill-switch
     if (!this.config.enabled) return Object.values(this.reg).map((m) => m.tool);
 
@@ -360,7 +367,6 @@ export class RetrievalPipeline {
     state.turnNumber += 1;
     const turn = state.turnNumber;
     this._turns.set(sid, turn);
-    this.rotateTurnLedgers(sid);
 
     // 8. Pin catalog version
     let ver = "";

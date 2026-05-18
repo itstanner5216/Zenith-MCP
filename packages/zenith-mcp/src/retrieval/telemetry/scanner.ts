@@ -46,8 +46,9 @@ const ALL_ALLOWED_FILES: Set<string> = new Set([
 
 // ── Denylist ─────────────────────────────────────────────────────────────────
 const DENIED_PATTERNS: string[] = [
-  ".env",
-  ".env.*",
+  ".env",        // exact: the well-known ".env" file
+  ".env.*",      // ".env.production", ".env.local", etc.
+  "*.env",       // any file whose name ends in ".env" (e.g. "myapp.env")
   "*.pem",
   "*.key",
   "*.p12",
@@ -59,7 +60,8 @@ const DENIED_PATTERNS: string[] = [
   "id_dsa",
   "id_ecdsa",
   "*.aws_credentials",
-  "credentials",
+  "credentials",     // exact: a file literally named "credentials"
+  "*credentials*",   // any file whose name contains "credentials" (e.g. "aws-credentials", "gcp_credentials.json")
   ".aws",
   "*.secret",
   "*.secrets",
