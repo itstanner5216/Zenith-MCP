@@ -8,8 +8,8 @@ import { ProjectRegistry } from '../core/project-registry.js';
 //
 // Resolution ladder (in order):
 //   1. Git repo detection from the file path itself
-//   2. MCP roots / allowed directories → git detection on each, with single-dir fallback
-//   3. Marker-based detection (deepest marker within git root, or nearest without git)
+//   2. Marker-based detection (deepest marker within git root, or nearest without git)
+//   3. MCP roots / allowed directories → git detection on each, with single-dir fallback
 //   4. ProjectRegistry matching (from provided entries or allowed directories)
 //   5. Global fallback (null)
 // ---------------------------------------------------------------------------
@@ -149,13 +149,15 @@ export function resolveProjectRoot(filePath: string, options?: ResolveOptions): 
         // Continue to next step
     }
 
-    // Step 2: MCP roots / allowed directories
-    const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
-    if (allowedRoot) return setCached(cacheKey, allowedRoot);
-
-    // Step 3: Marker-based detection, clamped to sandbox
+    // Step 2: Marker-based detection, clamped to sandbox
+    // Try markers BEFORE broad allowed-root fallback so that /workspace/app
+    // (with package.json) is preferred over /workspace when no git root exists.
     const markerRoot = clampToAllowed(_resolveFromMarkers(absPath), absPath, options?.allowedDirectories);
     if (markerRoot) return setCached(cacheKey, markerRoot);
+
+    // Step 3: MCP roots / allowed directories (broad fallback)
+    const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
+    if (allowedRoot) return setCached(cacheKey, allowedRoot);
 
     // Step 4: Registry matching
     const registryRoot = _resolveFromRegistry(absPath, options?.registryEntries);
@@ -195,7 +197,7 @@ export function clearProjectScopeCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Step 2: Resolve from allowed directories (MCP roots / CLI args).
+ * Step 3: Resolve from allowed directories (MCP roots / CLI args).
  *
  * For each allowed directory:
  *   - Try git detection
@@ -251,10 +253,13 @@ function _resolveFromAllowedDirectories(
 }
 
 /**
- * Step 3: Walk up from a file path looking for project markers.
+ * Step 2: Walk up from a file path looking for project markers.
  *
  * With git:    returns the DEEPEST marker still at or below the git root
  * Without git: returns the NEAREST marker (first one walking up).
+ *
+ * Uses a single readdirSync per directory level (cached as a Set) to avoid
+ * N × existsSync calls per marker per level, minimizing syscalls.
  */
 function _resolveFromMarkers(absPath: string): string | null {
     let ceiling: string;
@@ -280,7 +285,8 @@ function _resolveFromMarkers(absPath: string): string | null {
         }
 
         try {
-            if (PROJECT_MARKERS.some(m => fs.existsSync(path.join(dir, m)))) {
+            const dirEntries = new Set(fs.readdirSync(dir));
+            if (PROJECT_MARKERS.some(m => dirEntries.has(m))) {
                 candidates.push(dir);
                 if (!ceiling || ceiling === fsRoot) return dir;
             }

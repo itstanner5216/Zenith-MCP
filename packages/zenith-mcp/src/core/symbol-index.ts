@@ -301,6 +301,7 @@ interface IndexDirectoryOpts {
 export async function indexDirectory(db: Database.Database, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
     const maxFiles = opts.maxFiles || 5000;
     const filePaths: string[] = [];
+    const excludes = getDefaultExcludes();
 
     async function walk(dir: string): Promise<void> {
         if (filePaths.length >= maxFiles) return;
@@ -308,9 +309,16 @@ export async function indexDirectory(db: Database.Database, repoRoot: string, di
         try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; } // nosemgrep
         for (const entry of entries) {
             if (filePaths.length >= maxFiles) return;
-            if (getDefaultExcludes().some(p => entry.name === p)) continue;
             const fullPath = path.join(dir, entry.name); // nosemgrep
             if (entry.isDirectory()) {
+                const relDir = path.relative(repoRoot, fullPath);
+                if (excludes.some(pattern =>
+                    entry.name === pattern ||
+                    minimatch(relDir, pattern, { dot: true, nocase: true }) ||
+                    minimatch(relDir, `**/${pattern}`, { dot: true, nocase: true })
+                )) {
+                    continue;
+                }
                 await walk(fullPath);
             } else if (entry.isFile() && shouldIndexFile(repoRoot, fullPath)) {
                 filePaths.push(fullPath);

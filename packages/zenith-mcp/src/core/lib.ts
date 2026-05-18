@@ -97,13 +97,11 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             : path.resolve(process.cwd(), expandedPath);
         const normalizedRequested = normalizePath(absolute);
         if (!isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
-            console.error(`[validateNewFilePath] Access denied: ${absolute} not in [${_allowedDirectories.join(', ')}]`);
             throw new Error('Access denied — path is outside allowed directories.');
         }
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
         const normalizedAncestor = normalizePath(realAncestor);
         if (!isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
-            console.error(`[validateNewFilePath] Access denied: ancestor ${realAncestor} not in [${_allowedDirectories.join(', ')}]`);
             throw new Error('Access denied — resolved path is outside allowed directories.');
         }
         return missingSegments.reduce(
@@ -362,11 +360,12 @@ export async function tailFile(filePath: string, numLines: number) {
             position -= readSize;
             const buf = Buffer.alloc(readSize);
             await handle.read(buf, 0, readSize, position);
-            tail = buf.toString('utf-8') + tail;
-            lineCount = 0;
-            for (let i = 0; i < tail.length; i++) {
-                if (tail[i] === '\n') lineCount++;
+            const chunk = buf.toString('utf-8');
+            // Count newlines in only the new chunk — avoids O(n²) re-scan
+            for (let i = 0; i < chunk.length; i++) {
+                if (chunk[i] === '\n') lineCount++;
             }
+            tail = chunk + tail;
         }
 
         const lines = tail.replace(/\r\n/g, '\n').split('\n');
