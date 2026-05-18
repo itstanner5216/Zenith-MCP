@@ -148,6 +148,13 @@ function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
     const value = Array.isArray(raw) ? raw[0] : raw;
     if (!value) return '';
     const trimmed = value.trim();
+
+    // Reject invalid prefixes: must start with single '/', no schemes/hosts
+    if (!trimmed.startsWith('/')) return '';
+    if (trimmed.startsWith('//')) return '';
+    if (trimmed.includes('://') || /^\/[^/]*:/.test(trimmed)) return '';
+
+    // Normalize: single leading slash, no trailing slash
     return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
 }
 

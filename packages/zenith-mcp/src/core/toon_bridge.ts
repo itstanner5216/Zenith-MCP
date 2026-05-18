@@ -77,7 +77,14 @@ if (__argv1) {
             process.exit(1);
         }
 
-        const content = fs.readFileSync(filePath, 'utf8');
+        let content: string;
+        try {
+            content = fs.readFileSync(filePath, 'utf8');
+        } catch (error) {
+            console.error(`Failed to read file ${filePath}:`, error);
+            process.exit(1);
+        }
+
         compressToon(content, budget, filePath)
             .then((out) => process.stdout.write(out))
             .catch((err) => { console.error(err); process.exit(1); });

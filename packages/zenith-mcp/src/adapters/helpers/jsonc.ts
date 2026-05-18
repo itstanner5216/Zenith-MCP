@@ -14,7 +14,15 @@ function assertRecord(value: unknown): Record<string, unknown> {
 export function readJsonc(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
 
-  const text = readFileSync(path, "utf-8");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Failed to read JSONC file ${path}: ${message}`);
+    return {};
+  }
+
   const errors: ParseError[] = [];
   const data = parse(text, errors, {
     allowTrailingComma: true,

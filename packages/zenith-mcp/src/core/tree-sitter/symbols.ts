@@ -109,76 +109,81 @@ export async function getSymbols(source: string, langName: string, options: Symb
     parser.setLanguage(language);
     const tree = parser.parse(source);
 
-    if (!tree) return null;
-
-    // Use matches() to get grouped captures per pattern match.
-    // Each match contains both @name.definition.X and @definition.X captures.
-    const matches = query.matches(tree.rootNode);
-    const symbols: SymbolInfo[] = [];
-    const seen = new Set<string>();
-
-    for (const match of matches) {
-        const { captures } = match;
-
-        // Find the name capture and the definition/reference body capture
-        let nameCapture = null;
-        let bodyCapture = null;
-
-        for (const cap of captures) {
-            if (cap.name.startsWith('name.')) {
-                nameCapture = cap;
-            } else if (cap.name.startsWith('definition.') || cap.name.startsWith('reference.')) {
-                bodyCapture = cap;
-            }
-        }
-
-        if (!nameCapture) continue;
-
-        const tag = nameCapture.name;
-        let kind: string;
-        let type: string;
-        if (tag.startsWith('name.definition.')) {
-            kind = 'def';
-            type = tag.slice('name.definition.'.length);
-        } else if (tag.startsWith('name.reference.')) {
-            kind = 'ref';
-            type = tag.slice('name.reference.'.length);
-        } else {
-            continue;
-        }
-
-        const name = nameCapture.node.text;
-        const line = nameCapture.node.startPosition.row + 1;
-        const column = nameCapture.node.startPosition.column;
-
-        // endLine comes from the body capture if available, otherwise from
-        // the name capture's own end (single-line symbol)
-        let endLine: number;
-        if (bodyCapture) {
-            endLine = bodyCapture.node.endPosition.row + 1;
-        } else {
-            endLine = nameCapture.node.endPosition.row + 1;
-        }
-
-        // Dedup by name:kind:line
-        const key = `${name}:${kind}:${line}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        symbols.push({ name, kind, type, line, endLine, column });
+    if (!tree) {
+        parser.delete();
+        return null;
     }
 
-    // Clean up parse tree and parser (query is cached, don't delete it)
-    tree.delete();
-    parser.delete();
+    try {
+        // Use matches() to get grouped captures per pattern match.
+        // Each match contains both @name.definition.X and @definition.X captures.
+        const matches = query.matches(tree.rootNode);
+        const symbols: SymbolInfo[] = [];
+        const seen = new Set<string>();
 
-    // Sort by line number
-    symbols.sort((a, b) => a.line - b.line);
+        for (const match of matches) {
+            const { captures } = match;
 
-    // Cache the full unfiltered result
-    setCachedSymbols(hash, symbols);
+            // Find the name capture and the definition/reference body capture
+            let nameCapture = null;
+            let bodyCapture = null;
 
-    return applyFilters(symbols, options);
+            for (const cap of captures) {
+                if (cap.name.startsWith('name.')) {
+                    nameCapture = cap;
+                } else if (cap.name.startsWith('definition.') || cap.name.startsWith('reference.')) {
+                    bodyCapture = cap;
+                }
+            }
+
+            if (!nameCapture) continue;
+
+            const tag = nameCapture.name;
+            let kind: string;
+            let type: string;
+            if (tag.startsWith('name.definition.')) {
+                kind = 'def';
+                type = tag.slice('name.definition.'.length);
+            } else if (tag.startsWith('name.reference.')) {
+                kind = 'ref';
+                type = tag.slice('name.reference.'.length);
+            } else {
+                continue;
+            }
+
+            const name = nameCapture.node.text;
+            const line = nameCapture.node.startPosition.row + 1;
+            const column = nameCapture.node.startPosition.column;
+
+            // endLine comes from the body capture if available, otherwise from
+            // the name capture's own end (single-line symbol)
+            let endLine: number;
+            if (bodyCapture) {
+                endLine = bodyCapture.node.endPosition.row + 1;
+            } else {
+                endLine = nameCapture.node.endPosition.row + 1;
+            }
+
+            // Dedup by name:kind:line
+            const key = `${name}:${kind}:${line}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            symbols.push({ name, kind, type, line, endLine, column });
+        }
+
+        // Sort by line number
+        symbols.sort((a, b) => a.line - b.line);
+
+        // Cache the full unfiltered result
+        setCachedSymbols(hash, symbols);
+
+        return applyFilters(symbols, options);
+    } finally {
+        // Clean up parse tree and parser (query is cached, don't delete it)
+        tree.delete();
+        parser.delete();
+    }
 }
 
 /**

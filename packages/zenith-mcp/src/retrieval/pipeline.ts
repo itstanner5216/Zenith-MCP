@@ -316,9 +316,6 @@ export class RetrievalPipeline {
   // ── Main entry: getToolsForList ────────────────────────────────────────
 
   async getToolsForList(sid: string, conversationContext?: string): Promise<Tool[]> {
-    // Rotate per-turn ledgers FIRST — before any await, before tool calls can arrive.
-    this.rotateTurnLedgers(sid);
-
     // 1. Kill-switch
     if (!this.config.enabled) return Object.values(this.reg).map((m) => m.tool);
 
@@ -539,10 +536,13 @@ export class RetrievalPipeline {
     // 20. Log
     await this.logger.log(event);
 
-    // 21. Mark mid-turn
+    // 21. Rotate turn ledgers after event capture
+    this.rotateTurnLedgers(sid);
+
+    // 22. Mark mid-turn
     this._inTurn.set(sid, true);
 
-    // 22. Return
+    // 23. Return
     if (isFiltered) {
       const capped = state.activeToolIds.slice(0, directK);
       const demIds = state.routerEnumToolIds;

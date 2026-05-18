@@ -37,7 +37,10 @@ export async function getStructuralFingerprint(source: string, langName: string,
     parser.setLanguage(language);
     const tree = parser.parse(source);
 
-    if (!tree) return [];
+    if (!tree) {
+        parser.delete();
+        return [];
+    }
 
     try {
         const nodeTypes: string[] = [];
@@ -116,7 +119,10 @@ export async function getSymbolStructure(source: string, langName: string, start
     parser.setLanguage(language);
     const tree = parser.parse(source);
 
-    if (!tree) return null;
+    if (!tree) {
+        parser.delete();
+        return null;
+    }
 
     try {
         const startRow = startLine - 1;

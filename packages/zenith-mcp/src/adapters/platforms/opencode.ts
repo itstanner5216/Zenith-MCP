@@ -44,7 +44,9 @@ class OpenCodeAdapter extends MCPConfigAdapter {
 
   registerServer(name: string, config: Record<string, unknown>): void {
     const data = this.readConfig();
-    if (!data.mcp) data.mcp = {};
+    if (typeof data.mcp !== 'object' || data.mcp === null || Array.isArray(data.mcp)) {
+      data.mcp = {};
+    }
     (data.mcp as Record<string, unknown>)[name] = config;
     this.writeConfig(data);
   }
