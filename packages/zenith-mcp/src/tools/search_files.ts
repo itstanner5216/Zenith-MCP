@@ -604,20 +604,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
 
         // ---- RIPGREP PATH ----
         if (hasRg) {
-            if (args.countOnly) {
-                const counts = await ripgrepCountMatches(rootPath, {
-                    contentQuery: args.contentQuery,
-                    filePattern: args.pattern || null,
-                    ...(args.extensions?.length ? { extensions: args.extensions } : {}),
-                    ...(args.pathContains ? { pathContains: args.pathContains } : {}),
-                    excludePatterns: allExcludes,
-                    literalSearch: args.literalSearch ?? false,
-                    includeHidden: args.includeHidden ?? false,
-                });
-                if (counts !== null) {
-                    return { content: [{ type: 'text' as const, text: `matches: ${counts.matchCount}\nfiles: ${counts.fileCount}` }] };
-                }
-            }
+            // Do not use ripgrepCountMatches for countOnly here.
+            // ripgrep's count path reports occurrence counts, while the JS fallback
+            // counts matching lines, which makes results depend on whether ripgrep
+            // is available. Fall through so countOnly uses the shared non-shortcut
+            // behavior instead of returning environment-dependent counts.
 
             let rgResults: RipgrepResult[] | null = null;
             if (args.contentQuery.length > 2) {
