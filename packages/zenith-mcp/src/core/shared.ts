@@ -456,7 +456,7 @@ export async function ripgrepCountMatches(
     }
 
     const targets = fileList && fileList.length > 0 ? fileList : [rootPath];
-    const countArgs = ['--count-matches', '--no-messages', ...baseArgs, '--', contentQuery, ...targets];
+    const countArgs = ['--count-matches', '--with-filename', '--no-messages', ...baseArgs, '--', contentQuery, ...targets];
 
     return new Promise<RipgrepCountResult | null>((resolveP) => {
         let matchCount = 0;
