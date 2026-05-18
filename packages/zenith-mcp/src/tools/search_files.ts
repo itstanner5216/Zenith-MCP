@@ -654,6 +654,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     includeHidden: args.includeHidden ?? false,
                 });
             }
+            if (rgResults === null && !args.literalSearch) {
+                throw new Error('Search failed — ripgrep process error.');
+            }
             if (rgResults !== null) {
                 // Apply extensions/pathContains filters to results
                 rgResults = rgResults.filter(r => contentFileFilter(r.file, path.relative(rootPath, r.file)));

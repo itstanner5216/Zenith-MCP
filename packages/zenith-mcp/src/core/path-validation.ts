@@ -13,6 +13,8 @@ export function isPathWithinAllowedDirectories(filePath: string, allowedDirector
     const sep = path.sep;
     return allowedDirectories.some(dir => {
         const normalizedDir = path.resolve(_normalizePath(dir));
-        return resolved === normalizedDir || resolved.startsWith(normalizedDir + sep);
+        if (resolved === normalizedDir) return true;
+        const prefix = normalizedDir.endsWith(sep) ? normalizedDir : normalizedDir + sep;
+        return resolved.startsWith(prefix);
     });
 }

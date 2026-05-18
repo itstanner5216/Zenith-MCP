@@ -37,7 +37,10 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 maxMatchesPerFile: 500,
             });
 
-            if (!rgResults || rgResults.length === 0) {
+            if (rgResults === null) {
+                throw new Error('Search failed — ripgrep process error.');
+            }
+            if (rgResults.length === 0) {
                 return { content: [{ type: 'text' as const, text: 'No matches.' }] };
             }
 
@@ -49,6 +52,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             let prevLine = -1;
             for (const result of rgResults) {
                 if (prevLine !== -1 && result.line > prevLine + 1) {
+                    if (charCount + 4 > maxChars) break;
                     outputLines.push('---');
                     charCount += 4;
                 }

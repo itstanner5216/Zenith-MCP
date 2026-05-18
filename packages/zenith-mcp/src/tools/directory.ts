@@ -4,7 +4,7 @@ import path from "path";
 import { Dirent } from "fs";
 import { minimatch } from "minimatch";
 import { formatSize } from '../core/lib.js';
-import { getDefaultExcludes } from '../core/shared.js';
+import { getDefaultExcludes, isSensitive } from '../core/shared.js';
 import { isSupported, getFileSymbolSummary, getFileSymbols } from '../core/tree-sitter.js';
 import type { ToolServer, ToolContext } from './types.js';
 
@@ -51,6 +51,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             const includeSizes = args.includeSizes || false;
             const sortBy = args.sortBy || "name";
             const excludePatterns = args.excludePatterns ?? [];
+            const defaultExcludes = getDefaultExcludes();
 
             function compareEntries(
                 left: { entry: Dirent; size: number },
@@ -75,22 +76,28 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     lines.push(`[DENIED] ${relativeBase || path.basename(dirPath)}`);
                     return lines;
                 }
-                // Filter by user-specified excludes before capping, so excluded entries don't consume cap slots
+                // Filter entries: user excludes + default excludes + sensitive files
                 entries = entries.filter(entry => {
                     const rel = relativeBase ? path.join(relativeBase, entry.name) : entry.name;
-                    const userExcluded = excludePatterns.some(pattern =>
-                        pattern.includes('*')
-                            ? minimatch(rel, pattern, { dot: true })
-                            : minimatch(rel, pattern, { dot: true }) ||
-                              minimatch(rel, `**/${pattern}`, { dot: true }) ||
-                              minimatch(rel, `**/${pattern}/**`, { dot: true })
-                    );
-                    const defaultExcluded = getDefaultExcludes().some(p =>
-                        entry.name === p ||
+                    const fullPath = path.join(dirPath, entry.name);
+                    // Sensitive file check
+                    if (isSensitive(fullPath)) return false;
+                    // Default excludes
+                    if (defaultExcludes.some(p => entry.name === p ||
                         minimatch(rel, p, { dot: true }) ||
-                        minimatch(rel, `**/${p}`, { dot: true })
-                    );
-                    return !userExcluded && !defaultExcluded;
+                        minimatch(rel, `**/${p}`, { dot: true }))) return false;
+                    // User excludes
+                    if (excludePatterns.length > 0 && excludePatterns.some(pattern => {
+                        if (pattern.includes('*')) {
+                            if (minimatch(rel, pattern, { dot: true })) return true;
+                            if (!pattern.includes('/')) return minimatch(rel, `**/${pattern}`, { dot: true });
+                            return false;
+                        }
+                        return minimatch(rel, pattern, { dot: true }) ||
+                            minimatch(rel, `**/${pattern}`, { dot: true }) ||
+                            minimatch(rel, `**/${pattern}/**`, { dot: true });
+                    })) return false;
+                    return true;
                 });
                 const truncated = entries.length > LIST_CAP;
                 if (truncated) entries = entries.slice(0, LIST_CAP);
@@ -136,6 +143,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         const showSymbolNames = args.showSymbolNames || false;
         let totalEntries = 0;
         const maxDepth = args.depth != null ? Math.max(1, Math.min(args.depth, 10)) : Infinity;
+        const defaultExcludes = getDefaultExcludes();
         async function buildTree(currentPath: string, currentDepth: number, excludePatterns: string[] = []): Promise<FileTreeEntry[]> {
             if (totalEntries >= TREE_MAX_ENTRIES)
                 return [];
@@ -146,14 +154,19 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             const dirEntries: Dirent[] = [];
             for (const entry of entries) {
                 const relativePath = path.relative(rootPath, path.join(currentPath, entry.name));
+                const fullPath = path.join(currentPath, entry.name);
+                if (isSensitive(fullPath)) continue;
                 const shouldExclude = excludePatterns.some((pattern: string) => {
-                    if (pattern.includes('*'))
-                        return minimatch(relativePath, pattern, { dot: true });
+                    if (pattern.includes('*')) {
+                        if (minimatch(relativePath, pattern, { dot: true })) return true;
+                        if (!pattern.includes('/')) return minimatch(relativePath, `**/${pattern}`, { dot: true });
+                        return false;
+                    }
                     return minimatch(relativePath, pattern, { dot: true }) ||
                         minimatch(relativePath, `**/${pattern}`, { dot: true }) ||
                         minimatch(relativePath, `**/${pattern}/**`, { dot: true });
                 });
-                const shouldExcludeByDefault = getDefaultExcludes().some(p => entry.name === p ||
+                const shouldExcludeByDefault = defaultExcludes.some(p => entry.name === p ||
                     minimatch(relativePath, p, { dot: true }) ||
                     minimatch(relativePath, `**/${p}`, { dot: true }));
                 if (shouldExclude || shouldExcludeByDefault)

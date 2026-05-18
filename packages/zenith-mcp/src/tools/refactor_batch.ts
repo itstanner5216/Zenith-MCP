@@ -280,7 +280,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             symbol: z.string().optional().describe("restore/history: The symbol name. restore rolls it back to a prior snapshot; history lists available snapshots."),
             file: z.string().optional().describe("restore/history: File containing the symbol. Required for restore, optional filter for history."),
             version: z.number().int().min(0).optional().describe("restore: Which version index to restore (from history output). Omit to list available versions instead of restoring."),
-        }),
+        }).strict(),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: RefactorBatchArgs) => {
         const pc = getProjectContext(ctx);

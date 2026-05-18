@@ -97,12 +97,14 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             : path.resolve(process.cwd(), expandedPath);
         const normalizedRequested = normalizePath(absolute);
         if (!isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
-            throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${_allowedDirectories.join(', ')}`);
+            console.error(`[validateNewFilePath] Access denied: ${absolute} not in [${_allowedDirectories.join(', ')}]`);
+            throw new Error('Access denied — path is outside allowed directories.');
         }
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
         const normalizedAncestor = normalizePath(realAncestor);
         if (!isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
-            throw new Error(`Access denied - ancestor outside allowed directories: ${realAncestor} not in ${_allowedDirectories.join(', ')}`);
+            console.error(`[validateNewFilePath] Access denied: ancestor ${realAncestor} not in [${_allowedDirectories.join(', ')}]`);
+            throw new Error('Access denied — resolved path is outside allowed directories.');
         }
         return missingSegments.reduce(
             (currentPath, segment) => path.join(currentPath, segment),
@@ -326,23 +328,54 @@ export async function tailFile(filePath: string, numLines: number) {
     const n = Math.floor(numLines);
     if (!Number.isFinite(n) || n <= 0) return '';
     const cap = Math.min(n, 50_000);
-    const stream = createReadStream(filePath, { encoding: 'utf-8' });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-    const ring = new Array<string>(cap);
-    let count = 0;
-    try {
-        for await (const line of rl) {
-            ring[count % cap] = line;
-            count++;
+
+    const stat = await fs.stat(filePath);
+    if (stat.size <= 131_072) {
+        const stream = createReadStream(filePath, { encoding: 'utf-8' });
+        const rl = createInterface({ input: stream, crlfDelay: Infinity });
+        const ring = new Array<string>(cap);
+        let count = 0;
+        try {
+            for await (const line of rl) {
+                ring[count % cap] = line;
+                count++;
+            }
+        } finally {
+            rl.close();
+            stream.destroy();
         }
-    } finally {
-        rl.close();
-        stream.destroy();
+        if (count === 0) return '';
+        if (count <= cap) return ring.slice(0, count).join('\n');
+        const start = count % cap;
+        return [...ring.slice(start), ...ring.slice(0, start)].join('\n');
     }
-    if (count === 0) return '';
-    if (count <= cap) return ring.slice(0, count).join('\n');
-    const start = count % cap;
-    return [...ring.slice(start), ...ring.slice(0, start)].join('\n');
+
+    const CHUNK_SIZE = 65_536;
+    const handle = await fs.open(filePath, 'r');
+    try {
+        let position = stat.size;
+        let tail = '';
+        let lineCount = 0;
+
+        while (position > 0 && lineCount <= cap) {
+            const readSize = Math.min(CHUNK_SIZE, position);
+            position -= readSize;
+            const buf = Buffer.alloc(readSize);
+            await handle.read(buf, 0, readSize, position);
+            tail = buf.toString('utf-8') + tail;
+            lineCount = 0;
+            for (let i = 0; i < tail.length; i++) {
+                if (tail[i] === '\n') lineCount++;
+            }
+        }
+
+        const lines = tail.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        const result = lines.slice(-cap);
+        return result.join('\n');
+    } finally {
+        await handle.close();
+    }
 }
 
 export async function headFile(filePath: string, numLines: number) {
@@ -363,6 +396,7 @@ export async function headFile(filePath: string, numLines: number) {
 }
 
 export async function offsetReadFile(filePath: string, offset: number, length: number) {
+    if (length <= 0) return { content: '', linesReturned: 0, hasMore: false };
     const stream = createReadStream(filePath, { encoding: 'utf-8' });
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
     const collected: string[] = [];

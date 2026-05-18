@@ -110,7 +110,7 @@ function clampToAllowed(candidate: string | null, absPath: string, allowedDirect
     if (!allowedDirectories?.length) return candidate;
     const allowedRoot = getMostSpecificAllowedRoot(absPath, allowedDirectories);
     if (!allowedRoot) return null;
-    if (!candidate) return allowedRoot;
+    if (!candidate) return null;
 
     // If the candidate is within or equal to ANY allowed directory, return it as-is.
     // This prevents over-clamping when e.g. both /repo and /repo/packages/pkg are
@@ -208,10 +208,12 @@ function _resolveFromAllowedDirectories(
 ): string | null {
   if (!allowedDirectories || allowedDirectories.length === 0) return null;
 
+  // Sort to match cache key ordering — ensures same result regardless of input order
+  const sortedDirs = [...allowedDirectories].map(d => path.resolve(d)).sort();
+
   // Try git detection on each allowed directory
-  for (const dir of allowedDirectories) {
+  for (const resolvedDir of sortedDirs) {
     try {
-      const resolvedDir = path.resolve(dir);
       const gitRoot = findRepoRoot(resolvedDir);
       if (gitRoot) {
         // Clamp: if the git root escapes above the allowed directory, use the allowed directory.
@@ -228,21 +230,16 @@ function _resolveFromAllowedDirectories(
   }
 
   // If exactly one allowed dir and the file is inside it, use it
-  if (allowedDirectories.length === 1) {
-    const [onlyDir] = allowedDirectories;
-    if (onlyDir === undefined) {
-      throw new Error("Invariant: allowedDirectories.length === 1 but element [0] is undefined");
-    }
-    const dir = path.resolve(onlyDir);
-    if (isWithinProject(absPath, dir)) {
-      return dir;
+  if (sortedDirs.length === 1) {
+    const onlyDir = sortedDirs[0];
+    if (onlyDir !== undefined && isWithinProject(absPath, onlyDir)) {
+      return onlyDir;
     }
   }
 
   // If file path is inside any allowed dir, return the most specific (longest) match
   let best: string | null = null;
-  for (const dir of allowedDirectories) {
-    const resolved = path.resolve(dir);
+  for (const resolved of sortedDirs) {
     if (isWithinProject(absPath, resolved)) {
       if (!best || resolved.length > best.length) {
         best = resolved;
@@ -282,10 +279,8 @@ function _resolveFromMarkers(absPath: string): string | null {
             continue;
         }
 
-        // One readdirSync per level instead of one existsSync per marker
         try {
-            const entries = new Set(fs.readdirSync(dir));
-            if (PROJECT_MARKERS.some(m => entries.has(m))) {
+            if (PROJECT_MARKERS.some(m => fs.existsSync(path.join(dir, m)))) {
                 candidates.push(dir);
                 if (!ceiling || ceiling === fsRoot) return dir;
             }

@@ -331,6 +331,10 @@ export async function ensureIndexFresh(db: Database.Database, repoRoot: string, 
     let reindexed = 0;
     for (const absPath of absFilePaths) {
         const relPath = path.relative(repoRoot, absPath);
+        if (!shouldIndexFile(repoRoot, absPath)) {
+            purgeIndexedPath(db, relPath);
+            continue;
+        }
         let source: string;
         try { source = await fs.readFile(absPath, 'utf-8'); } catch { continue; } // nosemgrep
         const hash = hashFileContent(source);

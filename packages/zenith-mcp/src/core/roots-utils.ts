@@ -12,7 +12,13 @@ async function parseRootUri(rootUri: string) {
                 rawPath = fileURLToPath(new URL(rootUri));
             } catch (urlError) {
                 void urlError; // malformed file URI — fall back to manual path extraction
-                rawPath = rootUri.slice(rootUri.indexOf('/', rootUri.indexOf(':')) + 1);
+                const afterScheme = rootUri.slice('file:'.length);
+                if (afterScheme.startsWith('//')) {
+                    const pathStart = afterScheme.indexOf('/', 2);
+                    rawPath = pathStart >= 0 ? afterScheme.slice(pathStart) : afterScheme;
+                } else {
+                    rawPath = afterScheme;
+                }
             }
         } else {
             rawPath = rootUri;

@@ -33,8 +33,12 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         try {
             await fs.stat(validPath);
             existed = true;
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code !== 'ENOENT') {
+                throw new Error(`Cannot access file: ${code ?? 'unknown error'}`);
+            }
         }
-        catch (err) { void err; /* stat failure means file does not exist */ }
         if (args.failIfExists && existed) {
             throw new Error(`File already exists.`);
         }

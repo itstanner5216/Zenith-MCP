@@ -25,31 +25,60 @@ export function getCharBudget(): number {
 export const RANK_THRESHOLD = 50;
 
 export function getSearchCharBudget(): number {
-    return Math.min(getConfig().advanced.search_char_budget, getCharBudget());
+    const val = getConfig().advanced.search_char_budget;
+    if (typeof val === 'number' && !isNaN(val) && val >= 1_000 && val <= 2_000_000) {
+        return Math.min(val, getCharBudget());
+    }
+    return Math.min(15_000, getCharBudget());
 }
 
 export function getRefactorVersionTtlMs(): number {
     return getConfig().advanced.refactor_version_ttl_hours * 60 * 60 * 1000;
 }
 
+let _defaultExcludesCache: string[] | null = null;
+let _sensitivePatternsCache: string[] | null = null;
+let _cachedConfigRef: ZenithConfig | null = null;
+
+function invalidateCachesIfNeeded(): void {
+    const current = getConfig();
+    if (_cachedConfigRef !== current) {
+        _defaultExcludesCache = null;
+        _sensitivePatternsCache = null;
+        _cachedConfigRef = current;
+    }
+}
+
 export function getDefaultExcludes(): string[] {
+    invalidateCachesIfNeeded();
+    if (_defaultExcludesCache) return _defaultExcludesCache;
     const raw = getConfig().advanced.default_excludes;
     if (raw && typeof raw === 'string') {
         const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
-        if (parsed.length > 0) return parsed;
+        if (parsed.length > 0) {
+            _defaultExcludesCache = parsed;
+            return parsed;
+        }
     }
-    return 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
+    _defaultExcludesCache = 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
         .split(',').map(p => p.trim()).filter(Boolean);
+    return _defaultExcludesCache;
 }
 
 export function getSensitivePatterns(): string[] {
+    invalidateCachesIfNeeded();
+    if (_sensitivePatternsCache) return _sensitivePatternsCache;
     const raw = getConfig().advanced.sensitive_patterns;
     if (raw && typeof raw === 'string') {
         const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
-        if (parsed.length > 0) return parsed;
+        if (parsed.length > 0) {
+            _sensitivePatternsCache = parsed;
+            return parsed;
+        }
     }
-    return '**/.env,**/*.pem,**/*.key,**/*.crt,**/*credentials*,**/*secret*,**/docker-compose.yaml,**/docker-compose.yml,**/.config/**'
+    _sensitivePatternsCache = '**/.env,**/*.pem,**/*.key,**/*.crt,**/*credentials*,**/*secret*,**/docker-compose.yaml,**/docker-compose.yml,**/.config/**'
         .split(',').map(p => p.trim()).filter(Boolean);
+    return _sensitivePatternsCache;
 }
 
 export function isSensitive(filePath: string): boolean {
@@ -304,6 +333,7 @@ export async function ripgrepSearch(rootPath: string, options: {
     return new Promise<RipgrepResult[] | null>((resolveP) => {
         const results: RipgrepResult[] = [];
         let stderr = '';
+        let killed = false;
         const proc = spawn(RG_PATH, rgArgs, { timeout: 30000 });
         let buffer = '';
         proc.stdout.on('data', (chunk) => {
@@ -312,9 +342,13 @@ export async function ripgrepSearch(rootPath: string, options: {
             buffer = lines.pop() ?? '';
             for (const line of lines) {
                 if (!line.trim()) continue;
+                if (results.length >= maxResults) {
+                    if (!killed) { killed = true; proc.kill('SIGTERM'); }
+                    break;
+                }
                 try {
                     const msg = JSON.parse(line);
-                    if (msg.type === 'match' && results.length < maxResults) {
+                    if (msg.type === 'match') {
                         const d = msg.data;
                         const filePath = d.path?.text;
                         if (filePath && (skipSensitiveFilter || !isSensitive(filePath))) {
@@ -332,14 +366,14 @@ export async function ripgrepSearch(rootPath: string, options: {
         });
         proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
         proc.on('close', (code) => {
-            if ((code ?? 0) > 1) {
+            if (!killed && (code ?? 0) > 1) {
                 console.error('ripgrep exited with code ' + code, stderr.slice(0, 200));
                 resolveP(null);
                 return;
             }
-            resolveP(results);
+            resolveP(results.slice(0, maxResults));
         });
-        proc.on('error', () => resolveP(null));
+        proc.on('error', () => { if (!killed) resolveP(null); });
     });
 }
 
