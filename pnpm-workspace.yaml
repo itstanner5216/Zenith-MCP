@@ -1,9 +1,9 @@
 packages:
   - "packages/*"
+
 allowBuilds:
   better-sqlite3: true
-  tree-sitter: true
   tree-sitter-cli: true
-  tree-sitter-kotlin: true
+
 patchedDependencies:
-  '@modelcontextprotocol/sdk@1.29.0': patches/@modelcontextprotocol__sdk@1.29.0.patch
+  "@modelcontextprotocol/sdk@1.29.0": patches/@modelcontextprotocol__sdk@1.29.0.patch

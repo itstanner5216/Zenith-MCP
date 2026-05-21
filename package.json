@@ -3,12 +3,22 @@
   "version": "2026.1.14",
   "private": true,
   "description": "Zenith-MCP monorepo",
+  "type": "module",
   "main": "packages/zenith-mcp/src/server/http.ts",
   "license": "MIT",
-  "packageManager": "pnpm@11.1.0",
+  "packageManager": "pnpm@11.2.1",
   "scripts": {
-    "build": "turbo run build",
-    "test": "turbo run test"
+    "build": "pnpm -r --filter zenith-toon --filter zenith-mcp run build",
+    "build:toon": "pnpm --filter zenith-toon run build",
+    "build:mcp": "pnpm --filter zenith-mcp run build",
+    "build:turbo": "turbo run build",
+    "test": "pnpm --filter zenith-mcp run test",
+    "test:turbo": "turbo run test --filter=zenith-mcp",
+    "start": "pnpm --filter zenith-mcp run start",
+    "start:http": "pnpm --filter zenith-mcp run start:http",
+    "repair:sqlite": "pnpm --filter zenith-mcp run repair:sqlite",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint"
   },
   "devDependencies": {
     "turbo": "^2.5.0",

@@ -6,7 +6,8 @@ import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgr
 import { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
-import { findRepoRoot, getDb, indexDirectory } from '../core/symbol-index.js';
+import { getDb, indexDirectory } from '../core/symbol-index.js';
+import { resolveProjectRoot } from '../utils/project-scope.js';
 import { ToolServer, ToolContext } from './types.js';
 
 interface SymbolDbRow {
@@ -218,10 +219,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
         }
         // ---- STRUCTURAL SIMILARITY MODE ----
         if (args.mode === "structural") {
-            const repoRoot = findRepoRoot(rootPath);
-            if (!repoRoot) {
-                return { content: [{ type: 'text' as const, text: 'Not in a git repository.' }] };
-            }
+            const repoRoot = resolveProjectRoot(rootPath, {
+                allowedDirectories: ctx.getAllowedDirectories(),
+                noCache: true,
+            }) ?? rootPath;
             const db = getDb(repoRoot);
             await indexDirectory(db, repoRoot, rootPath, { maxFiles: 2000 });
             const scopePrefix = path.relative(repoRoot, rootPath);

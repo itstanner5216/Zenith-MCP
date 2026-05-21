@@ -24,7 +24,8 @@
     "watch": "tsc --watch",
     "test": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
-    "start:http": "node dist/server/http.js"
+    "start:http": "node dist/server/http.js",
+    "repair:sqlite": "bash src/scripts/repair-zenith-sqlite.sh"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
