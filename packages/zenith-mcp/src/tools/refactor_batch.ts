@@ -11,6 +11,7 @@ import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
+import { getFileCount, getFilePaths, findSymbolFiles, getFileHash } from '../core/db-adapter.js';
 // ---------------------------------------------------------------------------
 // Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
@@ -87,23 +88,6 @@ interface PayloadCache {
 type VersionEntry = ReturnType<typeof getVersionHistory>[number] & {
     line?: number | null;
 };
-
-// DB row shapes used in raw queries
-interface FilePathRow {
-    file_path: string;
-}
-
-interface FileHashRow {
-    hash: string;
-}
-
-interface CountRow {
-    n: number;
-}
-
-interface FilePathRecordRow {
-    path: string;
-}
 
 // Args type for the tool handler — inferred from the Zod schema below.
 interface RefactorBatchArgs {
@@ -300,8 +284,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!repoRoot)
                 throw new Error("No project root.");
             const db = getDb(repoRoot);
-            const countRow = db.prepare<unknown[], CountRow>('SELECT COUNT(*) AS n FROM files').get();
-            const count = countRow?.n ?? 0;
+            const count = getFileCount(db);
             if (count === 0 || !args.fileScope) {
                 // No fileScope means a broad query — make sure new files since the
                 // last index are discovered, not just refreshed.
@@ -311,8 +294,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 // Fire-and-forget freshness refresh; don't block the query.
                 (async () => {
                     try {
-                        const rows = db.prepare<unknown[], FilePathRecordRow>('SELECT path FROM files').all();
-                        const abs = rows.map((r: FilePathRecordRow) => path.join(repoRoot, r.path));
+                        const rows = getFilePaths(db);
+                        const abs = rows.map((r: { path: string }) => path.join(repoRoot, r.path));
                         await ensureIndexFresh(db, repoRoot, abs);
                     }
                     catch { /* best-effort */ }
@@ -393,7 +376,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             continue;
                         if (!r.filePath) {
                             // Reverse query result — resolve definition file from index.
-                            const defRows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(r.name);
+                            const defRows = findSymbolFiles(db, r.name, 'def');
                             for (const row of defRows) {
                                 workList.push({ symbol: r.name, filePath: row.file_path });
                             }
@@ -408,7 +391,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         }
                         if (!filePath) {
                             // No file specified — resolve from index, same as reapply.
-                            const defRows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(entry.symbol);
+                            const defRows = findSymbolFiles(db, entry.symbol, 'def');
                             for (const row of defRows) {
                                 workList.push({ symbol: entry.symbol, filePath: row.file_path });
                             }
@@ -947,12 +930,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     candidateFiles = [file];
                 }
                 else {
-                    const rows = db.prepare<unknown[], FilePathRow>("SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def'").all(symName);
+                    const rows = findSymbolFiles(db, symName, 'def');
                     if (!rows.length) {
                         skipped.push(symName);
                         continue;
                     }
-                    candidateFiles = rows.map((r: FilePathRow) => r.file_path);
+                    candidateFiles = rows.map((r: { file_path: string }) => r.file_path);
                 }
                 let addedAny = false;
                 for (const cf of candidateFiles) {
@@ -1219,8 +1202,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             let fileChanged = false;
             try {
                 const curHash = createHash('md5').update(content).digest('hex');
-                const stored = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
-                if (stored && stored.hash !== curHash)
+                const storedHash = getFileHash(db, relPath);
+                if (storedHash && storedHash !== curHash)
                     fileChanged = true;
             }
             catch { /* best-effort */ }

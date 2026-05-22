@@ -1,47 +1,46 @@
 import { getProjectContext } from './project-context.js';
 import type { FsContext } from './project-context.js';
 import type { Edit } from './edit-engine.js';
+import {
+    DbConnection,
+    insertStash,
+    getStash,
+    getStashAttempts,
+    updateStashAttempts,
+    deleteStash,
+    listStash as adapterListStash
+} from './db-adapter.js';
 
 const MAX_ATTEMPTS = 2;
-
-interface StashRow {
-    id: number;
-    type: string;
-    file_path: string;
-    payload: string;
-    attempts: number;
-    created_at: number;
-}
-
-interface AttemptsRow {
-    attempts: number;
-}
 
 type StashPayload =
     | { edits: Edit[]; failedIndices: number[] }
     | { content: string; mode: string };
 
-function getDb(ctx: FsContext, filePath?: string) {
+function getDb(ctx: FsContext, filePath?: string): { conn: DbConnection; isGlobal: boolean } {
     const pc = getProjectContext(ctx);
-    return pc.getStashDb(filePath);
+    const { db, isGlobal } = pc.getStashDb(filePath);
+    return { conn: db, isGlobal };
 }
 
 export function stashEntry(ctx: FsContext, type: string, filePath: string, payload: StashPayload) {
-    const { db } = getDb(ctx, filePath);
-    const result = db.prepare(
-        'INSERT INTO stash (type, file_path, payload, attempts, created_at) VALUES (?, ?, ?, 0, ?)'
-    ).run(type, filePath, JSON.stringify(payload), Date.now());
-    return result.lastInsertRowid;
+    const { conn } = getDb(ctx, filePath);
+    return insertStash(conn, {
+        type,
+        filePath,
+        payload: JSON.stringify(payload),
+        createdAt: Date.now()
+    });
 }
 
 export function getStashEntry(ctx: FsContext, id: number, filePath?: string) {
-    const { db } = getDb(ctx, filePath);
-    const row = db.prepare<unknown[], StashRow>('SELECT * FROM stash WHERE id = ?').get(id);
+    const { conn } = getDb(ctx, filePath);
+    const row = getStash(conn, id);
     if (!row) return null;
     return {
         id: row.id,
         type: row.type,
-        filePath: row.file_path,
+        filePath: row.file_path ?? '',
         payload: JSON.parse(row.payload),
         attempts: row.attempts,
         createdAt: row.created_at,
@@ -49,29 +48,29 @@ export function getStashEntry(ctx: FsContext, id: number, filePath?: string) {
 }
 
 export function consumeAttempt(ctx: FsContext, id: number, filePath: string) {
-    const { db } = getDb(ctx, filePath);
-    const row = db.prepare<unknown[], AttemptsRow>('SELECT attempts FROM stash WHERE id = ?').get(id);
-    if (!row) return false;
-    const next = row.attempts + 1;
-    db.prepare('UPDATE stash SET attempts = ? WHERE id = ?').run(next, id);
+    const { conn } = getDb(ctx, filePath);
+    const attempts = getStashAttempts(conn, id);
+    if (attempts === null) return false;
+    const next = attempts + 1;
+    updateStashAttempts(conn, id, next);
     if (next > MAX_ATTEMPTS) {
-        db.prepare('DELETE FROM stash WHERE id = ?').run(id);
+        deleteStash(conn, id);
         return false;
     }
     return true;
 }
 
 export function clearStash(ctx: FsContext, id: number, filePath?: string) {
-    const { db } = getDb(ctx, filePath);
-    db.prepare('DELETE FROM stash WHERE id = ?').run(id);
+    const { conn } = getDb(ctx, filePath);
+    deleteStash(conn, id);
 }
 
 export function listStash(ctx: FsContext, filePath?: string) {
-    const { db, isGlobal } = getDb(ctx, filePath);
-    const rows = db.prepare<unknown[], StashRow>('SELECT * FROM stash ORDER BY id').all().map((row: StashRow) => ({
+    const { conn, isGlobal } = getDb(ctx, filePath);
+    const rows = adapterListStash(conn).map((row) => ({
         id: row.id,
         type: row.type,
-        filePath: row.file_path,
+        filePath: row.file_path ?? '',
         payload: JSON.parse(row.payload),
         attempts: row.attempts,
         createdAt: row.created_at,

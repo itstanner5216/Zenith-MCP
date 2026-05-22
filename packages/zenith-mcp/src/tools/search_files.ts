@@ -9,15 +9,7 @@ import type { SymbolFilterOptions } from '../core/tree-sitter.js';
 import { getDb, indexDirectory } from '../core/symbol-index.js';
 import { resolveProjectRoot } from '../utils/project-scope.js';
 import { ToolServer, ToolContext } from './types.js';
-
-interface SymbolDbRow {
-    file_path: string;
-    line: number;
-    end_line: number;
-    kind: string;
-    type: string | null;
-    name: string;
-}
+import { findSymbolDetails, findSymbolDetailsScoped, findStructuralCandidates } from '../core/db-adapter.js';
 
 interface SearchFilesArgs {
     mode: "content" | "files" | "symbol" | "structural" | "definition";
@@ -226,18 +218,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const db = getDb(repoRoot);
             await indexDirectory(db, repoRoot, rootPath, { maxFiles: 2000 });
             const scopePrefix = path.relative(repoRoot, rootPath);
-            const qBaseQuery = scopePrefix
-                ? 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?'
-                : 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?';
-            const qBaseParams: unknown[] = scopePrefix
-                ? [args.structuralQuery, 'def', `${scopePrefix}%`]
-                : [args.structuralQuery, 'def'];
-            const qRows = db.prepare<unknown[], SymbolDbRow>(qBaseQuery).all(...qBaseParams);
+            const qRows = scopePrefix
+                ? findSymbolDetailsScoped(db, args.structuralQuery!, 'def', `${scopePrefix}%`)
+                : findSymbolDetails(db, args.structuralQuery!, 'def');
             if (qRows.length === 0) {
                 return { content: [{ type: 'text' as const, text: `Symbol "${args.structuralQuery}" not found in index.` }] };
             }
             if (qRows.length > 1) {
-                const candidates = qRows.map((r: SymbolDbRow, i: number) => `${String.fromCharCode(97 + i)}) ${r.file_path}:${r.line}`);
+                const candidates = qRows.map((r: { file_path: string; line: number }, i: number) => `${String.fromCharCode(97 + i)}) ${r.file_path}:${r.line}`);
                 return { content: [{ type: 'text' as const, text: `Multiple definitions for "${args.structuralQuery}":\n${candidates.join('\n')}\nNarrow with path.` }] };
             }
             const qRow = qRows[0];
@@ -261,25 +249,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'Could not compute fingerprint.' }] };
             }
             const candType = (args.symbolKind && args.symbolKind !== 'any') ? args.symbolKind : (qRow.type || null);
-            let candQuery: string;
-            let candParams: unknown[];
-            if (scopePrefix && candType) {
-                candQuery = `SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def' AND type = ? AND file_path LIKE ? ORDER BY name`;
-                candParams = [candType, `${scopePrefix}%`];
+            const candOpts: { type?: string; filePrefix?: string } = {};
+            if (candType) {
+                candOpts.type = candType;
             }
-            else if (scopePrefix) {
-                candQuery = `SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def' AND file_path LIKE ? ORDER BY name`;
-                candParams = [`${scopePrefix}%`];
+            if (scopePrefix) {
+                candOpts.filePrefix = `${scopePrefix}%`;
             }
-            else if (candType) {
-                candQuery = `SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def' AND type = ? ORDER BY name`;
-                candParams = [candType];
-            }
-            else {
-                candQuery = `SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def' ORDER BY name`;
-                candParams = [];
-            }
-            const candidates = db.prepare<unknown[], SymbolDbRow>(candQuery).all(...candParams);
+            const candidates = findStructuralCandidates(db, candOpts);
             const userMax = Math.min(50, args.maxResults ?? 20);
             const matches: Array<{ name: string; filePath: string; line: number; score: number }> = [];
             const fileCache = new Map<string, string | null>();
