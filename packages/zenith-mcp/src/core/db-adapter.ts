@@ -9,14 +9,14 @@ import { DatabaseSync } from 'node:sqlite';
  * Callers pass this around but do not interact with it directly.
  */
 export type DbConnection = {
-    _handle: any;
+    _handle: DatabaseSync;
 };
 
 /**
  * Extract the raw node:sqlite DatabaseSync instance internally.
  */
 function handle(conn: DbConnection): DatabaseSync {
-    return conn._handle as DatabaseSync;
+    return conn._handle;
 }
 
 // ---------------------------------------------------------------------------
