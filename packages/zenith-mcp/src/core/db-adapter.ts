@@ -1,23 +1,37 @@
 import { DatabaseSync, StatementSync } from 'node:sqlite';
 
 // ---------------------------------------------------------------------------
-// Type Alias & Internal Helpers
+// DbConnection — opaque handle wrapping the driver
 // ---------------------------------------------------------------------------
 
 /**
- * Generic connection alias wrapping the internal driver handle.
- * Callers pass this around but do not interact with it directly.
+ * Opaque database connection. Consumers pass this around but cannot access
+ * internals directly — all operations go through adapter functions.
  */
-export type DbConnection = {
-    _handle: DatabaseSync;
-    _stmtCache: Map<string, StatementSync>;
-};
+export class DbConnection {
+    #handle: DatabaseSync;
+    #stmtCache: Map<string, StatementSync>;
+    #txDepth: number;
 
-/**
- * Extract the raw node:sqlite DatabaseSync instance internally.
- */
+    constructor(db: DatabaseSync) {
+        this.#handle = db;
+        this.#stmtCache = new Map();
+        this.#txDepth = 0;
+    }
+
+    /** @internal — used only by adapter functions in this file. */
+    get _db(): DatabaseSync { return this.#handle; }
+    get _cache(): Map<string, StatementSync> { return this.#stmtCache; }
+    get _txDepth(): number { return this.#txDepth; }
+    set _txDepth(v: number) { this.#txDepth = v; }
+}
+
+// ---------------------------------------------------------------------------
+// Internal Helpers
+// ---------------------------------------------------------------------------
+
 function handle(conn: DbConnection): DatabaseSync {
-    return conn._handle;
+    return conn._db;
 }
 
 /**
@@ -25,10 +39,10 @@ function handle(conn: DbConnection): DatabaseSync {
  * This avoids repeated prepare calls for hot-path queries.
  */
 function prepareOrCache(conn: DbConnection, sql: string): StatementSync {
-    const cache = conn._stmtCache;
+    const cache = conn._cache;
     let stmt = cache.get(sql);
     if (!stmt) {
-        stmt = conn._handle.prepare(sql);
+        stmt = conn._db.prepare(sql);
         cache.set(sql, stmt);
     }
     return stmt;
@@ -48,26 +62,25 @@ export function openDb(filePath: string): DbConnection {
     db.exec('PRAGMA synchronous = NORMAL');
     db.exec('PRAGMA busy_timeout = 5000');
     db.exec('PRAGMA foreign_keys = ON');
-    return { _handle: db, _stmtCache: new Map() };
+    return new DbConnection(db);
 }
 
 /**
- * Opens an in-memory database (for testing). Same pragmas.
+ * Opens an in-memory database (for testing).
+ * Skips WAL and busy_timeout since they are no-ops for :memory:.
  */
 export function openMemoryDb(): DbConnection {
     const db = new DatabaseSync(':memory:');
-    db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA synchronous = NORMAL');
-    db.exec('PRAGMA busy_timeout = 5000');
     db.exec('PRAGMA foreign_keys = ON');
-    return { _handle: db, _stmtCache: new Map() };
+    return new DbConnection(db);
 }
 
 /**
  * Closes a database connection and clears the statement cache.
  */
 export function closeDb(conn: DbConnection): void {
-    conn._stmtCache.clear();
+    conn._cache.clear();
     handle(conn).close();
 }
 
@@ -339,15 +352,7 @@ export function findSymbolFiles(conn: DbConnection, name: string, kind: string):
  * SQL: SELECT s.name, s.file_path, COUNT(e.id) AS refCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.referenced_name = ? AND s.kind = 'def' GROUP BY s.name, s.file_path ORDER BY refCount DESC
  */
 export function getCallers(conn: DbConnection, referencedName: string): { name: string; file_path: string; refCount: number }[] {
-    return handle(conn)
-        .prepare(`
-            SELECT s.name, s.file_path, COUNT(e.id) AS refCount
-            FROM edges e
-            JOIN symbols s ON s.id = e.container_def_id
-            WHERE e.referenced_name = ? AND s.kind = 'def'
-            GROUP BY s.name, s.file_path
-            ORDER BY refCount DESC
-        `)
+    return prepareOrCache(conn, `SELECT s.name, s.file_path, COUNT(e.id) AS refCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.referenced_name = ? AND s.kind = 'def' GROUP BY s.name, s.file_path ORDER BY refCount DESC`)
         .all(referencedName) as { name: string; file_path: string; refCount: number }[];
 }
 
@@ -355,15 +360,7 @@ export function getCallers(conn: DbConnection, referencedName: string): { name: 
  * SQL: SELECT e.referenced_name AS name, COUNT(e.id) AS callCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.name = ? AND s.kind = 'def' GROUP BY e.referenced_name ORDER BY callCount DESC
  */
 export function getCallees(conn: DbConnection, symbolName: string): { name: string; callCount: number }[] {
-    return handle(conn)
-        .prepare(`
-            SELECT e.referenced_name AS name, COUNT(e.id) AS callCount
-            FROM edges e
-            JOIN symbols s ON s.id = e.container_def_id
-            WHERE s.name = ? AND s.kind = 'def'
-            GROUP BY e.referenced_name
-            ORDER BY callCount DESC
-        `)
+    return prepareOrCache(conn, `SELECT e.referenced_name AS name, COUNT(e.id) AS callCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.name = ? AND s.kind = 'def' GROUP BY e.referenced_name ORDER BY callCount DESC`)
         .all(symbolName) as { name: string; callCount: number }[];
 }
 
@@ -380,14 +377,7 @@ export function getCallersFiltered(
     originSymbol: string,
     originFile: string
 ): { name: string; file_path: string; refCount: number }[] {
-    return handle(conn)
-        .prepare(`
-            SELECT s.name, s.file_path, COUNT(e.id) AS refCount
-            FROM edges e JOIN symbols s ON s.id = e.container_def_id
-            WHERE e.referenced_name = ? AND s.kind = 'def'
-              AND s.file_path NOT IN (SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def' AND file_path != ?)
-            GROUP BY s.name, s.file_path ORDER BY refCount DESC
-        `)
+    return prepareOrCache(conn, `SELECT s.name, s.file_path, COUNT(e.id) AS refCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.referenced_name = ? AND s.kind = 'def' AND s.file_path NOT IN (SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = 'def' AND file_path != ?) GROUP BY s.name, s.file_path ORDER BY refCount DESC`)
         .all(referencedName, originSymbol, originFile) as { name: string; file_path: string; refCount: number }[];
 }
 
@@ -398,13 +388,7 @@ export function getCallersFiltered(
  *      GROUP BY e.referenced_name ORDER BY callCount DESC
  */
 export function getCalleesFiltered(conn: DbConnection, symbolName: string, filePath: string): { name: string; callCount: number }[] {
-    return handle(conn)
-        .prepare(`
-            SELECT e.referenced_name AS name, COUNT(e.id) AS callCount
-            FROM edges e JOIN symbols s ON s.id = e.container_def_id
-            WHERE s.name = ? AND s.kind = 'def' AND s.file_path = ?
-            GROUP BY e.referenced_name ORDER BY callCount DESC
-        `)
+    return prepareOrCache(conn, `SELECT e.referenced_name AS name, COUNT(e.id) AS callCount FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.name = ? AND s.kind = 'def' AND s.file_path = ? GROUP BY e.referenced_name ORDER BY callCount DESC`)
         .all(symbolName, filePath) as { name: string; callCount: number }[];
 }
 
@@ -412,8 +396,7 @@ export function getCalleesFiltered(conn: DbConnection, symbolName: string, fileP
  * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?
  */
 export function findSymbolDetails(conn: DbConnection, name: string, kind: string): { file_path: string; line: number; end_line: number; kind: string; type: string }[] {
-    return handle(conn)
-        .prepare('SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?')
+    return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?')
         .all(name, kind) as { file_path: string; line: number; end_line: number; kind: string; type: string }[];
 }
 
@@ -421,8 +404,7 @@ export function findSymbolDetails(conn: DbConnection, name: string, kind: string
  * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?
  */
 export function findSymbolDetailsScoped(conn: DbConnection, name: string, kind: string, filePrefix: string): { file_path: string; line: number; end_line: number; kind: string; type: string }[] {
-    return handle(conn)
-        .prepare('SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?')
+    return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?')
         .all(name, kind, filePrefix) as { file_path: string; line: number; end_line: number; kind: string; type: string }[];
 }
 
@@ -461,8 +443,7 @@ export function findStructuralCandidates(
  * SQL: INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)
  */
 export function insertEdge(conn: DbConnection, containerDefId: number, referencedName: string): void {
-    handle(conn)
-        .prepare('INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)')
+    prepareOrCache(conn, 'INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)')
         .run(containerDefId, referencedName);
 }
 
@@ -470,8 +451,7 @@ export function insertEdge(conn: DbConnection, containerDefId: number, reference
  * SQL: DELETE FROM edges
  */
 export function deleteAllEdges(conn: DbConnection): void {
-    handle(conn)
-        .prepare('DELETE FROM edges')
+    prepareOrCache(conn, 'DELETE FROM edges')
         .run();
 }
 
@@ -494,8 +474,7 @@ export function snapshotVersion(
         textHash: string;
     }
 ): void {
-    handle(conn)
-        .prepare('INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    prepareOrCache(conn, 'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(entry.symbolName, entry.filePath, entry.text, entry.sessionId, entry.createdAt, entry.line, entry.textHash);
 }
 
@@ -524,8 +503,7 @@ export function getVersionHistory(
  * SQL: SELECT original_text FROM versions WHERE id = ?
  */
 export function getVersionText(conn: DbConnection, id: number): string | null {
-    const row = handle(conn)
-        .prepare('SELECT original_text FROM versions WHERE id = ?')
+    const row = prepareOrCache(conn, 'SELECT original_text FROM versions WHERE id = ?')
         .get(id) as { original_text: string } | undefined;
     return row?.original_text ?? null;
 }
@@ -534,8 +512,7 @@ export function getVersionText(conn: DbConnection, id: number): string | null {
  * SQL: SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?
  */
 export function getVersionMeta(conn: DbConnection, id: number): { original_text: string; symbol_name: string; session_id: string } | null {
-    const row = handle(conn)
-        .prepare('SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?')
+    const row = prepareOrCache(conn, 'SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?')
         .get(id) as { original_text: string; symbol_name: string; session_id: string } | undefined;
     return row ?? null;
 }
@@ -544,8 +521,7 @@ export function getVersionMeta(conn: DbConnection, id: number): { original_text:
  * SQL: DELETE FROM versions WHERE created_at < ?
  */
 export function pruneOldVersions(conn: DbConnection, beforeTimestamp: number): void {
-    handle(conn)
-        .prepare('DELETE FROM versions WHERE created_at < ?')
+    prepareOrCache(conn, 'DELETE FROM versions WHERE created_at < ?')
         .run(beforeTimestamp);
 }
 
@@ -553,8 +529,7 @@ export function pruneOldVersions(conn: DbConnection, beforeTimestamp: number): v
  * SQL: DELETE FROM versions WHERE session_id != ?
  */
 export function pruneOtherSessions(conn: DbConnection, keepSessionId: string): void {
-    handle(conn)
-        .prepare('DELETE FROM versions WHERE session_id != ?')
+    prepareOrCache(conn, 'DELETE FROM versions WHERE session_id != ?')
         .run(keepSessionId);
 }
 
@@ -575,8 +550,7 @@ export function insertStash(
         createdAt: number;
     }
 ): number {
-    const result = handle(conn)
-        .prepare('INSERT INTO stash (type, file_path, payload, attempts, created_at) VALUES (?, ?, ?, 0, ?)')
+    const result = prepareOrCache(conn, 'INSERT INTO stash (type, file_path, payload, attempts, created_at) VALUES (?, ?, ?, 0, ?)')
         .run(entry.type, entry.filePath, entry.payload, entry.createdAt);
     return Number(result.lastInsertRowid);
 }
@@ -588,8 +562,7 @@ export function getStash(
     conn: DbConnection,
     id: number
 ): { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number } | null {
-    const row = handle(conn)
-        .prepare('SELECT * FROM stash WHERE id = ?')
+    const row = prepareOrCache(conn, 'SELECT * FROM stash WHERE id = ?')
         .get(id) as { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number } | undefined;
     return row ?? null;
 }
@@ -598,8 +571,7 @@ export function getStash(
  * SQL: SELECT attempts FROM stash WHERE id = ?
  */
 export function getStashAttempts(conn: DbConnection, id: number): number | null {
-    const row = handle(conn)
-        .prepare('SELECT attempts FROM stash WHERE id = ?')
+    const row = prepareOrCache(conn, 'SELECT attempts FROM stash WHERE id = ?')
         .get(id) as { attempts: number } | undefined;
     return row?.attempts ?? null;
 }
@@ -608,8 +580,7 @@ export function getStashAttempts(conn: DbConnection, id: number): number | null 
  * SQL: UPDATE stash SET attempts = ? WHERE id = ?
  */
 export function updateStashAttempts(conn: DbConnection, id: number, attempts: number): void {
-    handle(conn)
-        .prepare('UPDATE stash SET attempts = ? WHERE id = ?')
+    prepareOrCache(conn, 'UPDATE stash SET attempts = ? WHERE id = ?')
         .run(attempts, id);
 }
 
@@ -617,8 +588,7 @@ export function updateStashAttempts(conn: DbConnection, id: number, attempts: nu
  * SQL: DELETE FROM stash WHERE id = ?
  */
 export function deleteStash(conn: DbConnection, id: number): void {
-    handle(conn)
-        .prepare('DELETE FROM stash WHERE id = ?')
+    prepareOrCache(conn, 'DELETE FROM stash WHERE id = ?')
         .run(id);
 }
 
@@ -626,8 +596,7 @@ export function deleteStash(conn: DbConnection, id: number): void {
  * SQL: SELECT * FROM stash ORDER BY id
  */
 export function listStash(conn: DbConnection): { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[] {
-    return handle(conn)
-        .prepare('SELECT * FROM stash ORDER BY id')
+    return prepareOrCache(conn, 'SELECT * FROM stash ORDER BY id')
         .all() as { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[];
 }
 
@@ -648,8 +617,7 @@ export function insertBackup(
         expiresAt: string;
     }
 ): number {
-    const result = handle(conn)
-        .prepare('INSERT INTO config_backups (original_path, backup_content, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    const result = prepareOrCache(conn, 'INSERT INTO config_backups (original_path, backup_content, created_at, expires_at) VALUES (?, ?, ?, ?)')
         .run(entry.originalPath, entry.content, entry.createdAt, entry.expiresAt);
     return Number(result.lastInsertRowid);
 }
@@ -661,8 +629,7 @@ export function getBackup(
     conn: DbConnection,
     id: number
 ): { id: number; original_path: string; backup_content: string; created_at: string; expires_at: string } | null {
-    const row = handle(conn)
-        .prepare('SELECT * FROM config_backups WHERE id = ?')
+    const row = prepareOrCache(conn, 'SELECT * FROM config_backups WHERE id = ?')
         .get(id) as { id: number; original_path: string; backup_content: string; created_at: string; expires_at: string } | undefined;
     return row ?? null;
 }
@@ -671,8 +638,7 @@ export function getBackup(
  * SQL: DELETE FROM config_backups WHERE expires_at < ?
  */
 export function pruneExpiredBackups(conn: DbConnection, now: string): number {
-    return Number(handle(conn)
-        .prepare('DELETE FROM config_backups WHERE expires_at < ?')
+    return Number(prepareOrCache(conn, 'DELETE FROM config_backups WHERE expires_at < ?')
         .run(now).changes);
 }
 
@@ -691,8 +657,7 @@ export function upsertProjectRoot(
         createdAt: number;
     }
 ): void {
-    handle(conn)
-        .prepare('INSERT OR REPLACE INTO project_roots (root_path, name, created_at) VALUES (?, ?, ?)')
+    prepareOrCache(conn, 'INSERT OR REPLACE INTO project_roots (root_path, name, created_at) VALUES (?, ?, ?)')
         .run(entry.rootPath, entry.name, entry.createdAt);
 }
 
@@ -700,8 +665,7 @@ export function upsertProjectRoot(
  * SQL: SELECT * FROM project_roots ORDER BY created_at DESC
  */
 export function listProjectRoots(conn: DbConnection): { root_path: string; name: string; created_at: number }[] {
-    return handle(conn)
-        .prepare('SELECT * FROM project_roots ORDER BY created_at DESC')
+    return prepareOrCache(conn, 'SELECT * FROM project_roots ORDER BY created_at DESC')
         .all() as { root_path: string; name: string; created_at: number }[];
 }
 
@@ -709,8 +673,7 @@ export function listProjectRoots(conn: DbConnection): { root_path: string; name:
  * SQL: SELECT root_path, name FROM project_roots
  */
 export function getAllProjectRootPaths(conn: DbConnection): { root_path: string; name: string }[] {
-    return handle(conn)
-        .prepare('SELECT root_path, name FROM project_roots')
+    return prepareOrCache(conn, 'SELECT root_path, name FROM project_roots')
         .all() as { root_path: string; name: string }[];
 }
 
@@ -720,17 +683,34 @@ export function getAllProjectRootPaths(conn: DbConnection): { root_path: string;
 
 /**
  * Wraps the provided function in a database transaction.
- * If the function throws, the transaction is rolled back.
+ * Supports nesting via SAVEPOINTs — inner calls don't start a new top-level transaction.
+ * If the function throws, the transaction (or savepoint) is rolled back.
  */
 export function runTransaction(conn: DbConnection, fn: () => void): void {
     const db = handle(conn);
-    db.exec('BEGIN');
+    const depth = conn._txDepth;
+    conn._txDepth = depth + 1;
     try {
+        if (depth === 0) {
+            db.exec('BEGIN');
+        } else {
+            db.exec(`SAVEPOINT sp_${depth}`);
+        }
         fn();
-        db.exec('COMMIT');
+        if (depth === 0) {
+            db.exec('COMMIT');
+        } else {
+            db.exec(`RELEASE sp_${depth}`);
+        }
     } catch (e) {
-        db.exec('ROLLBACK');
+        if (depth === 0) {
+            db.exec('ROLLBACK');
+        } else {
+            db.exec(`ROLLBACK TO sp_${depth}`);
+        }
         throw e;
+    } finally {
+        conn._txDepth = depth;
     }
 }
 
@@ -747,9 +727,10 @@ export function execRaw(conn: DbConnection, sql: string): void {
 }
 
 /**
- * Executes a raw SQL query and returns all result rows. 
+ * Executes a raw SQL query and returns all result rows.
+ * Bypasses the statement cache to avoid pollution from ad-hoc queries.
  * Use ONLY in tests for assertions — production code should use dedicated adapter functions.
  */
 export function queryRaw(conn: DbConnection, sql: string, ...params: any[]): any[] {
-    return prepareOrCache(conn, sql).all(...params);
+    return handle(conn).prepare(sql).all(...params);
 }

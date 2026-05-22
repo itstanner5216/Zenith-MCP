@@ -33,18 +33,6 @@ import {
 } from './db-adapter.js';
 
 // ---------------------------------------------------------------------------
-// Row shape interfaces for typed DB queries
-// ---------------------------------------------------------------------------
-
-interface VersionHistoryRow {
-    id: number;
-    symbol_name: string;
-    file_path: string;
-    created_at: number;
-    text_hash: string;
-}
-
-// ---------------------------------------------------------------------------
 // Repo root detection
 // ---------------------------------------------------------------------------
 
@@ -431,7 +419,7 @@ export function snapshotSymbol(db: DbConnection, symbolName: string, filePath: s
     });
 }
 
-export function getVersionHistory(db: DbConnection, symbolName: string, sessionId: string, filePath?: string): VersionHistoryRow[] {
+export function getVersionHistory(db: DbConnection, symbolName: string, sessionId: string, filePath?: string): ReturnType<typeof adapterGetVersionHistory> {
     return adapterGetVersionHistory(db, symbolName, sessionId, filePath);
 }
 
