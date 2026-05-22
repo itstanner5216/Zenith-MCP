@@ -40,7 +40,7 @@ export function getStashEntry(ctx: FsContext, id: number, filePath?: string) {
     return {
         id: row.id,
         type: row.type,
-        filePath: row.file_path ?? '',
+        filePath: row.file_path ?? null,
         payload: JSON.parse(row.payload),
         attempts: row.attempts,
         createdAt: row.created_at,
@@ -70,7 +70,7 @@ export function listStash(ctx: FsContext, filePath?: string) {
     const rows = adapterListStash(conn).map((row) => ({
         id: row.id,
         type: row.type,
-        filePath: row.file_path ?? '',
+        filePath: row.file_path ?? null,
         payload: JSON.parse(row.payload),
         attempts: row.attempts,
         createdAt: row.created_at,

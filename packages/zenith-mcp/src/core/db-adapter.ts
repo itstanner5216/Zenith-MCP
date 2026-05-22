@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 
 // ---------------------------------------------------------------------------
 // Type Alias & Internal Helpers
@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
  */
 export type DbConnection = {
     _handle: DatabaseSync;
+    _stmtCache: Map<string, StatementSync>;
 };
 
 /**
@@ -17,6 +18,20 @@ export type DbConnection = {
  */
 function handle(conn: DbConnection): DatabaseSync {
     return conn._handle;
+}
+
+/**
+ * Get or create a prepared statement from the per-connection cache.
+ * This avoids repeated prepare calls for hot-path queries.
+ */
+function prepareOrCache(conn: DbConnection, sql: string): StatementSync {
+    const cache = conn._stmtCache;
+    let stmt = cache.get(sql);
+    if (!stmt) {
+        stmt = conn._handle.prepare(sql);
+        cache.set(sql, stmt);
+    }
+    return stmt;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,7 +48,7 @@ export function openDb(filePath: string): DbConnection {
     db.exec('PRAGMA synchronous = NORMAL');
     db.exec('PRAGMA busy_timeout = 5000');
     db.exec('PRAGMA foreign_keys = ON');
-    return { _handle: db };
+    return { _handle: db, _stmtCache: new Map() };
 }
 
 /**
@@ -45,13 +60,14 @@ export function openMemoryDb(): DbConnection {
     db.exec('PRAGMA synchronous = NORMAL');
     db.exec('PRAGMA busy_timeout = 5000');
     db.exec('PRAGMA foreign_keys = ON');
-    return { _handle: db };
+    return { _handle: db, _stmtCache: new Map() };
 }
 
 /**
- * Closes a database connection.
+ * Closes a database connection and clears the statement cache.
  */
 export function closeDb(conn: DbConnection): void {
+    conn._stmtCache.clear();
     handle(conn).close();
 }
 
@@ -199,8 +215,7 @@ export function initBackupSchema(conn: DbConnection): void {
  * SQL: SELECT hash FROM files WHERE path = ?
  */
 export function getFileHash(conn: DbConnection, filePath: string): string | null {
-    const row = handle(conn)
-        .prepare('SELECT hash FROM files WHERE path = ?')
+    const row = prepareOrCache(conn, 'SELECT hash FROM files WHERE path = ?')
         .get(filePath) as { hash: string } | undefined;
     return row?.hash ?? null;
 }
@@ -209,8 +224,7 @@ export function getFileHash(conn: DbConnection, filePath: string): string | null
  * SQL: INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)
  */
 export function upsertFile(conn: DbConnection, filePath: string, hash: string, lastIndexed: number): void {
-    handle(conn)
-        .prepare('INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)')
+    prepareOrCache(conn, 'INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)')
         .run(filePath, hash, lastIndexed);
 }
 
@@ -218,8 +232,7 @@ export function upsertFile(conn: DbConnection, filePath: string, hash: string, l
  * SQL: DELETE FROM files WHERE path = ?
  */
 export function deleteFile(conn: DbConnection, filePath: string): void {
-    handle(conn)
-        .prepare('DELETE FROM files WHERE path = ?')
+    prepareOrCache(conn, 'DELETE FROM files WHERE path = ?')
         .run(filePath);
 }
 
@@ -227,8 +240,7 @@ export function deleteFile(conn: DbConnection, filePath: string): void {
  * SQL: SELECT path FROM files WHERE path LIKE ?
  */
 export function getFilesByPrefix(conn: DbConnection, prefix: string): { path: string }[] {
-    return handle(conn)
-        .prepare('SELECT path FROM files WHERE path LIKE ?')
+    return prepareOrCache(conn, 'SELECT path FROM files WHERE path LIKE ?')
         .all(prefix) as { path: string }[];
 }
 
@@ -236,8 +248,7 @@ export function getFilesByPrefix(conn: DbConnection, prefix: string): { path: st
  * SQL: SELECT * FROM files
  */
 export function getAllFiles(conn: DbConnection): { path: string; hash: string; last_indexed: number }[] {
-    return handle(conn)
-        .prepare('SELECT * FROM files')
+    return prepareOrCache(conn, 'SELECT * FROM files')
         .all() as { path: string; hash: string; last_indexed: number }[];
 }
 
@@ -245,8 +256,7 @@ export function getAllFiles(conn: DbConnection): { path: string; hash: string; l
  * SQL: DELETE FROM files
  */
 export function deleteAllFiles(conn: DbConnection): void {
-    handle(conn)
-        .prepare('DELETE FROM files')
+    prepareOrCache(conn, 'DELETE FROM files')
         .run();
 }
 
@@ -254,8 +264,7 @@ export function deleteAllFiles(conn: DbConnection): void {
  * SQL: SELECT COUNT(*) AS n FROM files
  */
 export function getFileCount(conn: DbConnection): number {
-    const row = handle(conn)
-        .prepare('SELECT COUNT(*) AS n FROM files')
+    const row = prepareOrCache(conn, 'SELECT COUNT(*) AS n FROM files')
         .get() as { n: number } | undefined;
     return row?.n ?? 0;
 }
@@ -264,8 +273,7 @@ export function getFileCount(conn: DbConnection): number {
  * SQL: SELECT path FROM files
  */
 export function getFilePaths(conn: DbConnection): { path: string }[] {
-    return handle(conn)
-        .prepare('SELECT path FROM files')
+    return prepareOrCache(conn, 'SELECT path FROM files')
         .all() as { path: string }[];
 }
 
@@ -273,8 +281,7 @@ export function getFilePaths(conn: DbConnection): { path: string }[] {
  * SQL: SELECT * FROM files WHERE path = ?
  */
 export function getFile(conn: DbConnection, filePath: string): { path: string; hash: string; last_indexed: number } | null {
-    const row = handle(conn)
-        .prepare('SELECT * FROM files WHERE path = ?')
+    const row = prepareOrCache(conn, 'SELECT * FROM files WHERE path = ?')
         .get(filePath) as { path: string; hash: string; last_indexed: number } | undefined;
     return row ?? null;
 }
@@ -299,8 +306,7 @@ export function insertSymbol(
         column: number;
     }
 ): number {
-    const result = handle(conn)
-        .prepare('INSERT INTO symbols (name, kind, type, file_path, line, end_line, column) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const result = prepareOrCache(conn, 'INSERT INTO symbols (name, kind, type, file_path, line, end_line, column) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(symbol.name, symbol.kind, symbol.type, symbol.filePath, symbol.line, symbol.endLine, symbol.column);
     return Number(result.lastInsertRowid);
 }
@@ -309,8 +315,7 @@ export function insertSymbol(
  * SQL: DELETE FROM symbols WHERE file_path = ?
  */
 export function deleteSymbolsByFile(conn: DbConnection, filePath: string): void {
-    handle(conn)
-        .prepare('DELETE FROM symbols WHERE file_path = ?')
+    prepareOrCache(conn, 'DELETE FROM symbols WHERE file_path = ?')
         .run(filePath);
 }
 
@@ -318,8 +323,7 @@ export function deleteSymbolsByFile(conn: DbConnection, filePath: string): void 
  * SQL: DELETE FROM symbols
  */
 export function deleteAllSymbols(conn: DbConnection): void {
-    handle(conn)
-        .prepare('DELETE FROM symbols')
+    prepareOrCache(conn, 'DELETE FROM symbols')
         .run();
 }
 
@@ -327,8 +331,7 @@ export function deleteAllSymbols(conn: DbConnection): void {
  * SQL: SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = ?
  */
 export function findSymbolFiles(conn: DbConnection, name: string, kind: string): { file_path: string }[] {
-    return handle(conn)
-        .prepare('SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = ?')
+    return prepareOrCache(conn, 'SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = ?')
         .all(name, kind) as { file_path: string }[];
 }
 
@@ -748,5 +751,5 @@ export function execRaw(conn: DbConnection, sql: string): void {
  * Use ONLY in tests for assertions — production code should use dedicated adapter functions.
  */
 export function queryRaw(conn: DbConnection, sql: string, ...params: any[]): any[] {
-    return handle(conn).prepare(sql).all(...params);
+    return prepareOrCache(conn, sql).all(...params);
 }

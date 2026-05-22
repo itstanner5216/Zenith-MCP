@@ -19,13 +19,15 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "build": "tsc && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "watch": "tsc --watch",
     "test": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
-    "start:http": "node dist/server/http.js",
-    "repair:sqlite": "bash src/scripts/repair-zenith-sqlite.sh"
+    "start:http": "node dist/server/http.js"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
