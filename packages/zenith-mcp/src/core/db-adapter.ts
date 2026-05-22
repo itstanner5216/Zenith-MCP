@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
 // ---------------------------------------------------------------------------
 // Type Alias & Internal Helpers
@@ -13,10 +13,10 @@ export type DbConnection = {
 };
 
 /**
- * Extract the raw better-sqlite3 Database instance internally.
+ * Extract the raw node:sqlite DatabaseSync instance internally.
  */
-function handle(conn: DbConnection): Database.Database {
-    return conn._handle as Database.Database;
+function handle(conn: DbConnection): DatabaseSync {
+    return conn._handle as DatabaseSync;
 }
 
 // ---------------------------------------------------------------------------
@@ -28,11 +28,11 @@ function handle(conn: DbConnection): Database.Database {
  * journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON
  */
 export function openDb(filePath: string): DbConnection {
-    const db = new Database(filePath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('busy_timeout = 5000');
-    db.pragma('foreign_keys = ON');
+    const db = new DatabaseSync(filePath);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('PRAGMA foreign_keys = ON');
     return { _handle: db };
 }
 
@@ -40,11 +40,11 @@ export function openDb(filePath: string): DbConnection {
  * Opens an in-memory database (for testing). Same pragmas.
  */
 export function openMemoryDb(): DbConnection {
-    const db = new Database(':memory:');
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('busy_timeout = 5000');
-    db.pragma('foreign_keys = ON');
+    const db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('PRAGMA foreign_keys = ON');
     return { _handle: db };
 }
 
@@ -650,9 +650,9 @@ export function getBackup(
  * SQL: DELETE FROM config_backups WHERE expires_at < ?
  */
 export function pruneExpiredBackups(conn: DbConnection, now: string): number {
-    return handle(conn)
+    return Number(handle(conn)
         .prepare('DELETE FROM config_backups WHERE expires_at < ?')
-        .run(now).changes;
+        .run(now).changes);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +702,15 @@ export function getAllProjectRootPaths(conn: DbConnection): { root_path: string;
  * If the function throws, the transaction is rolled back.
  */
 export function runTransaction(conn: DbConnection, fn: () => void): void {
-    handle(conn).transaction(fn)();
+    const db = handle(conn);
+    db.exec('BEGIN');
+    try {
+        fn();
+        db.exec('COMMIT');
+    } catch (e) {
+        db.exec('ROLLBACK');
+        throw e;
+    }
 }
 
 // ---------------------------------------------------------------------------
