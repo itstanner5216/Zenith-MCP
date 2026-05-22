@@ -219,9 +219,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     catch { }
                     throw new Error(`Write retry failed: ${errorMessage(error)}`);
                 }
-                if (entry.filePath) {
-                    clearStash(ctx, args.stashId, entry.filePath);
-                }
+                clearStash(ctx, args.stashId, targetPath);
                 return { content: [{ type: 'text', text: `Applied.` }] };
             }
             throw new Error(`Unknown stash type: ${entry.type}`);
