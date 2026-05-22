@@ -395,17 +395,17 @@ export function getCalleesFiltered(conn: DbConnection, symbolName: string, fileP
 /**
  * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?
  */
-export function findSymbolDetails(conn: DbConnection, name: string, kind: string): { file_path: string; line: number; end_line: number; kind: string; type: string }[] {
+export function findSymbolDetails(conn: DbConnection, name: string, kind: string): { file_path: string; line: number; end_line: number; kind: string; type: string | null }[] {
     return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?')
-        .all(name, kind) as { file_path: string; line: number; end_line: number; kind: string; type: string }[];
+        .all(name, kind) as { file_path: string; line: number; end_line: number; kind: string; type: string | null }[];
 }
 
 /**
  * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?
  */
-export function findSymbolDetailsScoped(conn: DbConnection, name: string, kind: string, filePrefix: string): { file_path: string; line: number; end_line: number; kind: string; type: string }[] {
+export function findSymbolDetailsScoped(conn: DbConnection, name: string, kind: string, filePrefix: string): { file_path: string; line: number; end_line: number; kind: string; type: string | null }[] {
     return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?')
-        .all(name, kind, filePrefix) as { file_path: string; line: number; end_line: number; kind: string; type: string }[];
+        .all(name, kind, filePrefix) as { file_path: string; line: number; end_line: number; kind: string; type: string | null }[];
 }
 
 /**
