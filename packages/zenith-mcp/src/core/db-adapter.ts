@@ -112,20 +112,38 @@ export function initSymbolSchema(conn: DbConnection): void {
     // Schema migrations
     try {
         db.exec('ALTER TABLE versions ADD COLUMN line INTEGER');
-    } catch {
-        // Tolerated (column already exists)
+    } catch (error: any) {
+        // Only tolerate "column already exists" errors
+        const msg = error?.message || String(error);
+        if (!msg.includes('duplicate column') && !msg.includes('already exists')) {
+            console.error('Unexpected error adding column "line" to versions table:', msg);
+            console.error('SQL: ALTER TABLE versions ADD COLUMN line INTEGER');
+            throw error;
+        }
     }
 
     try {
         db.exec('ALTER TABLE versions ADD COLUMN text_hash TEXT');
-    } catch {
-        // Tolerated (column already exists)
+    } catch (error: any) {
+        // Only tolerate "column already exists" errors
+        const msg = error?.message || String(error);
+        if (!msg.includes('duplicate column') && !msg.includes('already exists')) {
+            console.error('Unexpected error adding column "text_hash" to versions table:', msg);
+            console.error('SQL: ALTER TABLE versions ADD COLUMN text_hash TEXT');
+            throw error;
+        }
     }
 
     try {
         db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
-    } catch {
-        // Tolerated (duplicate rows may exist or index already created)
+    } catch (error: any) {
+        // Only tolerate "index already exists" or constraint violation errors
+        const msg = error?.message || String(error);
+        if (!msg.includes('already exists') && !msg.includes('UNIQUE constraint failed') && !msg.includes('duplicate')) {
+            console.error('Unexpected error creating index "idx_versions_dedup":', msg);
+            console.error('SQL: CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
+            throw error;
+        }
     }
 }
 
