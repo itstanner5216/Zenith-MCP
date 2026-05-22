@@ -486,7 +486,7 @@ export function getVersionHistory(
     symbolName: string,
     sessionId: string,
     filePath?: string
-): { id: number; symbol_name: string; file_path: string; created_at: number; text_hash: string }[] {
+): { id: number; symbol_name: string; file_path: string | null; created_at: number; text_hash: string | null }[] {
     let sql = 'SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ?';
     const params: any[] = [symbolName, sessionId];
     if (filePath) {
@@ -496,7 +496,7 @@ export function getVersionHistory(
     sql += ' ORDER BY created_at DESC';
     return handle(conn)
         .prepare(sql)
-        .all(...params) as { id: number; symbol_name: string; file_path: string; created_at: number; text_hash: string }[];
+        .all(...params) as { id: number; symbol_name: string; file_path: string | null; created_at: number; text_hash: string | null }[];
 }
 
 /**
