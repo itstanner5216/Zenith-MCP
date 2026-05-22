@@ -689,6 +689,7 @@ export function getAllProjectRootPaths(conn: DbConnection): { root_path: string;
 export function runTransaction(conn: DbConnection, fn: () => void): void {
     const db = handle(conn);
     const depth = conn._txDepth;
+    let started = false;
     conn._txDepth = depth + 1;
     try {
         if (depth === 0) {
@@ -696,6 +697,7 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
         } else {
             db.exec(`SAVEPOINT sp_${depth}`);
         }
+        started = true;
         fn();
         if (depth === 0) {
             db.exec('COMMIT');
@@ -703,15 +705,17 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
             db.exec(`RELEASE sp_${depth}`);
         }
     } catch (e) {
-        if (depth === 0) {
+        if (started && depth === 0) {
             db.exec('ROLLBACK');
-        } else {
+        } else if (started) {
             db.exec(`ROLLBACK TO sp_${depth}`);
+            db.exec(`RELEASE sp_${depth}`);
         }
         throw e;
     } finally {
         conn._txDepth = depth;
     }
+}
 }
 
 // ---------------------------------------------------------------------------
