@@ -166,7 +166,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             // --- Write apply ---
             if (entry.type === 'write') {
-                const targetPath = args.newPath || entry.filePath || undefined;
+                const targetPath = args.newPath || entry.filePath;
                 if (!targetPath) {
                     throw new Error(`Stash #${args.stashId}: no file path available for write.`);
                 }
