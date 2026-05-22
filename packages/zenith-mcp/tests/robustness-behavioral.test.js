@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
+import { queryRaw } from '../dist/core/db-adapter.js';
 
 function mkTmpDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'robust-test-'));
@@ -380,7 +381,7 @@ describe('symbol-index — path containment', () => {
             // indexFile should silently return without indexing
             await mod.indexFile(db, tmpDir, outsideFile);
             // Verify nothing was indexed
-            const rows = db.prepare('SELECT * FROM files').all();
+            const rows = queryRaw(db, 'SELECT * FROM files');
             expect(rows).toHaveLength(0);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -397,7 +398,7 @@ describe('symbol-index — path containment', () => {
         try {
             const db = mod.getDb(tmpDir);
             await mod.indexFile(db, tmpDir, jsFile);
-            const rows = db.prepare('SELECT * FROM files').all();
+            const rows = queryRaw(db, 'SELECT * FROM files');
             expect(rows.length).toBeGreaterThanOrEqual(1);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -419,7 +420,7 @@ describe('symbol-index — purge on parse failure', () => {
             const db = mod.getDb(tmpDir);
             await mod.indexFile(db, tmpDir, unsupportedFile);
             // Should not create file entries for unsupported language files
-            const rows = db.prepare('SELECT * FROM files WHERE path = ?').all('data.xyz');
+            const rows = queryRaw(db, 'SELECT * FROM files WHERE path = ?', 'data.xyz');
             expect(rows).toHaveLength(0);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -436,7 +437,7 @@ describe('symbol-index — purge on parse failure', () => {
             const db = mod.getDb(tmpDir);
             // First index the file normally
             await mod.indexFile(db, tmpDir, jsFile);
-            const beforeRows = db.prepare('SELECT * FROM files WHERE path = ?').all('temp.js');
+            const beforeRows = queryRaw(db, 'SELECT * FROM files WHERE path = ?', 'temp.js');
             expect(beforeRows.length).toBeGreaterThanOrEqual(1);
 
             // Now delete the file and re-index
@@ -444,7 +445,7 @@ describe('symbol-index — purge on parse failure', () => {
             await mod.indexFile(db, tmpDir, jsFile);
 
             // Stale rows should be purged
-            const afterRows = db.prepare('SELECT * FROM files WHERE path = ?').all('temp.js');
+            const afterRows = queryRaw(db, 'SELECT * FROM files WHERE path = ?', 'temp.js');
             expect(afterRows).toHaveLength(0);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });

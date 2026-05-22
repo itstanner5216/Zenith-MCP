@@ -6,6 +6,7 @@ import { execFileSync } from 'child_process';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
 import { resetProjectContext } from '../dist/core/project-context.js';
+import { deleteAllFiles, deleteAllSymbols, deleteAllEdges, getFileCount } from '../dist/core/db-adapter.js';
 
 // -----------------------------------------------------------------------------
 // Test harness: fake MCP server captures the registered handler + schema.
@@ -135,9 +136,9 @@ describe('refactor_batch query mode', () => {
     it('builds the index on first call and returns a numbered list', async () => {
         // Clear any existing symbols so we actually exercise the first-call path
         const db = getDb(tmpRepo);
-        db.prepare('DELETE FROM files').run();
-        db.prepare('DELETE FROM symbols').run();
-        db.prepare('DELETE FROM edges').run();
+        deleteAllFiles(db);
+        deleteAllSymbols(db);
+        deleteAllEdges(db);
 
         const handler = server.tool.handler;
         // validateCard has multiple defs, so without fileScope we expect disambiguation.
@@ -154,7 +155,7 @@ describe('refactor_batch query mode', () => {
         expect(text.split('\n').length).toBeGreaterThanOrEqual(1);
 
         // Confirm DB was populated during query
-        const count = db.prepare('SELECT COUNT(*) AS n FROM files').get().n;
+        const count = getFileCount(db);
         expect(count).toBeGreaterThan(0);
     });
 

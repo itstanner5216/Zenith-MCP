@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import Database from 'better-sqlite3';
+import { openMemoryDb, closeDb, execRaw, queryRaw } from '../dist/core/db-adapter.js';
 
 function mkTmpGitRepo() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'symidx-test-'));
@@ -63,8 +63,8 @@ describe('symbol-index — snapshotSymbol & getVersionHistory', () => {
     let db;
 
     beforeEach(() => {
-        db = new Database(':memory:');
-        db.exec(`
+        db = openMemoryDb();
+        execRaw(db, `
             CREATE TABLE IF NOT EXISTS versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol_name TEXT,
@@ -79,13 +79,13 @@ describe('symbol-index — snapshotSymbol & getVersionHistory', () => {
     });
 
     afterEach(() => {
-        try { db.close(); } catch {}
+        try { closeDb(db); } catch {}
     });
 
     it('snapshotSymbol inserts a version row', async () => {
         const { snapshotSymbol } = await importSymbolIndex();
         snapshotSymbol(db, 'myFunc', 'src/main.js', 'function myFunc() {}', 'sess1', 10);
-        const rows = db.prepare('SELECT * FROM versions WHERE symbol_name = ?').all('myFunc');
+        const rows = queryRaw(db, 'SELECT * FROM versions WHERE symbol_name = ?', 'myFunc');
         expect(rows).toHaveLength(1);
         expect(rows[0].original_text).toBe('function myFunc() {}');
         expect(rows[0].session_id).toBe('sess1');
@@ -95,10 +95,10 @@ describe('symbol-index — snapshotSymbol & getVersionHistory', () => {
     it('snapshotSymbol deduplicates via unique index when present', async () => {
         const { snapshotSymbol } = await importSymbolIndex();
         // Create the unique index that getDb() normally creates
-        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
+        execRaw(db, 'CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
         snapshotSymbol(db, 'myFunc', 'src/main.js', 'same content', 'sess1', 1);
         snapshotSymbol(db, 'myFunc', 'src/main.js', 'same content', 'sess1', 1);
-        const rows = db.prepare('SELECT * FROM versions WHERE symbol_name = ?').all('myFunc');
+        const rows = queryRaw(db, 'SELECT * FROM versions WHERE symbol_name = ?', 'myFunc');
         expect(rows).toHaveLength(1);
     });
 
@@ -109,7 +109,7 @@ describe('symbol-index — snapshotSymbol & getVersionHistory', () => {
         // No unique index — INSERT OR IGNORE has no effect
         snapshotSymbol(db, 'myFunc', 'src/main.js', 'same content', 'sess1', 1);
         snapshotSymbol(db, 'myFunc', 'src/main.js', 'same content', 'sess1', 1);
-        const rows = db.prepare('SELECT * FROM versions WHERE symbol_name = ?').all('myFunc');
+        const rows = queryRaw(db, 'SELECT * FROM versions WHERE symbol_name = ?', 'myFunc');
         expect(rows).toHaveLength(2);
     });
 
@@ -144,8 +144,8 @@ describe('symbol-index — getVersionText', () => {
     let db;
 
     beforeEach(() => {
-        db = new Database(':memory:');
-        db.exec(`
+        db = openMemoryDb();
+        execRaw(db, `
             CREATE TABLE IF NOT EXISTS versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol_name TEXT,
@@ -160,13 +160,13 @@ describe('symbol-index — getVersionText', () => {
     });
 
     afterEach(() => {
-        try { db.close(); } catch {}
+        try { closeDb(db); } catch {}
     });
 
     it('returns original text for existing version', async () => {
         const { snapshotSymbol, getVersionText } = await importSymbolIndex();
         snapshotSymbol(db, 'fn', 'f.js', 'the original text', 's1', 1);
-        const versions = db.prepare('SELECT id FROM versions').all();
+        const versions = queryRaw(db, 'SELECT id FROM versions');
         const text = getVersionText(db, versions[0].id);
         expect(text).toBe('the original text');
     });
@@ -181,8 +181,8 @@ describe('symbol-index — restoreVersion', () => {
     let db;
 
     beforeEach(() => {
-        db = new Database(':memory:');
-        db.exec(`
+        db = openMemoryDb();
+        execRaw(db, `
             CREATE TABLE IF NOT EXISTS versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol_name TEXT,
@@ -197,13 +197,13 @@ describe('symbol-index — restoreVersion', () => {
     });
 
     afterEach(() => {
-        try { db.close(); } catch {}
+        try { closeDb(db); } catch {}
     });
 
     it('restores original text from version', async () => {
         const { snapshotSymbol, restoreVersion } = await importSymbolIndex();
         snapshotSymbol(db, 'myFn', 'f.js', 'original body', 'sess1', 5);
-        const version = db.prepare('SELECT id FROM versions').all();
+        const version = queryRaw(db, 'SELECT id FROM versions');
         const text = restoreVersion(db, 'myFn', version[0].id, 'sess1');
         expect(text).toBe('original body');
     });
@@ -217,7 +217,7 @@ describe('symbol-index — restoreVersion', () => {
     it('throws when symbol name does not match', async () => {
         const { snapshotSymbol, restoreVersion } = await importSymbolIndex();
         snapshotSymbol(db, 'correct', 'f.js', 'text', 'sess1', 1);
-        const version = db.prepare('SELECT id FROM versions').all();
+        const version = queryRaw(db, 'SELECT id FROM versions');
         expect(() => restoreVersion(db, 'wrong', version[0].id, 'sess1'))
             .toThrow('belongs to');
     });
@@ -225,7 +225,7 @@ describe('symbol-index — restoreVersion', () => {
     it('throws when session id does not match', async () => {
         const { snapshotSymbol, restoreVersion } = await importSymbolIndex();
         snapshotSymbol(db, 'myFn', 'f.js', 'text', 'sess1', 1);
-        const version = db.prepare('SELECT id FROM versions').all();
+        const version = queryRaw(db, 'SELECT id FROM versions');
         expect(() => restoreVersion(db, 'myFn', version[0].id, 'different-session'))
             .toThrow('different session');
     });
@@ -233,9 +233,9 @@ describe('symbol-index — restoreVersion', () => {
     it('snapshots current text before restoring when provided', async () => {
         const { snapshotSymbol, restoreVersion } = await importSymbolIndex();
         snapshotSymbol(db, 'fn', 'f.js', 'old text', 'sess1', 1);
-        const version = db.prepare('SELECT id FROM versions').all();
+        const version = queryRaw(db, 'SELECT id FROM versions');
         restoreVersion(db, 'fn', version[0].id, 'sess1', 'current content');
-        const all = db.prepare('SELECT * FROM versions').all();
+        const all = queryRaw(db, 'SELECT * FROM versions');
         expect(all.length).toBe(2);
     });
 });
@@ -246,8 +246,8 @@ describe('symbol-index — ensureIndexFresh stale purge', () => {
 
     beforeEach(() => {
         repoDir = mkTmpGitRepo();
-        db = new Database(':memory:');
-        db.exec(`
+        db = openMemoryDb();
+        execRaw(db, `
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY,
                 hash TEXT,
@@ -272,7 +272,7 @@ describe('symbol-index — ensureIndexFresh stale purge', () => {
     });
 
     afterEach(() => {
-        try { db.close(); } catch {}
+        try { closeDb(db); } catch {}
         try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
     });
 
@@ -284,15 +284,15 @@ describe('symbol-index — ensureIndexFresh stale purge', () => {
         fs.writeFileSync(filePath, 'function staleSymbol() { return 1; }\n');
         await indexFile(db, repoDir, filePath);
 
-        expect(db.prepare('SELECT path FROM files WHERE path = ?').get('stale.js')).toBeTruthy();
-        expect(db.prepare('SELECT name FROM symbols WHERE name = ?').get('staleSymbol')).toBeTruthy();
+        expect(queryRaw(db, 'SELECT path FROM files WHERE path = ?', 'stale.js')[0]).toBeTruthy();
+        expect(queryRaw(db, 'SELECT name FROM symbols WHERE name = ?', 'staleSymbol')[0]).toBeTruthy();
 
         fs.unlinkSync(filePath);
         const reindexed = await ensureIndexFresh(db, repoDir, [filePath]);
 
         expect(reindexed).toBe(0);
-        expect(db.prepare('SELECT path FROM files WHERE path = ?').get('stale.js')).toBeUndefined();
-        expect(db.prepare('SELECT name FROM symbols WHERE name = ?').get('staleSymbol')).toBeUndefined();
+        expect(queryRaw(db, 'SELECT path FROM files WHERE path = ?', 'stale.js')[0]).toBeUndefined();
+        expect(queryRaw(db, 'SELECT name FROM symbols WHERE name = ?', 'staleSymbol')[0]).toBeUndefined();
     });
 });
 
@@ -300,8 +300,8 @@ describe('symbol-index — pruneOldSessions', () => {
     let db;
 
     beforeEach(() => {
-        db = new Database(':memory:');
-        db.exec(`
+        db = openMemoryDb();
+        execRaw(db, `
             CREATE TABLE IF NOT EXISTS versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol_name TEXT,
@@ -316,7 +316,7 @@ describe('symbol-index — pruneOldSessions', () => {
     });
 
     afterEach(() => {
-        try { db.close(); } catch {}
+        try { closeDb(db); } catch {}
     });
 
     it('deletes versions from other sessions', async () => {
@@ -325,7 +325,7 @@ describe('symbol-index — pruneOldSessions', () => {
         snapshotSymbol(db, 'fn', 'f.js', 'remove', 'session-B', 2);
 
         pruneOldSessions(db, 'session-A');
-        const remaining = db.prepare('SELECT * FROM versions').all();
+        const remaining = queryRaw(db, 'SELECT * FROM versions');
         expect(remaining).toHaveLength(1);
         expect(remaining[0].session_id).toBe('session-A');
     });

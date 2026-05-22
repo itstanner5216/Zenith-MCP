@@ -51,7 +51,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const msg = isGlobal ? 'Empty. (global)' : 'Empty.';
                 return { content: [{ type: 'text', text: msg }] };
             }
-            const lines = filtered.map((e: { id: number; type: string; filePath: string; attempts: number }) => `#${e.id} [${e.type}] ${e.filePath} (attempt ${e.attempts}/2)`);
+            const lines = filtered.map((e: { id: number; type: string; filePath: string | null; attempts: number }) => `#${e.id} [${e.type}] ${e.filePath || '(no path)'} (attempt ${e.attempts}/2)`);
             if (isGlobal)
                 lines.unshift('(global stash — no project detected)');
             return { content: [{ type: 'text', text: lines.join('\n') }] };
@@ -73,12 +73,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const mode = e.symbol ? `symbol:${e.symbol}` : e.block_start ? `block:${e.block_start}...${e.block_end}` : `content`;
                     return `#${i + 1} [${status}] ${mode}`;
                 });
-                return { content: [{ type: 'text', text: `[edit] ${entry.filePath}\n${lines.join('\n')}` }] };
+                return { content: [{ type: 'text', text: `[edit] ${entry.filePath || '(no path)'}\n${lines.join('\n')}` }] };
             }
             if (entry.type === 'write') {
                 const p = entry.payload;
                 const preview = p.content.length > 500 ? p.content.slice(0, 500) + '...' : p.content;
-                return { content: [{ type: 'text', text: `[write] ${entry.filePath}\n${preview}` }] };
+                return { content: [{ type: 'text', text: `[write] ${entry.filePath || '(no path)'}\n${preview}` }] };
             }
             throw new Error(`Unknown stash type: ${entry.type}`);
         }
@@ -100,17 +100,23 @@ export function register(server: ToolServer, ctx: ToolContext) {
         if (args.mode === 'apply') {
             if (!args.stashId)
                 throw new Error('stashId required.');
-            const entry = getStashEntry(ctx, args.stashId, args.newPath || args.file);
+            const entry = getStashEntry(ctx, args.stashId, args.file);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found or expired.`);
-            if (!args.dryRun) {
-                const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath);
-                if (!canRetry)
-                    throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
+            if (!entry.filePath && entry.type === 'edit') {
+                throw new Error(`Stash #${args.stashId} has no file path.`);
+            }
+            if (!entry.filePath && entry.type === 'write' && !args.newPath) {
+                throw new Error(`Stash #${args.stashId} has no file path. Provide newPath.`);
             }
             // --- Edit apply ---
             if (entry.type === 'edit') {
-                const validPath = await ctx.validatePath(entry.filePath);
+                if (!args.dryRun) {
+                    const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath!);
+                    if (!canRetry)
+                        throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
+                }
+                const validPath = await ctx.validatePath(entry.filePath!);
                 const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
                 const edits = entry.payload.edits;
                 const corrections = args.corrections || [];
@@ -135,7 +141,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 try {
                     await fs.writeFile(tempPath, workingContent, 'utf-8');
                     await fs.rename(tempPath, validPath);
-                    clearStash(ctx, args.stashId, entry.filePath);
+                    clearStash(ctx, args.stashId, entry.filePath ?? undefined);
                 }
                 catch (error) {
                     try {
@@ -164,6 +170,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // --- Write apply ---
             if (entry.type === 'write') {
                 const targetPath = args.newPath || entry.filePath;
+                if (!targetPath) {
+                    throw new Error(`Stash #${args.stashId}: no file path available for write.`);
+                }
+                if (!args.dryRun) {
+                    const canRetry = consumeAttempt(ctx, args.stashId, targetPath);
+                    if (!canRetry)
+                        throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
+                }
                 const validPath = await ctx.validatePath(targetPath);
                 const content = entry.payload.content;
                 const parentDir = path.dirname(validPath);
@@ -213,7 +227,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     catch { }
                     throw new Error(`Write retry failed: ${errorMessage(error)}`);
                 }
-                clearStash(ctx, args.stashId, entry.filePath);
+                clearStash(ctx, args.stashId, targetPath);
                 return { content: [{ type: 'text', text: `Applied.` }] };
             }
             throw new Error(`Unknown stash type: ${entry.type}`);

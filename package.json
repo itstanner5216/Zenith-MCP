@@ -16,7 +16,6 @@
     "test:turbo": "turbo run test --filter=zenith-mcp",
     "start": "pnpm --filter zenith-mcp run start",
     "start:http": "pnpm --filter zenith-mcp run start:http",
-    "repair:sqlite": "pnpm --filter zenith-mcp run repair:sqlite",
     "dev": "turbo run dev",
     "lint": "turbo run lint"
   },

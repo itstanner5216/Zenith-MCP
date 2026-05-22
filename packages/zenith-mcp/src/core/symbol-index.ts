@@ -1,4 +1,3 @@
-import Database from 'better-sqlite3';
 import fs from 'fs/promises';
 import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
 import path from 'path';
@@ -7,47 +6,31 @@ import { execFileSync } from 'child_process';
 import { getSymbols, getLangForFile, isSupported } from './tree-sitter.js';
 import { getDefaultExcludes, isSensitive, getRefactorVersionTtlMs } from './shared.js';
 import { minimatch } from 'minimatch';
-
-// ---------------------------------------------------------------------------
-// Row shape interfaces for typed DB queries
-// ---------------------------------------------------------------------------
-
-interface FileHashRow {
-    hash: string;
-}
-
-interface DefFileRow {
-    file_path: string;
-}
-
-interface ImpactForwardRow {
-    name: string;
-    file_path: string;
-    refCount: number;
-}
-
-interface ImpactBackwardRow {
-    name: string;
-    callCount: number;
-}
-
-interface VersionHistoryRow {
-    id: number;
-    symbol_name: string;
-    file_path: string;
-    created_at: number;
-    text_hash: string;
-}
-
-interface VersionTextRow {
-    original_text: string;
-}
-
-interface VersionRestoreRow {
-    original_text: string;
-    symbol_name: string;
-    session_id: string;
-}
+import {
+    DbConnection,
+    openDb,
+    closeDb,
+    initSymbolSchema,
+    getFileHash,
+    upsertFile,
+    deleteFile,
+    getFilesByPrefix,
+    insertSymbol,
+    deleteSymbolsByFile,
+    getCallers,
+    getCallees,
+    getCallersFiltered,
+    getCalleesFiltered,
+    insertEdge,
+    snapshotVersion,
+    getVersionHistory as adapterGetVersionHistory,
+    getVersionText as adapterGetVersionText,
+    getVersionMeta,
+    pruneOldVersions,
+    pruneOtherSessions,
+    runTransaction,
+    findSymbolFiles
+} from './db-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Repo root detection
@@ -73,10 +56,10 @@ export function findRepoRoot(filePath: string): string | null {
 // Database provisioning
 // ---------------------------------------------------------------------------
 
-const _dbCache = new Map<string, Database.Database>();
+const _dbCache = new Map<string, DbConnection>();
 let _exitHandlerRegistered = false;
 
-export function getDb(repoRoot: string): Database.Database {
+export function getDb(repoRoot: string): DbConnection {
     if (_dbCache.has(repoRoot)) return _dbCache.get(repoRoot)!;
 
     const mcpDir = path.join(repoRoot, '.mcp'); // nosemgrep
@@ -87,76 +70,26 @@ export function getDb(repoRoot: string): Database.Database {
         writeFileSync(gitignorePath, '*\n'); // nosemgrep
     }
 
-    const db = new Database(path.join(mcpDir, 'symbols.db')); // nosemgrep
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('busy_timeout = 5000');
-    db.pragma('foreign_keys = ON');
-
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS files (
-            path TEXT PRIMARY KEY,
-            hash TEXT,
-            last_indexed INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS symbols (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            kind TEXT,
-            type TEXT,
-            file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
-            line INTEGER,
-            end_line INTEGER,
-            column INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            container_def_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
-            referenced_name TEXT
-        );
-        CREATE TABLE IF NOT EXISTS versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol_name TEXT,
-            file_path TEXT,
-            original_text TEXT,
-            session_id TEXT,
-            created_at INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            edit_body TEXT,
-            symbol_kind TEXT,
-            created_at INTEGER
-        );
-        CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-        CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
-        CREATE INDEX IF NOT EXISTS idx_symbols_kind_name ON symbols(kind, name);
-        CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(referenced_name);
-        CREATE INDEX IF NOT EXISTS idx_edges_container ON edges(container_def_id);
-        CREATE INDEX IF NOT EXISTS idx_versions_session ON versions(session_id);
-    `);
-
-    // Schema migration: add line column to versions for accurate symbol disambiguation on restore
-    try { db.exec('ALTER TABLE versions ADD COLUMN line INTEGER'); } catch { /* already exists */ }
-    try { db.exec('ALTER TABLE versions ADD COLUMN text_hash TEXT'); } catch { /* already exists */ }
-    try {
-        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
-    } catch { /* tolerate pre-existing duplicates */ }
+    const conn = openDb(path.join(mcpDir, 'symbols.db'));
+    initSymbolSchema(conn);
 
     if (!_exitHandlerRegistered) {
         _exitHandlerRegistered = true;
         process.on('exit', () => {
-            for (const openDb of _dbCache.values()) {
-                try { openDb.close(); } catch { /* ignore */ }
+            for (const cachedConn of _dbCache.values()) {
+                try { closeDb(cachedConn); } catch { /* ignore */ }
             }
         });
     }
 
-    try { db.prepare('DELETE FROM versions WHERE created_at < ?').run(Date.now() - getRefactorVersionTtlMs()); } catch { /* table may be mid-migration */ }
+    try {
+        pruneOldVersions(conn, Date.now() - getRefactorVersionTtlMs());
+    } catch {
+        /* table may be mid-migration */
+    }
 
-    _dbCache.set(repoRoot, db);
-    return db;
+    _dbCache.set(repoRoot, conn);
+    return conn;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +101,8 @@ export function getSessionId(clientSessionId?: string): string {
     return `${process.pid}:${process.cwd()}`;
 }
 
-export function pruneOldSessions(db: Database.Database, currentSessionId: string): void {
-    db.prepare('DELETE FROM versions WHERE session_id != ?').run(currentSessionId);
+export function pruneOldSessions(db: DbConnection, currentSessionId: string): void {
+    pruneOtherSessions(db, currentSessionId);
 }
 
 
@@ -214,14 +147,14 @@ function shouldIndexFile(repoRoot: string, absPath: string): boolean {
     );
 }
 
-function purgeIndexedPath(db: Database.Database, relPath: string): void {
-    db.transaction(() => {
-        db.prepare('DELETE FROM symbols WHERE file_path = ?').run(relPath);
-        db.prepare('DELETE FROM files WHERE path = ?').run(relPath);
-    })();
+function purgeIndexedPath(db: DbConnection, relPath: string): void {
+    runTransaction(db, () => {
+        deleteSymbolsByFile(db, relPath);
+        deleteFile(db, relPath);
+    });
 }
 
-export async function indexFile(db: Database.Database, repoRoot: string, absFilePath: string): Promise<void> {
+export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string): Promise<void> {
     const relPath = path.relative(repoRoot, absFilePath);
 
     // Guard: reject paths that escape repoRoot
@@ -241,8 +174,8 @@ export async function indexFile(db: Database.Database, repoRoot: string, absFile
     }
 
     const hash = hashFileContent(source);
-    const existing = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
-    if (existing && existing.hash === hash) return;
+    const existingHash = getFileHash(db, relPath);
+    if (existingHash && existingHash === hash) return;
 
     const langName = getLangForFile(absFilePath);
     if (!langName) {
@@ -259,29 +192,34 @@ export async function indexFile(db: Database.Database, repoRoot: string, absFile
     const defs = symbols.filter((s: SymbolLike) => s.kind === 'def');
     const refs = symbols.filter((s: SymbolLike) => s.kind === 'ref');
 
-    const deleteSymbols = db.prepare('DELETE FROM symbols WHERE file_path = ?');
-    const upsertFile = db.prepare(
-        'INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)'
-    );
-    const insertSymbol = db.prepare(
-        'INSERT INTO symbols (name, kind, type, file_path, line, end_line, column) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    const insertEdge = db.prepare(
-        'INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)'
-    );
-
-    const doTransaction = db.transaction(() => {
-        deleteSymbols.run(relPath);
-        upsertFile.run(relPath, hash, Date.now());
+    runTransaction(db, () => {
+        deleteSymbolsByFile(db, relPath);
+        upsertFile(db, relPath, hash, Date.now());
 
         const defIds: Array<{ id: number; line: number; endLine: number }> = [];
         for (const sym of defs) {
-            const info = insertSymbol.run(sym.name, sym.kind, sym.type, relPath, sym.line, sym.endLine, sym.column);
-            defIds.push({ id: Number(info.lastInsertRowid), line: sym.line, endLine: sym.endLine });
+            const rowId = insertSymbol(db, {
+                name: sym.name,
+                kind: sym.kind,
+                type: sym.type,
+                filePath: relPath,
+                line: sym.line,
+                endLine: sym.endLine,
+                column: sym.column
+            });
+            defIds.push({ id: rowId, line: sym.line, endLine: sym.endLine });
         }
 
         for (const ref of refs) {
-            insertSymbol.run(ref.name, ref.kind, ref.type, relPath, ref.line, ref.endLine, ref.column);
+            insertSymbol(db, {
+                name: ref.name,
+                kind: ref.kind,
+                type: ref.type,
+                filePath: relPath,
+                line: ref.line,
+                endLine: ref.endLine,
+                column: ref.column
+            });
 
             // Find innermost containing def (smallest span that contains this ref)
             let bestDef: { id: number; line: number; endLine: number } | null = null;
@@ -296,19 +234,17 @@ export async function indexFile(db: Database.Database, repoRoot: string, absFile
                 }
             }
             if (bestDef) {
-                insertEdge.run(bestDef.id, ref.name);
+                insertEdge(db, bestDef.id, ref.name);
             }
         }
     });
-
-    doTransaction();
 }
 
 interface IndexDirectoryOpts {
     maxFiles?: number;
 }
 
-export async function indexDirectory(db: Database.Database, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
+export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
     const maxFiles = opts.maxFiles || 5000;
     const filePaths: string[] = [];
     const excludes = getDefaultExcludes();
@@ -342,9 +278,7 @@ export async function indexDirectory(db: Database.Database, repoRoot: string, di
     // (e.g. files under now-excluded directories or deleted files)
     const dirRelPath = path.relative(repoRoot, dirPath);
     const prefix = dirRelPath ? dirRelPath + path.sep : '';
-    const indexedFiles = db.prepare<unknown[], { path: string }>(
-        'SELECT path FROM files WHERE path LIKE ?'
-    ).all(`${prefix}%`);
+    const indexedFiles = getFilesByPrefix(db, `${prefix}%`);
     const visitedRelPaths = new Set(filePaths.map(f => path.relative(repoRoot, f)));
     for (const row of indexedFiles) {
         if (!visitedRelPaths.has(row.path)) {
@@ -359,7 +293,7 @@ export async function indexDirectory(db: Database.Database, repoRoot: string, di
     }
 }
 
-export async function ensureIndexFresh(db: Database.Database, repoRoot: string, absFilePaths: string[]): Promise<number> {
+export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFilePaths: string[]): Promise<number> {
     let reindexed = 0;
     for (const absPath of absFilePaths) {
         const relPath = path.relative(repoRoot, absPath);
@@ -374,8 +308,8 @@ export async function ensureIndexFresh(db: Database.Database, repoRoot: string, 
             continue;
         }
         const hash = hashFileContent(source);
-        const existing = db.prepare<unknown[], FileHashRow>('SELECT hash FROM files WHERE path = ?').get(relPath);
-        if (!existing || existing.hash !== hash) {
+        const existingHash = getFileHash(db, relPath);
+        if (!existingHash || existingHash !== hash) {
             await indexFile(db, repoRoot, absPath);
             reindexed++;
         }
@@ -410,16 +344,14 @@ interface ImpactSuccess {
     total: number;
 }
 
-export function impactQuery(db: Database.Database, symbolName: string, opts: ImpactQueryOpts = {}): ImpactDisambiguate | ImpactSuccess {
+export function impactQuery(db: DbConnection, symbolName: string, opts: ImpactQueryOpts = {}): ImpactDisambiguate | ImpactSuccess {
     const { file, depth = 1, direction = 'forward' } = opts;
 
     // Disambiguation: check for multiple definitions
-    const defFiles = db.prepare<unknown[], DefFileRow>(
-        'SELECT DISTINCT file_path FROM symbols WHERE name = ? AND kind = ?'
-    ).all(symbolName, 'def');
+    const defFiles = findSymbolFiles(db, symbolName, 'def');
 
     if (defFiles.length > 1 && !file) {
-        return { disambiguate: true, definitions: defFiles.map((r: DefFileRow) => r.file_path) };
+        return { disambiguate: true, definitions: defFiles.map((r: { file_path: string }) => r.file_path) };
     }
 
     const visited = new Set([symbolName]);
@@ -432,60 +364,18 @@ export function impactQuery(db: Database.Database, symbolName: string, opts: Imp
             if (direction === 'forward') {
                 // Who calls `name`? When fileConstraint is set, exclude callers from files
                 // that define their own competing `name` (they likely call their local version).
-                let sql: string, params: unknown[];
-                if (fileConstraint) {
-                    sql = `
-                        SELECT s.name, s.file_path, COUNT(e.id) AS refCount
-                        FROM edges e
-                        JOIN symbols s ON s.id = e.container_def_id
-                        WHERE e.referenced_name = ? AND s.kind = 'def'
-                          AND s.file_path NOT IN (
-                            SELECT DISTINCT file_path FROM symbols
-                            WHERE name = ? AND kind = 'def' AND file_path != ?
-                          )
-                        GROUP BY s.name, s.file_path
-                        ORDER BY refCount DESC
-                    `;
-                    params = [name, name, fileConstraint];
-                } else {
-                    sql = `
-                        SELECT s.name, s.file_path, COUNT(e.id) AS refCount
-                        FROM edges e
-                        JOIN symbols s ON s.id = e.container_def_id
-                        WHERE e.referenced_name = ? AND s.kind = 'def'
-                        GROUP BY s.name, s.file_path
-                        ORDER BY refCount DESC
-                    `;
-                    params = [name];
-                }
-                for (const row of db.prepare<unknown[], ImpactForwardRow>(sql).all(...params)) {
+                const rows = fileConstraint
+                    ? getCallersFiltered(db, name, name, fileConstraint)
+                    : getCallers(db, name);
+                for (const row of rows) {
                     out.push({ name: row.name, filePath: row.file_path, refCount: row.refCount });
                 }
             } else {
                 // What does `name` call? When fileConstraint is set, scope to that definition file.
-                let sql: string, params: unknown[];
-                if (fileConstraint) {
-                    sql = `
-                        SELECT e.referenced_name AS name, COUNT(e.id) AS callCount
-                        FROM edges e
-                        JOIN symbols s ON s.id = e.container_def_id
-                        WHERE s.name = ? AND s.kind = 'def' AND s.file_path = ?
-                        GROUP BY e.referenced_name
-                        ORDER BY callCount DESC
-                    `;
-                    params = [name, fileConstraint];
-                } else {
-                    sql = `
-                        SELECT e.referenced_name AS name, COUNT(e.id) AS callCount
-                        FROM edges e
-                        JOIN symbols s ON s.id = e.container_def_id
-                        WHERE s.name = ? AND s.kind = 'def'
-                        GROUP BY e.referenced_name
-                        ORDER BY callCount DESC
-                    `;
-                    params = [name];
-                }
-                for (const row of db.prepare<unknown[], ImpactBackwardRow>(sql).all(...params)) {
+                const rows = fileConstraint
+                    ? getCalleesFiltered(db, name, fileConstraint)
+                    : getCallees(db, name);
+                for (const row of rows) {
                     out.push({ name: row.name, callCount: row.callCount });
                 }
             }
@@ -516,31 +406,29 @@ export function impactQuery(db: Database.Database, symbolName: string, opts: Imp
 // Version management
 // ---------------------------------------------------------------------------
 
-export function snapshotSymbol(db: Database.Database, symbolName: string, filePath: string | null, originalText: string, sessionId: string, line: number | null = null): void {
+export function snapshotSymbol(db: DbConnection, symbolName: string, filePath: string | null, originalText: string, sessionId: string, line: number | null = null): void {
     const textHash = createHash('md5').update(originalText || '').digest('hex');
-    db.prepare(
-        'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(symbolName, filePath, originalText, sessionId, Date.now(), line ?? null, textHash);
+    snapshotVersion(db, {
+        symbolName,
+        filePath,
+        text: originalText,
+        sessionId,
+        createdAt: Date.now(),
+        line: line ?? null,
+        textHash
+    });
 }
 
-export function getVersionHistory(db: Database.Database, symbolName: string, sessionId: string, filePath?: string): VersionHistoryRow[] {
-    const params: unknown[] = [symbolName, sessionId];
-    let query = 'SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ?';
-    if (filePath) {
-        query += ' AND file_path = ?';
-        params.push(filePath);
-    }
-    query += ' ORDER BY created_at DESC';
-    return db.prepare<unknown[], VersionHistoryRow>(query).all(...params);
+export function getVersionHistory(db: DbConnection, symbolName: string, sessionId: string, filePath?: string): ReturnType<typeof adapterGetVersionHistory> {
+    return adapterGetVersionHistory(db, symbolName, sessionId, filePath);
 }
 
-export function getVersionText(db: Database.Database, versionId: number): string | null {
-    const row = db.prepare<unknown[], VersionTextRow>('SELECT original_text FROM versions WHERE id = ?').get(versionId);
-    return row ? row.original_text : null;
+export function getVersionText(db: DbConnection, versionId: number): string | null {
+    return adapterGetVersionText(db, versionId);
 }
 
-export function restoreVersion(db: Database.Database, symbolName: string, versionId: number, sessionId: string, currentText?: string): string {
-    const row = db.prepare<unknown[], VersionRestoreRow>('SELECT original_text, symbol_name, session_id FROM versions WHERE id = ?').get(versionId);
+export function restoreVersion(db: DbConnection, symbolName: string, versionId: number, sessionId: string, currentText?: string): string {
+    const row = getVersionMeta(db, versionId);
     if (!row) throw new Error('Version not found.');
     if (row.symbol_name !== symbolName) {
         throw new Error(`Version ${versionId} belongs to "${row.symbol_name}", not "${symbolName}".`);

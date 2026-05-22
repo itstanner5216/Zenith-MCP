@@ -1,8 +1,16 @@
-import Database from 'better-sqlite3';
 import { existsSync, readFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { expandTilde } from './schema.js';
+import {
+    DbConnection,
+    openDb,
+    closeDb as adapterCloseDb,
+    initBackupSchema,
+    insertBackup,
+    getBackup,
+    pruneExpiredBackups
+} from '../core/db-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -14,53 +22,30 @@ const DEFAULT_BACKUP_DIR = join(ZENITH_HOME, 'mcp_backups');  // used as fallbac
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ---------------------------------------------------------------------------
-// Row shape interfaces for typed DB queries
-// ---------------------------------------------------------------------------
-
-interface BackupRow {
-    id: number;
-    original_path: string;
-    backup_content: string;
-    created_at: string;
-    expires_at: string;
-}
-
-// ---------------------------------------------------------------------------
 // Lazy singleton DB connection — one open per process lifetime
 // ---------------------------------------------------------------------------
 
-let _db: Database.Database | null = null;
+let _db: DbConnection | null = null;
 
-function getDb(): Database.Database {
+function getDb(): DbConnection {
     if (_db !== null) return _db;
     mkdirSync(ZENITH_HOME, { recursive: true });
-    const db = new Database(GLOBAL_DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('busy_timeout = 5000');
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS config_backups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            original_path TEXT NOT NULL,
-            backup_content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL
-        );
-    `);
-    _db = db;
-    return db;
+    const conn = openDb(GLOBAL_DB_PATH);
+    initBackupSchema(conn);
+    _db = conn;
+    return conn;
 }
 
 /** Exported for test teardown / clean shutdown. */
 export function closeDb(): void {
     if (_db !== null) {
-        _db.close();
+        adapterCloseDb(_db);
         _db = null;
     }
 }
 
 // withDb signature preserved so callers are unchanged.
-function withDb<T>(work: (db: Database.Database) => T): T {
+function withDb<T>(work: (conn: DbConnection) => T): T {
     return work(getDb());
 }
 
@@ -99,19 +84,20 @@ export function backupFile(
     }
 
     // mode === 'sqlite'
-    return withDb((db) => {
+    return withDb((conn) => {
         const content = readFileSync(originalPath, 'utf-8');
         const now = new Date();
         const createdAt = now.toISOString();
         const expiresAt = new Date(now.getTime() + TTL_MS).toISOString();
 
-        const result = db
-            .prepare(
-                'INSERT INTO config_backups (original_path, backup_content, created_at, expires_at) VALUES (?, ?, ?, ?)',
-            )
-            .run(originalPath, content, createdAt, expiresAt);
+        const lastInsertId = insertBackup(conn, {
+            originalPath,
+            content,
+            createdAt,
+            expiresAt
+        });
 
-        const rowId = String(result.lastInsertRowid);
+        const rowId = String(lastInsertId);
 
         return {
             backupId: rowId,
@@ -133,10 +119,8 @@ export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string
     }
 
     // mode === 'sqlite'
-    return withDb((db) => {
-        const row = db
-            .prepare<unknown[], BackupRow>('SELECT * FROM config_backups WHERE id = ?')
-            .get(Number(backupId));
+    return withDb((conn) => {
+        const row = getBackup(conn, Number(backupId));
 
         if (!row) {
             throw new Error(`No SQLite backup found for row ID ${backupId}`);
@@ -151,11 +135,8 @@ export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string
 // ---------------------------------------------------------------------------
 
 export function cleanupExpiredBackups(): number {
-    return withDb((db) => {
+    return withDb((conn) => {
         const now = new Date().toISOString();
-        const result = db
-            .prepare('DELETE FROM config_backups WHERE expires_at < ?')
-            .run(now);
-        return result.changes;
+        return pruneExpiredBackups(conn, now);
     });
 }

@@ -1,23 +1,21 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import Database from 'better-sqlite3';
 import { getDb } from './symbol-index.js';
 import { ProjectRegistry } from './project-registry.js';
 import { resolveProjectRoot, clearProjectScopeCache } from '../utils/project-scope.js';
+import {
+    DbConnection,
+    openDb,
+    initGlobalSchema,
+    initStashSchema,
+    upsertProjectRoot,
+    listProjectRoots,
+    getAllProjectRootPaths
+} from './db-adapter.js';
 
 const ZENITH_HOME = path.join(os.homedir(), '.zenith-mcp');
 const GLOBAL_DB_PATH = path.join(ZENITH_HOME, 'global-stash.db');
-
-// ---------------------------------------------------------------------------
-// Row shape interfaces for typed DB queries
-// ---------------------------------------------------------------------------
-
-interface ProjectRootRow {
-    root_path: string;
-    name: string;
-    created_at: number;
-}
 
 // ---------------------------------------------------------------------------
 // Filesystem context interface
@@ -33,19 +31,13 @@ export interface FsContext {
 // survive reconnects without requiring git.
 // ---------------------------------------------------------------------------
 
-let _globalDb: Database.Database | null = null;
+let _globalDb: DbConnection | null = null;
 
-function getGlobalDb(): Database.Database {
+function getGlobalDb(): DbConnection {
     if (_globalDb) return _globalDb;
     fs.mkdirSync(ZENITH_HOME, { recursive: true });
-    _globalDb = new Database(GLOBAL_DB_PATH);
-    _globalDb.exec(`
-        CREATE TABLE IF NOT EXISTS project_roots (
-            root_path TEXT PRIMARY KEY,
-            name TEXT,
-            created_at INTEGER
-        );
-    `);
+    _globalDb = openDb(GLOBAL_DB_PATH);
+    initGlobalSchema(_globalDb);
     return _globalDb;
 }
 
@@ -114,16 +106,16 @@ export class ProjectContext {
     /**
      * Get the stash DB for the current project context.
      */
-    getStashDb(filePath?: string): { db: Database.Database; root: string | null; isGlobal: boolean } {
+    getStashDb(filePath?: string): { db: DbConnection; root: string | null; isGlobal: boolean } {
         const root = this.getRoot(filePath);
         if (root) {
-            const db = getDb(root);
-            ensureStashTables(db);
-            return { db, root, isGlobal: false };
+            const conn = getDb(root);
+            ensureStashTables(conn);
+            return { db: conn, root, isGlobal: false };
         }
-        const db = getGlobalDb();
-        ensureStashTables(db);
-        return { db, root: null, isGlobal: true };
+        const conn = getGlobalDb();
+        ensureStashTables(conn);
+        return { db: conn, root: null, isGlobal: true };
     }
 
     /**
@@ -156,10 +148,12 @@ export class ProjectContext {
         if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
             throw new Error(`Not a directory: ${abs}`);
         }
-        const db = getGlobalDb();
-        db.prepare(
-            'INSERT OR REPLACE INTO project_roots (root_path, name, created_at) VALUES (?, ?, ?)'
-        ).run(abs, name || path.basename(abs), Date.now());
+        const conn = getGlobalDb();
+        upsertProjectRoot(conn, {
+            rootPath: abs,
+            name: name || path.basename(abs),
+            createdAt: Date.now()
+        });
 
         // Also register in-memory for immediate use
         this._registry.register({
@@ -179,9 +173,9 @@ export class ProjectContext {
     /**
      * List all manually registered project roots.
      */
-    listRegisteredProjects(): ProjectRootRow[] {
-        const db = getGlobalDb();
-        return db.prepare<unknown[], ProjectRootRow>('SELECT * FROM project_roots ORDER BY created_at DESC').all();
+    listRegisteredProjects(): { root_path: string; name: string; created_at: number }[] {
+        const conn = getGlobalDb();
+        return listProjectRoots(conn);
     }
 
     // --- Private resolution ladder ---
@@ -191,8 +185,8 @@ export class ProjectContext {
      */
     private _syncRegistry(): void {
         try {
-            const db = getGlobalDb();
-            const rows = db.prepare<unknown[], ProjectRootRow>('SELECT root_path, name FROM project_roots').all();
+            const conn = getGlobalDb();
+            const rows = getAllProjectRootPaths(conn);
             for (const row of rows) {
                 this._registry.register({
                     project_id: row.name || path.basename(row.root_path),
@@ -238,17 +232,8 @@ export class ProjectContext {
 // Stash table setup — reused by both project DBs and the global DB
 // ---------------------------------------------------------------------------
 
-function ensureStashTables(db: Database.Database): void {
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS stash (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            file_path TEXT,
-            payload TEXT NOT NULL,
-            attempts INTEGER DEFAULT 0,
-            created_at INTEGER
-        );
-    `);
+function ensureStashTables(conn: DbConnection): void {
+    initStashSchema(conn);
 }
 
 // ---------------------------------------------------------------------------

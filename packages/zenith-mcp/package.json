@@ -19,19 +19,20 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "build": "tsc && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "watch": "tsc --watch",
     "test": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
-    "start:http": "node dist/server/http.js",
-    "repair:sqlite": "bash src/scripts/repair-zenith-sqlite.sh"
+    "start:http": "node dist/server/http.js"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@repomix/tree-sitter-wasms": "^0.1.17",
-    "better-sqlite3": "^12.10.0",
     "diff": "^5.1.0",
     "express": "^5.2.1",
     "glob": "^10.5.0",
@@ -46,7 +47,6 @@
     "zod-to-json-schema": "^3.23.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/diff": "^5.0.9",
     "@types/emscripten": "^1.41.5",
     "@types/express": "^5.0.6",
