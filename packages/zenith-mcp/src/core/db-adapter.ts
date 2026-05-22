@@ -716,7 +716,6 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
         conn._txDepth = depth;
     }
 }
-}
 
 // ---------------------------------------------------------------------------
 // Raw Escape Hatch (for migrations or one-off DDL)
