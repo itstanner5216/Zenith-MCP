@@ -103,16 +103,16 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const entry = getStashEntry(ctx, args.stashId, args.newPath || args.file);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found or expired.`);
-            if (!entry.filePath) {
-                throw new Error(`Stash #${args.stashId} has no file path.`);
-            }
-            if (!args.dryRun) {
-                const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath);
-                if (!canRetry)
-                    throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
-            }
             // --- Edit apply ---
             if (entry.type === 'edit') {
+                if (!entry.filePath) {
+                    throw new Error(`Stash #${args.stashId} has no file path.`);
+                }
+                if (!args.dryRun) {
+                    const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath);
+                    if (!canRetry)
+                        throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
+                }
                 const validPath = await ctx.validatePath(entry.filePath);
                 const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
                 const edits = entry.payload.edits;
@@ -169,6 +169,11 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const targetPath = args.newPath || entry.filePath || undefined;
                 if (!targetPath) {
                     throw new Error(`Stash #${args.stashId}: no file path available for write.`);
+                }
+                if (!args.dryRun) {
+                    const canRetry = consumeAttempt(ctx, args.stashId, targetPath);
+                    if (!canRetry)
+                        throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
                 }
                 const validPath = await ctx.validatePath(targetPath);
                 const content = entry.payload.content;
