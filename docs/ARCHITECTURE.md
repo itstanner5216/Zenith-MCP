@@ -1,649 +1,407 @@
-# Zenith-MCP Architecture & Developer Guide
+# Zenith-MCP Architecture
 
-A comprehensive code-level reference for the Zenith-MCP filesystem server. Read this document to understand every module, data flow, security boundary, and implementation detail.
+## 1. System Overview
+
+Zenith-MCP is a high-performance Model Context Protocol (MCP) server engineered for agentic workflows. It implements advanced filesystem operations, code comprehension, and context compression to minimize token footprint and maximize reasoning efficiency.
+
+The repository is structured as a TypeScript monorepo using `pnpm` workspace management, divided into two core packages:
+
+- **`packages/zenith-mcp`** — The MCP server implementing the protocol, filesystem capabilities, adapters, and search.
+- **`packages/zenith-toon`** — Zenith's TypeScript TOON compression codec, invoked by Zenith-MCP through a Node subprocess bridge.
+
+```
+                     ┌───────────────────┐
+                     │    MCP Client     │
+                     └─────────┬─────────┘
+                               │ (JSON-RPC via stdio/HTTP)
+                               ▼
+                     ┌───────────────────┐
+                     │ packages/zenith-  │
+                     │ mcp (Server)      │
+                     └─────────┬─────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+  ┌───────────────────┐                 ┌───────────────────┐
+  │   SQLite DBs      │                 │  packages/zenith- │
+  │ (Symbols, Stash)  │                 │  toon (Codec)     │
+  └───────────────────┘                 └───────────────────┘
+```
+
+### Repository Layout
+
+```
+zenith-mcp-monorepo/
+├── packages/
+│   ├── zenith-mcp/          # Main MCP server
+│   │   ├── src/
+│   │   │   ├── adapters/    # IDE platform adapters
+│   │   │   ├── cli/         # CLI entry (stdio transport)
+│   │   │   ├── config/      # Config loading & validation
+│   │   │   ├── core/        # Server, DB, symbols, edits, tree-sitter
+│   │   │   ├── retrieval/   # Opt-in tool retrieval/filtering pipeline
+│   │   │   ├── scripts/     # Utility scripts
+│   │   │   ├── server/      # HTTP/SSE transport (Express)
+│   │   │   ├── tools/       # MCP tool implementations
+│   │   │   └── utils/       # Project scope utilities
+│   │   ├── tests/           # Vitest test suite
+│   │   └── grammars/        # Tree-sitter WASM grammars (source of truth)
+│   └── zenith-toon/         # TOON compression codec library
+│       └── src/
+├── src/                     # Root-level bridge & types
+│   ├── core/                # toon_bridge_cli.js
+│   └── types/               # Vendor type declarations
+├── docs/                    # Documentation & design notes
+├── patches/                 # @modelcontextprotocol/sdk patch
+├── turbo.json               # Turborepo pipeline config
+├── pnpm-workspace.yaml      # pnpm workspace definition
+└── tsconfig.json            # Root TypeScript project references
+```
 
 ---
 
-## 1. Project Overview
+## 2. Compilation and Build Pipeline
 
-Zenith-MCP is a Node.js Model Context Protocol (MCP) server that provides filesystem operations, code-aware editing, intelligent search, and cross-file refactoring. It supports two transports:
+All sources are written in TypeScript under `src/` in each package.
 
-- **stdio** — local MCP transport for desktop clients (Claude Desktop, VS Code)
-- **HTTP** — remote transport with Streamable HTTP + legacy SSE, bearer-token auth, and per-session isolation
-
-Key capabilities:
-- Multi-mode file reading (standard, grep, window, symbol-aware)
-- Surgical editing (content-match, block-replace, symbol-replace) with dry-run support
-- Intelligent search (ripgrep + inline BM25 ranking, symbol search, structural similarity)
-- Cross-file batch refactoring with impact analysis and rollback
-- Tree-sitter AST parsing for 20+ languages (lazy-loaded WASM grammars)
-- Per-project SQLite symbol indexing with version snapshots
-- Stash system for retrying failed edits/writes
-- Structured code compression via external `toon` bridge
+- **Build Output**: Compiled JavaScript outputs to `dist/` directories (gitignored).
+- **Grammars**: Tree-sitter WASM grammars reside in `packages/zenith-mcp/grammars/` (tracked source) and are copied to `packages/zenith-mcp/dist/grammars/` during the build process to enable runtime loading.
+- **Build Command**: `tsc && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js`
+- **Build Order**: zenith-toon → zenith-mcp (enforced via TypeScript project references and pnpm sequential build)
+- **TypeScript**: ES2022 target, NodeNext module resolution, strict mode with `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noUnusedLocals`, `noUnusedParameters`
 
 ---
 
-## 2. Entry Points
+## 3. Server Lifecycle & Execution Modes
 
-### `dist/cli/stdio.js`
+### 3.1 stdio Transport (Single-Tenant)
 
-The stdio entry point. Parses CLI arguments as baseline allowed directories, creates a single shared `FilesystemContext`, and connects over `StdioServerTransport`.
+- **Entry Point**: `packages/zenith-mcp/src/cli/stdio.ts` → `dist/cli/stdio.js`
+- **Binary**: `zenith-mcp`
+- Runs as a persistent subprocess spawned by the MCP client.
+- Allocates a single `FilesystemContext` initialized with allowed paths passed via command-line arguments.
+- Leverages the MCP Roots Protocol (if supported by the client) to dynamically update the set of allowed directories at runtime.
+- First-run wizard routes to stderr to keep stdout clean for JSON-RPC.
 
-```javascript
-const ctx = createFilesystemContext(allowedDirectories);
-const server = createFilesystemServer(ctx);
-attachRootsHandlers(server, ctx);
-await server.connect(new StdioServerTransport());
-```
+### 3.2 HTTP Transport (Multi-Tenant)
 
-- One process, one context, one server instance
-- If no CLI directories are provided, prints a usage warning but continues; the server will throw during MCP initialization if the client also doesn't support roots
-- Sets both the per-instance context dirs and the global `allowedDirectories` for backward compatibility
-
-### `dist/server/http.js`
-
-The HTTP entry point. Express app with session-per-client isolation.
-
-```javascript
-const baselineAllowedDirs = await resolveInitialAllowedDirectories(dirArgs);
-function createSessionPair() {
-    const ctx = createFilesystemContext([...baselineAllowedDirs]);
-    const server = createFilesystemServer(ctx);
-    attachRootsHandlers(server, ctx);
-    return { ctx, server };
-}
-```
+- **Entry Point**: `packages/zenith-mcp/src/server/http.ts` → `dist/server/http.js`
+- **Binary**: `zenith-mcp-http`
+- Runs as an **Express** HTTP server supporting Streamable HTTP and legacy SSE transports.
+- Employs Bearer Token authentication via `ZENITH_MCP_API_KEY` (fallbacks: `MCP_BRIDGE_API_KEY`, `COMMANDER_API_KEY`). Fatal exit if no key is set.
+- Maintains isolated `FilesystemContext` and `McpServer` instances per session token.
+- Automatically reaps inactive sessions via configurable `session_ttl_ms` (default: 30 minutes).
+- Session reaper interval: 60 seconds.
 
 **Endpoints:**
-- `POST /mcp` — Streamable HTTP messages
-- `GET /mcp` — Streamable HTTP SSE notification stream
-- `DELETE /mcp` — Session teardown
-- `GET /sse` — Legacy SSE transport
-- `POST /messages` — Legacy SSE message endpoint
-- `GET /health` — Health check
 
-**Session lifecycle:**
-- Each new client gets a fresh `{ ctx, server }` pair
-- Sessions are stored in a `Map` keyed by session ID
-- `session_ttl_ms` config setting (default 30 min) reaper closes idle sessions
-- Bearer token auth via `ZENITH_MCP_API_KEY` / `MCP_BRIDGE_API_KEY` / `COMMANDER_API_KEY`
-- Transport types are never mixed (streamable vs SSE sessions are checked on every request)
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/mcp` | Streamable HTTP (initialize + messages) |
+| `GET` | `/mcp` | Streamable HTTP SSE notification stream |
+| `DELETE` | `/mcp` | Session teardown |
+| `GET` | `/sse` | Legacy SSE transport |
+| `POST` | `/messages` | Legacy SSE message endpoint |
+| `GET` | `/health` | Health check (session count, baseline dirs, TTL) |
 
 ---
 
-## 3. High-Level Architecture
+## 4. Security & Path Sandboxing
 
-```
-Entry (stdio.js / http.js)
-    │
-    ├──► createFilesystemContext(initialDirs)
-    │       ├──► getAllowedDirectories()
-    │       ├──► setAllowedDirectories(dirs)
-    │       └──► validatePath(requestedPath)  ← security boundary
-    │
-    ├──► createFilesystemServer(ctx)
-    │       └──► registerAllTools(server, ctx)
-    │               ├──► read_text_file
-    │               ├──► read_media_file
-    │               ├──► read_multiple_files
-    │               ├──► write_file
-    │               ├──► edit_file
-    │               ├──► directory
-    │               ├──► search_files
-    │               ├──► file_manager
-    │               ├──► stashRestore
-    │               └──► refactor_batch
-    │
-    └──► attachRootsHandlers(server, ctx)
-            ├──► oninitialized → listRoots() → setAllowedDirectories()
-            └──► roots/list_changed → refresh dirs
+To prevent directory traversal and unauthorized filesystem modifications:
+
+1. All path arguments must pass through `FilesystemContext.validatePath()`.
+2. Paths are expanded (`~`), resolved to absolute coordinates, and normalized.
+3. Symlinks are resolved via `fs.realpathSync` and re-checked against allowed directories.
+4. If the path falls outside allowed boundaries, an access-denied error is thrown before any filesystem operation.
+5. New file creation uses the `wx` (exclusive) flag to prevent symlink exploitation.
+6. Search, indexing, and directory-traversal tools apply `isSensitive()` filtering to block credential-like files (`.env`, `*.pem`, `*.key`, `*credentials*`, `*secret*`, etc.) via configurable `minimatch` patterns.
+
+---
+
+## 5. Core Architectural Modules
+
+### 5.1 `core/server.ts` — Server Factory
+
+```typescript
+export function createFilesystemServer(ctx: FilesystemContext): McpServer
 ```
 
-### Module Map
+- Creates the `McpServer` instance with version read from `package.json` at runtime.
+- **`TOOL_REGISTRY`** constant: Array of `{ name, register }` — single source of truth for all 11 tools.
+- Config-driven tool enable/disable via `syncedConfig.tools[entry.name]`.
+- Loads adapter settings and configures adapter registry when enabled.
+- Retrieval code exists under `src/retrieval/`, but it is disabled by default and excluded from the main package compile.
+- Wires MCP Roots handlers via `attachRootsHandlers()`.
 
-| Module | Responsibility |
-|--------|----------------|
-| `core/server.js` | Orchestrator: creates `McpServer`, registers tools, wires roots protocol |
-| `core/lib.js` | Security & I/O: `FilesystemContext` factory, `validatePath`, file ops, diff utils |
-| `core/path-utils.js` | Cross-platform path normalization (WSL-aware, UNC-aware) |
-| `core/path-validation.js` | Linux-focused path normalization with caching, `isPathWithinAllowedDirectories` |
-| `core/roots-utils.js` | Parses MCP root URIs (`file://...`) to validated directory paths |
-| `core/shared.js` | Search engine: inline BM25, ripgrep wrappers, media streaming, sensitive file detection |
-| `core/tree-sitter.js` | Semantic parsing: WASM grammar loading, symbol extraction, syntax checking, structural fingerprinting |
-| `core/edit-engine.js` | Pure-function edit verification: content/block/symbol matching, batch application |
-| `core/symbol-index.js` | SQLite schema, file indexing, impact queries, version snapshots |
-| `core/project-context.js` | Project root resolution ladder (MCP roots → git → cwd → registry → global) |
-| `core/stash.js` | Stash persistence API (SQLite, per-project or global) |
-| `core/compression.js` | Compression budget math, `toon` bridge invocation |
-| `core/toon_bridge.js` | Child-process bridge to `python3 -m toon --structured` |
+### 5.2 `core/lib.ts` — Filesystem Access Layer
+
+- **`FilesystemContext` interface**: `getAllowedDirectories()`, `setAllowedDirectories()`, `validatePath()`, `validateNewFilePath()`
+- **`createFilesystemContext(initialAllowedDirectories)`**: Factory with symlink-safe, ancestor-aware path validation.
+- Atomic file writes: exclusive creation (`wx`) → temp-file + `rename()` fallback.
+- Diff utilities: `createUnifiedDiff()`, `createMinimalDiff()`.
+- File I/O: `readFileContent()`, `writeFileContent()`, `applyFileEdits()`, `tailFile()`, `headFile()`, `offsetReadFile()`.
+- Resume overlap detection via `findResumeOffset()`.
+
+### 5.3 `core/shared.ts` — Search & BM25 Infrastructure
+
+- **`BM25Index` class**: Full BM25 implementation with entropy-weighted IDF scoring and sigmoid TF saturation. Methods: `static tokenize(text)`, `build(docs)`, `search(query, topK)`.
+- `bm25RankResults()` — Rank lines by BM25 relevance within a character budget.
+- `bm25PreFilterFiles()` — Pre-filter files using BM25 on path + content snippets.
+- Ripgrep integration: `ripgrepSearch()` (JSON-mode with sensitive file filtering), `ripgrepFindFiles()`, `ripgrepCountMatches()`.
+- Config-driven: `getCharBudget()` (10K–2M, default 400K), `getSearchCharBudget()`, `getDefaultExcludes()`, `getSensitivePatterns()`.
+- `isSensitive(filePath)` — Multi-strategy sensitive file detection.
+
+### 5.4 `core/tree-sitter.ts` — Code Comprehension
+
+- Lazily loads `web-tree-sitter` WASM grammars on first access (40+ languages).
+- LRU-cached after first load for minimal startup penalty.
+- Exposes APIs for: symbol extraction, definition location, AST syntax error detection, structural fingerprints (3-gram node fingerprints for Jaccard similarity), and compression structure generation.
+- Powers: `edit_file` symbol mode, `search_file` symbol lookup, `search_files` symbol/structural/definition modes, `refactor_batch` symbol loading/outlier detection, post-edit syntax warnings, and structured compression anchors.
+
+### 5.5 `core/edit-engine.ts` — In-Memory Edit Engine
+
+Pure computation (no I/O). Applies edits in three modes:
+
+- **content mode**: `oldContent`/`newContent` with three-strategy matching: exact → trim-trailing-whitespace → indent-stripped within ±50-line window.
+- **block mode**: `block_start`/`block_end` boundary matching with disambiguation.
+- **symbol mode**: Tree-sitter `findSymbol()` lookup with `nearLine` disambiguation.
+
+All edits in a file bundle succeed or fail atomically. Post-edit syntax error detection via `syntaxWarn()`.
+
+### 5.6 `core/symbol-index.ts` — Symbol DB & Call Graph
+
+- Manages per-repository SQLite databases at `.mcp/symbols.db` (auto-gitignored).
+- **Tables**: `files`, `symbols`, `edges`, `versions`, `patterns`.
+- Indexes definition scopes, container boundaries, and edge dependencies.
+- **Impact queries**: Forward/reverse call-graph traversal with configurable depth and disambiguation.
+- **Version snapshots**: Auto-snapshots symbol bodies on edit with MD5 dedup, configurable TTL, point-in-time rollback.
+- Batch indexing (50 files per batch) with hash-based staleness detection.
+
+### 5.7 `core/db-adapter.ts` — SQLite Abstraction Layer
+
+- Uses **Node.js native `node:sqlite`** (`DatabaseSync`), NOT `better-sqlite3`.
+- Pure functional adapter pattern — all functions take `DbConnection` as first parameter.
+- Prepared statement cache (`Map<string, StatementSync>`) and nested transaction support via SAVEPOINTs.
+- Connection settings: WAL mode, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
+- **Schema modules**: `initSymbolSchema()`, `initGlobalSchema()`, `initStashSchema()`, `initBackupSchema()`.
+
+### 5.8 `core/project-context.ts` — Project Root Resolution
+
+`ProjectContext` determines where project-scoped state (`.mcp/symbols.db`) lives via a resolution ladder:
+
+1. Git repo detection (from file path or cwd)
+2. MCP roots / allowed directories
+3. Project markers (`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, etc.)
+4. Explicit project registry
+5. Global fallback at `~/.zenith-mcp/`
+
+**Important**: Project root resolution never expands filesystem permissions. Only `allowedDirectories` control access.
+
+Global SQLite DB at `~/.zenith-mcp/global-stash.db` for persisting project roots.
+
+### 5.9 `core/project-registry.ts` — Project Manifest Registry
+
+`ProjectRegistry` class with triple-indexed lookup (`_byId`, `_byName`, `_byPath`) and multi-strategy matching:
+
+1. Exact project_id (case-insensitive)
+2. Exact project_name (case-insensitive)
+3. Leading path-segment match
+4. Exact normalized path match
+5. Longest path-prefix match
+
+### 5.10 `core/stash.ts` — Stash Management
+
+Stores pending or failed write/edit actions in SQLite for recovery/retry via the `stashRestore` tool.
+
+- `stashEntry()`, `getStashEntry()`, `consumeAttempt()` (auto-delete after 2 attempts), `clearStash()`, `listStash()`.
+- Convenience: `stashEdits()` (failed edits), `stashWrite()` (failed writes).
+
+### 5.11 `core/compression.ts` — Subprocess Bridge
+
+- `computeCompressionBudget(rawLength, maxChars, keepRatio)` — Budget calculation (default keep ratio: 0.70).
+- `isCompressionUseful()` — Type guard validating compression actually shrinks and fits budget.
+- `runToonBridge()` — Spawns `toon_bridge_cli.js` in a subprocess with 30-second timeout for isolation.
+- `compressTextFile()` — Full compression pipeline orchestrator.
+- `truncateToBudget()` — Line-aware fallback truncation.
+
+### 5.12 `core/toon_bridge.ts` — In-Process TOON Compression
+
+- `compressToon(content, budget, filePath?)` — Main entry point:
+  1. Short-circuit if content ≤ budget.
+  2. Try tree-sitter `getCompressionStructure()` for structural blocks.
+  3. If structure available: `compressSourceStructured()` (from zenith-toon).
+  4. Else: `compressString()` (from zenith-toon).
+- Back-compat CLI shim for subprocess invocation.
 
 ---
 
-## 4. Security Model
+## 6. Tool Schema Deep Dive
 
-### Allowed Directories (The Sandbox)
+### 6.1 `read_file`
 
-All filesystem operations MUST go through `ctx.validatePath(requestedPath)` before any `fs` call.
+Flat parameter schema (no mode enum):
 
-**Validation flow:**
-1. Expand `~` to home directory
-2. Resolve to absolute path (relative to `process.cwd()` if not absolute)
-3. Normalize
-4. Check if the requested path is within `_allowedDirectories`
-5. Call `fs.realpath()` to resolve symlinks
-6. Re-check if the real path (and its parent, if the file doesn't exist) is still within allowed directories
-7. Return the real path
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `path` | string | required | File path |
+| `maxChars` | number | 50000 (max 400000) | Character budget |
+| `head` | number | — | First N lines |
+| `tail` | number | — | Last N lines |
+| `offset` | number | — | Start line (0-based) |
+| `aroundLine` | number | — | Center window on this line |
+| `context` | number | 30 | Window radius |
+| `ranges` | `{startLine, endLine}[]` | — | Explicit line ranges |
+| `showLineNumbers` | boolean | — | Show line numbers |
+| `compression` | boolean | — | Enable TOON compression |
 
-**Critical:** If `validatePath()` fails, the operation throws **before** any `fs` call.
+Merges overlapping/adjacent windows. Truncates at the final newline within budget.
 
-### Sensitive File Blocking
+### 6.2 `read_media_file`
 
-`isSensitive(filePath)` in `shared.js` blocks credentials files using `minimatch` globs:
-- Default patterns: `.env`, `*.pem`, `*.key`, `*.crt`, `*credentials*`, `*secret*`, `docker-compose.yaml/yml`, `.config/**`
-- Checked by search tools, tree-sitter indexing, and file discovery
-- **Not** checked by direct read/write tools (the path sandbox is the primary defense)
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | string | Media file path |
 
-### Exclusive Writes
+Supported: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.svg`, `.mp3`, `.wav`, `.ogg`, `.flac`.
 
-`writeFileContent()` in `lib.js` uses the `wx` flag for new files. If the file already exists, it falls back to a temp-file + atomic `fs.rename()` pattern. This prevents symlink-based attacks where an attacker pre-creates a symlink at the target path.
+### 6.3 `read_multiple_files`
 
-### Per-Session Isolation (HTTP)
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `paths` | string[] | required | Up to 50 files |
+| `maxCharsPerFile` | number | — | Per-file budget |
+| `compression` | boolean | true | Enable compression |
+| `showLineNumbers` | boolean | false | Show line numbers |
 
-Each HTTP session gets its own `FilesystemContext` copy. MCP roots negotiations for one session do not affect another. Session reaping prevents unbounded memory growth.
+Allocates budget proportionally by file size. Concurrent reads (concurrency limit: 8). Failed reads don't stop the operation.
 
----
+### 6.4 `write_file`
 
-## 5. Core Modules Deep Dive
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `path` | string | required | File path |
+| `content` | string | required | File content |
+| `failIfExists` | boolean | — | Fail if file exists |
+| `append` | boolean | — | Append mode with overlap detection |
 
-### 5.1 `core/lib.js` — Filesystem Context & I/O
+Auto-creates parent directories. Atomic writes via temp-file + rename. Stashes content on write failure.
 
-**`createFilesystemContext(initialAllowedDirectories)`**
+### 6.5 `edit_file`
 
-Factory that returns a per-instance context object:
-```javascript
-{
-  getAllowedDirectories(),
-  setAllowedDirectories(dirs),
-  validatePath(requestedPath)
-}
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | string | File path |
+| `edits[]` | array | Edit operations (see modes below) |
+| `dryRun` | boolean | Preview without writing |
 
-HTTP mode creates one context per session. stdio mode creates one global context. The global `validatePath()` function still exists for backward compatibility but delegates to global `allowedDirectories`.
+**Edit Modes:**
 
-**I/O utilities:**
-- `formatSize(bytes)` — human-readable sizes (B, KB, MB, GB, TB)
-- `normalizeLineEndings(text)` — converts `\r\n` → `\n`
-- `createUnifiedDiff(original, modified, filepath)` / `createMinimalDiff(...)` — diff generation
-- `getFileStats(filePath)` — returns `{ size, created, modified, accessed, isDirectory, isFile, permissions }`
-- `readFileContent(filePath, encoding)` — simple read
-- `writeFileContent(filePath, content)` — exclusive write with temp-file fallback
-- `applyFileEdits(filePath, edits, dryRun)` — legacy full-file edit application (content-match + indent-stripped match)
-- `countOccurrences(text, search)` — substring count
-- `tailFile(filePath, numLines)` / `headFile(filePath, numLines)` — efficient chunked reads
-- `offsetReadFile(filePath, offset, length)` — line-based offset read
-- `searchFilesWithValidation(rootPath, pattern, allowedDirectories, options)` — JS glob search with exclude patterns
+- **`content`**: `oldContent` / `newContent` — exact text replacement with 3-strategy matching
+- **`block`**: `block_start` / `block_end` / `replacement_block` — boundary-delimited replacement
+- **`symbol`**: `symbol` / `newText` / `nearLine` (optional) — AST-aware symbol replacement
 
-### 5.2 `core/path-utils.js` & `core/path-validation.js`
+All-or-nothing: if any edit fails, zero edits are written. Failed edits are stashed.
 
-**`path-utils.js`** — Cross-platform normalization:
-- Preserves WSL paths (`/mnt/c/...`)
-- Converts Unix-style Windows paths (`/c/...`) only on Windows
-- Handles UNC paths (`\\server\share`)
-- Normalizes double slashes, trailing slashes
+### 6.6 `directory`
 
-**`path-validation.js`** — Linux-focused normalization with LRU cache (1000 entries):
-- Strips quotes, expands `~`, rejects null bytes
-- Uses Node's `path.normalize()`
-- `isPathWithinAllowedDirectories(filePath, allowedDirectories)` — checks if resolved path starts with any allowed dir + `/`
+Discriminated union on `mode`:
 
-### 5.3 `core/shared.js` — Search Engine
+- **`list`**: `path`, `depth` (default 1, max 10), `includeSizes`, `sortBy` (`"name"` | `"size"`)
+- **`tree`**: `path`, `excludePatterns`, `showSymbols`, `showSymbolNames`
 
-**BM25 Index (`BM25Index` class)**
+`list` caps at 250 items per level. `tree` caps at 500 nodes with optional tree-sitter symbol statistics.
 
-Inline zero-dependency BM25 implementation (~120 lines):
-- **Tokenizer:** `/[a-z0-9_]+/g`, filters to length > 1 (or `a`/`i`)
-- **IDF:** Lucene-variant (always non-negative): `log((N - df + 0.5) / (df + 0.5) + 1)`
-- **Entropy weighting:** Per-term normalized entropy `[0, 1]`. High-entropy terms (evenly distributed) are downweighted; low-entropy terms (concentrated in few docs) are boosted.
-- **Sigmoid TF saturation:** `tfComponent = 1 / (1 + exp(-k1 * (tf - K/2) / K))` instead of raw BM25 TF
-- **Scoring:** TAAT (term-at-a-time) posting list traversal, scores normalized to `[0, 1]`
+### 6.7 `search_files`
 
-**Pre-filter mode:** `bm25PreFilterFiles(rootPath, query, topK, excludePatterns)`
-- Builds a BM25 corpus from file paths (boosted 3×) + first 8KB of text files
-- Indexes only known text extensions (60+ extensions hardcoded)
-- Respects `.gitignore` via ripgrep when available; JS manual walk fallback
-- Caps at 5000 files, 512KB per file
-- `search_files` calls with topK=100; function default is 50
+Discriminated union on `mode`:
 
-**Post-filter mode:** `bm25RankResults(lines, query, charBudget)`
-- Ranks raw result lines by BM25 relevance
-- Accumulates within `char_budget` config setting (default 400k)
+| Mode | Key Parameters | Description |
+|------|---------------|-------------|
+| `content` | `path`, `contentQuery`, `pattern`, `contextLines`, `literalSearch`, `countOnly`, `maxResults` | BM25 pre-filter + ripgrep + BM25 post-rank |
+| `files` | `path`, `pattern`, `namePattern`, `pathContains`, `extensions`, `maxResults` | File discovery |
+| `symbol` | `path`, `symbolQuery`, `symbolKind` | Symbol search via tree-sitter |
+| `structural` | `path`, `structuralQuery` | AST Jaccard similarity matching |
+| `definition` | `path`, `definesSymbol`, `namePattern`, `pathContains`, `extensions`, `maxResults` | Definition lookup via AST queries |
 
-**Ripgrep integration:**
-- `ripgrepAvailable()` — checks `/usr/bin/rg` for executable access
-- `ripgrepSearch(rootPath, options)` — JSON output parsing, returns `{ file, line, content }[]`
-- `ripgrepFindFiles(rootPath, options)` — `--files` mode with glob filtering
-- Both respect `.gitignore`, `.ignore`, `.rgignore` automatically
-- 30-second spawn timeout
-- JS fallback for when ripgrep is unavailable
+### 6.8 `search_file`
 
-**Media:** `readFileAsBase64Stream(filePath)` — streams file to base64.
+Single-file search with `grep` or `symbol` mode:
 
-### 5.4 `core/tree-sitter.js` — Semantic Parsing
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | string | Target file |
+| `grep` | string | Regex pattern (with `grepContext` lines) |
+| `symbol` | string | Symbol name lookup |
+| `nearLine` | number | Disambiguation hint |
+| `expandLines` | number | Surrounding context |
+| `maxChars` | number | Output budget |
 
-**Language support:** 20+ languages via `EXT_TO_LANG` mapping (JS, TS, TSX, Python, Bash, Go, Rust, Java, C, C++, C#, Kotlin, PHP, Ruby, Swift, CSS, JSON, YAML, SQL, Markdown).
+### 6.9 `file_manager`
 
-**Lazy loading architecture:**
-- `Parser.init()` — called once, loads `tree-sitter.wasm`
-- `loadLanguage(langName)` — loads `tree-sitter-{lang}.wasm`, cached permanently in `_languageCache`
-- `loadQueryString(langName)` — loads `{lang}-tags.scm`, cached permanently
-- `getCompiledQuery(langName)` — compiles `Query` object, cached permanently
+Discriminated union on `mode`:
 
-**Symbol cache:** Parsed symbols are cached by MD5 hash of `langName + source` in an LRU cache (100 entries).
+| Mode | Parameters | Description |
+|------|-----------|-------------|
+| `mkdir` | `path` | Create directory |
+| `delete` | `path` | Delete file (file-only) |
+| `move` | `source`, `destination` | Move/rename |
+| `info` | `path` | File metadata |
 
-**Core APIs:**
-- `getSymbols(source, langName, options)` — returns `{ name, kind, type, line, endLine, column }[]`
-  - Uses `query.matches()` to pair `@name.definition.*` captures with `@definition.*` body captures
-  - `kindFilter`: `'def'` or `'ref'`
-  - `typeFilter`: `'function'`, `'class'`, `'method'`, etc.
-  - `nameFilter`: substring match on symbol name
-- `getDefinitions(source, langName, options)` — convenience wrapper with `kindFilter: 'def'`
-- `findSymbol(source, langName, symbolName, options)` — finds specific symbol by name
-  - Supports dot-qualified names: `AuthService.login`
-  - Walks parent containment for qualified names
-  - Sorts by proximity to `nearLine` if multiple matches
-- `getSymbolSummary(source, langName)` / `getSymbolSummaryString(...)` — counts by type, formatted compactly
-- `getFileSymbols(filePath, options)` / `getFileSymbolSummary(filePath)` — file-to-symbols pipeline
-- `checkSyntaxErrors(source, langName)` — walks AST for `ERROR` and missing nodes, returns `{ line, column }[]`
-- `getStructuralFingerprint(source, langName, startLine, endLine)` — returns AST node types in range (for structural similarity)
-- `computeStructuralSimilarity(fpA, fpB)` — Jaccard similarity of 3-grams over fingerprints
-- `getSymbolStructure(source, langName, startLine, endLine)` — extracts params, return type, parent kind, decorators, modifiers
-- `getCompressionStructure(source, langName)` — extracts definition blocks with control-flow anchors (for `toon` compression)
+### 6.10 `stashRestore`
 
-### 5.5 `core/edit-engine.js` — Edit Verification
+Discriminated union on `mode`:
 
-Pure-function edit application. No I/O.
+| Mode | Parameters | Description |
+|------|-----------|-------------|
+| `apply` | `stashId`, `corrections`, `newPath`, `dryRun` | Retry stashed edits/writes |
+| `restore` | `stashId` | Clear a stash entry by ID |
+| `list` | `type` | List stash entries |
+| `read` | `stashId` | Read stash entry details |
 
-**`findMatch(content, oldText, nearLine)`**
+### 6.11 `refactor_batch`
 
-Three matching strategies (tried in order):
-1. **Exact match** — `content.includes(normalizedOld)`
-2. **Trimmed trailing whitespace match** — compares lines with `trimEnd()`, then maps index back to original
-3. **Indentation-stripped match** — compares `trim()`'d lines within a ±50 line window of `nearLine`. Re-indents `newText` to match the file's indentation.
+Discriminated union on `mode`:
 
-**`applyEditList(content, edits, options)`**
-
-Processes edits sequentially against an in-memory string:
-- `mode: 'content'` — uses `findMatch()` for `oldContent` → `newContent`
-- `mode: 'block'` — finds all pairs of lines matching `block_start` and `block_end`, disambiguates with `disambiguations` map if multiple candidates
-- `mode: 'symbol'` — uses `findSymbol()` to locate symbol bounds, replaces with `newText`
-
-Returns `{ workingContent, errors, pendingSnapshots }`.
-- `errors` is an array of `{ i, msg }` for failed edits
-- `pendingSnapshots` is an array of `{ symbol, originalText, line, filePath }` for symbol-mode edits
-- If any edit fails, **none** are applied to the file (the caller handles this)
-
-**`syntaxWarn(filePath, content)`**
-- Runs `checkSyntaxErrors()` on the modified content
-- Returns a minimal warning string (`⚠ Parse errors at lines ...`) or empty string
-
-### 5.6 `core/symbol-index.js` — Symbol Database
-
-**`findRepoRoot(filePath)`**
-- Runs `git rev-parse --show-toplevel` with 5s timeout
-- Returns `null` if not in a git repo
-
-**`getDb(repoRoot)`**
-- Creates `.mcp/symbols.db` in the repo root
-- Auto-creates `.mcp/.gitignore` with `*` to prevent committing the DB
-- WAL mode, normal sync, 5s busy timeout, foreign keys ON
-- Schema:
-  - `files(path PRIMARY KEY, hash, last_indexed)`
-  - `symbols(id, name, kind, type, file_path, line, end_line, column)`
-  - `edges(id, container_def_id, referenced_name)` — which def references which name
-  - `versions(id, symbol_name, file_path, original_text, session_id, created_at, line, text_hash)` — version snapshots
-  - `patterns(id, name UNIQUE, edit_body, symbol_kind, created_at)`
-- Indexes: `symbols(name)`, `symbols(file_path)`, `symbols(kind, name)`, `edges(referenced_name)`, `edges(container_def_id)`, `versions(session_id)`, `versions(symbol_name, file_path, text_hash, session_id)` (dedup)
-- Schema migrations handled with `try/catch` on `ALTER TABLE`
-- Prunes old versions on open (default TTL: 24h, configured via `refactor_version_ttl_hours` in config)
-
-**`indexFile(db, repoRoot, absFilePath)`**
-- Reads file, checks hash against `files` table
-- If changed (or new), parses symbols via `getSymbols()`, separates defs/refs
-- Transaction: delete old symbols → insert file → insert defs → insert refs → compute containment edges (innermost def for each ref)
-
-**`indexDirectory(db, repoRoot, dirPath, opts)`**
-- Walks directory, skips `DEFAULT_EXCLUDES`
-- Batch-indexes in groups of 50
-
-**`ensureIndexFresh(db, repoRoot, absFilePaths)`**
-- Re-indexes only files whose hashes have changed
-
-**`impactQuery(db, symbolName, opts)`**
-- `direction: 'forward'` — who calls `symbolName`? (callers)
-- `direction: 'reverse'` — what does `symbolName` call? (callees)
-- `depth` — transitive levels (default 1, max 5)
-- `file` — disambiguates when multiple files define the same symbol
-- Returns `{ results, total }` or `{ disambiguate: true, definitions: [...] }`
-
-**Version management:**
-- `snapshotSymbol(db, symbolName, filePath, originalText, sessionId, line)` — saves current text
-- `getVersionHistory(db, symbolName, sessionId, filePath)` — lists snapshots
-- `getVersionText(db, versionId)` — retrieve text
-- `restoreVersion(db, symbolName, versionId, sessionId, currentText)` — validates ownership, returns original text
-
-### 5.7 `core/project-context.js` — Project Root Resolution
-
-Singleton `ProjectContext` class. The single authority on "what project am I in?"
-
-**Resolution ladder (`_resolve()`):**
-1. MCP roots from client → git repo detection from each root
-2. Git repo detection from `process.cwd()`
-3. Manually registered project roots (`project_roots` table in `~/.zenith-mcp/global-stash.db`)
-4. Global fallback (`~/.zenith-mcp/`)
-
-**API:**
-- `getRoot(filePath)` — main entry point; auto-promotes first-touched repo as bound root
-- `getStashDb(filePath)` — returns `{ db, root, isGlobal }`
-- `initProject(rootPath, name)` — manually registers a non-git directory as a project root (sticky, persists to global DB)
-- `listRegisteredProjects()` — lists manually registered roots
-- `refresh()` — force re-resolution (called on roots change)
-
-**Storage:** `~/.zenith-mcp/global-stash.db` with `project_roots(root_path PRIMARY KEY, name, created_at)`.
-
-### 5.8 `core/stash.js` — Stash Persistence
-
-All stash operations go through `ProjectContext` for DB resolution.
-
-**`stashEntry(ctx, type, filePath, payload)`**
-- Inserts into `stash(id, type, file_path, payload, attempts, created_at)`
-- Returns `lastInsertRowid` as stash ID
-
-**`getStashEntry(ctx, id, filePath)`** — retrieves and parses JSON payload.
-**`consumeAttempt(ctx, id, filePath)`** — increments attempts, deletes if > 2. Returns `false` if max retries exceeded.
-**`clearStash(ctx, id, filePath)`** — deletes entry.
-**`listStash(ctx, filePath)`** — lists all entries.
-
-Convenience wrappers:
-- `stashEdits(ctx, filePath, edits, failedIndices)` — type `'edit'`
-- `stashWrite(ctx, filePath, content, mode)` — type `'write'`
-
-### 5.9 `core/compression.js` & `core/toon_bridge.js`
-
-**`compressTextFile(validPath, rawText, maxChars, keepRatio)`**
-- Computes target budget: `min(maxChars, rawLength * keepRatio)` (default keepRatio 0.70)
-- Calls `runToonBridge(validPath, targetBudget)`
-- Returns `{ text, targetBudget, rawLength, compressedLength }` or `null` if compression isn't useful
-
-**`runToonBridge(validPath, budget)`**
-- Spawns: `node toon_bridge.js <filepath> <budget>`
-- `toon_bridge.js` reads file, calls `getCompressionStructure()`, then hands off to `python3 -m toon --structured`
-- 30-second timeout
-- Falls back to returning `null` on any error
+| Mode | Key Parameters | Description |
+|------|---------------|-------------|
+| `query` | `target`, `fileScope`, `direction`, `depth` | Symbol graph traversal (callers/callees) |
+| `loadDiff` | `selection`, `contextLines`, `loadMore` | Load symbol bodies + outlier detection |
+| `apply` | `payload`, `dryRun` | Multi-file atomic edits with syntax gates |
+| `reapply` | `symbolGroup`, `newTargets`, `ack`, `dryRun` | Apply cached pattern to new targets |
+| `restore` | `symbol`, `file`, `version`, `dryRun` | Rollback to a version snapshot |
+| `history` | `symbol`, `file` | View symbol version history |
 
 ---
 
-## 6. Tools Deep Dive
+## 7. Client Configuration & Adapters
 
-### `read_text_file`
+### Adapter System
 
-**Schema:** discriminated union on `mode`
+Adapters in `src/adapters/platforms/` auto-configure external MCP clients to register Zenith. The system supports multiple popular MCP clients (Claude Desktop, Cursor, VS Code, Windsurf, Cline, JetBrains, etc.).
 
-- **`standard`** — `path`, `maxChars` (default 50000, up to 400k), `head`, `tail`, `offset`, `showLineNumbers`, `compression`
-  - If `compression` is true, attempts `compressTextFile()` first; falls back to truncation
-  - `tail` uses efficient backward chunk reading
-  - `head` uses forward chunk reading
-  - `offset` + `head` uses line-based streaming
-  - Smart truncation: truncates at last newline before budget, adds `[truncated offset=N]` meta header
+| Component | Path | Purpose |
+|-----------|------|---------|
+| `base.ts` | `adapters/` | `MCPConfigAdapter` abstract base class |
+| `platforms/` | `adapters/` | Per-client adapter implementations |
+| `registry.ts` | `adapters/` | Registry with `configureRegistry()`, `getAdapter()`, `listAdapters()` |
+| `helpers/` | `adapters/` | JSON5, TOML, YAML parsing and output format helpers |
 
-- **`grep`** — `path`, `maxChars`, `grep` (regex), `grepContext` (default 0, max 30), `showLineNumbers`
-  - Streaming read with `readline` interface
-  - Maintains before/after context buffers
-  - Emits `---` separators between disjoint match groups
-  - Always prefixes line numbers
-
-- **`window`** — `path`, `maxChars`, `aroundLine`, `context` (default 30), `ranges[]`, `showLineNumbers`
-  - Merges overlapping windows before reading
-  - Streaming read, collects only lines within merged windows
-  - Emits `---` separators between windows
-
-- **`symbol`** — `path`, `maxChars`, `symbol` (dot-qualified supported), `nearLine`, `expandLines` (default 0, max 50)
-  - Uses `findSymbol()` with `kindFilter: 'def'`
-  - Returns symbol body plus `expandLines` context on each side
-  - Always prefixes line numbers
-
-### `read_media_file`
-
-`path` only. Streams file as base64. MIME type from extension lookup table.
-Returns `{ type: 'image'|'audio'|'blob', data: base64, mimeType }`.
-
-### `read_multiple_files`
-
-`paths` (1–50), `maxCharsPerFile`, `compression` (default true), `showLineNumbers`.
-
-**Budget algorithm:**
-- Total budget = `CHAR_BUDGET - (fileCount * 200)`
-- If no `maxCharsPerFile`: sorts files by size, allocates budget proportionally (larger files get more share, but capped)
-- Reads in parallel with concurrency limit of 8
-- Attempts compression per file; falls back to raw read with byte limit = `budget * 4`
-- Final output truncated to `CHAR_BUDGET` if still over
-
-### `write_file`
-
-`path`, `content`, `failIfExists` (default false), `append` (default false).
-
-- Normalizes line endings to `\n`
-- Auto-creates parent directories
-- If `append` and file exists: smart overlap detection
-  - Compares last 500 lines of existing file against incoming content
-  - Finds longest matching tail overlap
-  - Appends only non-overlapping portion
-- Atomic write: temp file → `fs.rename()`
-- Write verification: compares temp file size to expected byte length
-- On failure: stashes content and returns `stash:<id>`
-
-### `edit_file`
-
-`path`, `edits[]`, `dryRun` (default false).
-
-**Edit schema:** discriminated union on `mode`
-- `content`: `oldContent`, `newContent`
-- `block`: `block_start`, `block_end`, `replacement_block`
-- `symbol`: `symbol`, `newText`, `nearLine`
-
-**Flow:**
-1. Read file, normalize line endings
-2. `applyEditList()` in memory
-3. If errors: stash failed edits, return `stash:<id>` + failure messages
-4. If dryRun: return minimal diff via `createMinimalDiff()`
-5. Atomic write via temp file
-6. Snapshot symbol versions to SQLite (best-effort, never fails the edit)
-7. Run `syntaxWarn()` on result
-8. Return `Applied.` + optional parse warning
-
-### `directory`
-
-**Schema:** discriminated union on `mode`
-
-- **`list`** — `path`, `depth` (default 1, max 10), `includeSizes`, `sortBy` (`name`|`size`)
-  - Recursively lists directory contents
-  - Directories formatted with trailing `/`
-  - 250-entry cap per directory level
-  - Truncation indicator: `[truncated]`
-  - On `fs.readdir` error: returns `[DENIED] <name>`
-  - Size sorting requires `includeSizes`
-
-- **`tree`** — `path`, `excludePatterns`, `showSymbols`, `showSymbolNames`
-  - Recursive tree with 2-space indentation
-  - 500-entry total cap
-  - Respects `DEFAULT_EXCLUDES` + user `excludePatterns`
-  - Symbol metadata fetched via `getFileSymbolSummary()` / `getFileSymbols()`
-  - Control characters escaped in output
-
-- **`roots`** — no parameters
-  - Returns `ctx.getAllowedDirectories().join('\n')`
-
-### `search_files`
-
-**Schema:** discriminated union on `mode`
-
-- **`content`** — `path`, `contentQuery`, `pattern`, `contextLines` (default 0), `literalSearch`, `countOnly`, `includeHidden`, `maxResults` (default 50)
-  - Always case-insensitive
-  - If ripgrep available: attempts BM25 pre-filter (top 100 files) → ripgrep on filtered set
-  - If pre-filter fails or query ≤ 2 chars: falls back to full ripgrep
-  - If ripgrep unavailable: JS fallback with regex search
-  - Post-filter: BM25 ranks results if > 50 lines, otherwise simple budget truncation
-  - `search_char_budget` config setting defaults to 15k
-
-- **`files`** — `path`, `pattern`, `namePattern`, `pathContains`, `extensions`, `includeMetadata`, `includeHidden`, `maxResults`
-  - ripgrep `--files` when available, JS walk fallback
-  - `includeMetadata` adds `(sizeKB, YYYY-MM-DD)` suffix
-
-- **`symbol`** — `path`, `symbolQuery` (optional), `symbolKind`, `pattern`, `maxResults`
-  - If `symbolQuery` omitted: lists all symbols (old `list_symbols` behavior)
-  - Scans supported files, parses definitions via `getDefinitions()`
-  - Returns: `relPath:line [type] name (lines start-end)`
-
-- **`structural`** — `path`, `structuralQuery`, `symbolKind`, `maxResults`
-  - Requires git repo (for symbol index)
-  - Builds structural fingerprint of query symbol via `getStructuralFingerprint()`
-  - Compares to all candidates via `computeStructuralSimilarity()`
-  - Returns matches with ≥ 0.5 similarity score
-
-- **`definition`** — `path`, `definesSymbol`, `namePattern`, `pathContains`, `extensions`, `maxResults`
-  - Finds files defining a specific symbol name
-  - Supports dot-qualified names (e.g., `AuthService.login`)
-  - Uses tree-sitter definition parsing, not text search
-
-### `search_file`
-
-Single-file search — grep or symbol lookup within one file. Read-only.
-
-**Schema:** `path` (required), plus one of `grep` or `symbol`.
-
-- **Grep mode** — `grep` (regex, case-insensitive), `grepContext` (default 0, max 30), `maxChars`, `nearLine`
-  - Streaming `readline`-based scan with before/after context buffers
-  - Emits `---` separators between disjoint match groups
-  - Lines prefixed with `lineNum:*` for matches, `lineNum:` for context
-
-- **Symbol mode** — `symbol` (dot-qualified), `nearLine`, `expandLines` (default 0, max 50), `maxChars`
-  - Uses `findSymbol()` with `kindFilter: 'def'`
-  - Returns symbol body plus `expandLines` context on each side
-  - Always prefixes line numbers
-
-### `file_manager`
-
-**Schema:** discriminated union on `mode`
-
-- `mkdir` — `path`: recursive directory creation
-- `delete` — `path`: file deletion only (throws if directory)
-- `move` — `source`, `destination`: `fs.rename()`
-- `info` — `path`: returns metadata via `getFileStats()`
-
-### `stashRestore`
-
-**Schema:** discriminated union on `mode`
-
-- **`apply`** — `stashId`, `corrections[]` (`{ index, startLine, nearLine }`), `newPath`, `dryRun`
-  - Retrieves stashed edit or write
-  - For edits: re-runs `applyEditList()` with disambiguations, writes atomically, clears stash
-  - For writes: writes stashed content (with append overlap logic if mode was append), clears stash
-  - Max 2 attempts; stash deleted on exceeded
-
-- **`restore`** — `stashId`, `symbol`, `version`, `file`, `dryRun`
-  - Symbol version restore: reads version history, replaces symbol body via tree-sitter, snapshots current text first
-  - Stash entry rollback: clears stash entry by ID
-
-- **`list`** — `type` (`'edit'` | `'write'`, optional)
-  - Lists stash entries with attempt count
-
-- **`read`** — `stashId`
-  - Shows stash entry contents (edit modes + status, or write preview)
-
-- **`init`** — `projectRoot`, `projectName`
-  - Registers non-git directory as project root in global DB
-
-- **`history`** — `symbol`, `file`
-  - Lists version snapshots for a symbol from SQLite
-
-### `refactor_batch`
-
-**Schema:** discriminated union on `mode`
-
-- **`query`** — `target`, `fileScope`, `direction` (`forward`|`reverse`), `depth` (1–5)
-  - Resolves project root, ensures symbol index exists
-  - Runs `impactQuery()` on the symbol index
-  - Caches results in `_loadCache` keyed by `${repoRoot}::${sessionId}`
-  - Returns indexed list of callers or callees
-
-- **`load`** — `selection[]` (index numbers or `{ symbol, file }`), `contextLines`, `loadMore`
-  - Loads symbol bodies plus surrounding context
-  - Fetches occurrences via `findSymbol()`
-  - **Outlier detection:** computes `getSymbolStructure()` for each occurrence, finds modal structure, flags deviations (param shape, return type, parent scope, decorators, modifiers)
-  - Emits blocks with headers: `symbol [index] relPath` (or `⚠ reason` if flagged)
-  - Char budget: `refactor_max_chars` config setting (default 30k)
-  - Supports pagination via `loadMore`
-  - Caches occurrences in `_loadCache`
-
-- **`apply`** — `payload` (diff string with symbol headers), `dryRun`
-  - Parses payload into groups: `symbol indices ack:ackList` + body
-  - Gates:
-    1. All symbols must exist in loaded cache
-    2. Flagged outliers must be acknowledged (`ack` list)
-    3. Char budget check
-    4. Syntax check via `checkSyntaxErrors()`
-  - Builds per-file edit bundles
-  - Per-file atomic: if any edit in a file fails, that file is skipped entirely
-  - Successful files written atomically, symbol versions snapshotted, index refreshed
-  - Successful payloads cached in `_payloadCache` for `reapply`
-  - Retry state: 2 attempts per symbol group, then locked ("Use edit_file directly")
-
-- **`reapply`** — `symbolGroup`, `newTargets[]`, `dryRun`
-  - Retrieves cached payload from `_payloadCache`
-  - Resolves new targets via symbol index or explicit file hints
-  - Re-runs outlier detection, syntax gate, char budget
-  - Applies to new targets with same per-file atomic semantics
+- Adapters back up before modifying configuration files.
+- Auto-configuration is controlled in `~/.zenith-mcp/config` under `### Auto Write`.
+- A first-run interactive wizard runs on server initialization if no configuration exists.
 
 ---
 
-## 7. Adapter System
+## 8. Configuration File Schema
 
-Zenith-MCP ships auto-configuration adapters for 16 MCP client platforms. These adapters read/write the client's native config file to register Zenith as an MCP server.
+Settings are saved in `~/.zenith-mcp/config` in a plain-text structure:
 
-**Base class:** `src/adapters/base.ts` — `MCPConfigAdapter`
-- Abstract methods: `configPath()`, `readConfig()`, `writeConfig()`, `registerServer()`, `discoverServers()`
-- Properties: `toolName`, `displayName`, `configFormat` (`json`|`toml`|`yaml`|`json5`), `supportedPlatforms`
-- Backup: `backup()` creates a `.bak` copy before any write
-
-**Platform adapters:** `src/adapters/platforms/`
-- `claude-desktop.ts`, `opencode.ts`, `cline.ts`, `codex-cli.ts`, `codex-desktop.ts`, `continue-dev.ts`, `gemini-cli.ts`, `github-copilot.ts`, `gptme.ts`, `jetbrains.ts`, `openclaw.ts`, `raycast.ts`, `roo-code.ts`, `warp.ts`, `zed.ts`, `antigravity.ts`
-- Each exports an `adapter` singleton
-
-**Registry:** `src/adapters/registry.ts` — `AdapterRegistry`
-- Singleton with `configureRegistry(backupDir?)`, `getAdapter(toolName)`, `listAdapters()`
-- Server initialization (`core/server.js`) loads settings and initializes registry when adapters are enabled
-
-**Config format helpers:** `src/adapters/helpers/` — `json5.ts`, `toml.ts`, `yaml.ts`
-
-**Configuration:** Auto-write is controlled through the unified config file at `~/.zenith-mcp/config`:
-- `auto_write.status` — enable/disable auto-write (opt-in, disabled by default)
-- `auto_write.backup_dir` — directory for config file backups before modification
-- `auto_write.backup_mode` — `file`, `sqlite`, or `none`
-- `auto_write.custom_mcp_paths` — additional MCP config file paths to scan
-
-The first-run wizard (`src/config/wizard.ts`) prompts for auto-write setup on initial startup.
-
----
-
-## 8. Config Management (`src/config/`)
-
-Zenith uses a single plain-text config file at `~/.zenith-mcp/config` with a custom format: `###` subsection headers, `key: value` pairs, and `#` comments (both `value # comment` and `value #comment` styles).
-
-**Config file structure:**
 ```text
 Port: 7000
 
 ### Tools
-read_text_file: enabled
+read_file: enabled
 edit_file: enabled
 search_files: enabled
 
@@ -652,12 +410,6 @@ status: disabled
 backup_dir: ~/.zenith-mcp/mcp_backups/
 backup_mode: file
 custom_mcp_paths:
-
-### Zenith-Rag
-status: disabled
-postgres_url:
-username:
-password:
 
 ### Advanced
 char_budget: 400000
@@ -670,179 +422,188 @@ default_excludes: node_modules,.git,.next,...
 sensitive_patterns: **/.env,**/*.pem,...
 ```
 
-**Modules:**
+Config modules in `packages/zenith-mcp/src/config/`:
 
-- **`parser.ts`** — Reads/writes the plain-text config format. Produces an ordered `RawConfig` array of `ConfigEntry` items (sections, subsections, key-value pairs, comments, blanks) for round-trip fidelity — unknown keys and comments are preserved across read/write cycles.
-
-- **`schema.ts`** — Defines `ZenithConfig` (typed interface), `DEFAULT_CONFIG` (all defaults), `configToRaw()` (typed config → parser's RawConfig), and `rawToConfig()` (RawConfig → typed config with validation and fallbacks).
-
-- **`loader.ts`** — `loadConfig()` reads and parses the config file, `saveConfig()` serializes and writes it, `mergeToolsIntoConfig()` discovers tools at runtime and merges them into the config (new tools default to enabled, existing tools preserve their state).
-
-- **`wizard.ts`** — First-run interactive wizard that runs on initial startup when no config file exists. Prompts for auto-write setup, backup mode (file/SQLite with 24h TTL/no backup), custom MCP paths, port, and character budget. Generates the config file and optionally runs auto-write immediately.
-
-- **`auto-write.ts`** — Registers Zenith in other MCP clients' config files via the adapter system. Reads each adapter's native config format, preserves unknown fields, backs up before mutation, and writes only the necessary Zenith server entry.
-
-- **`backup.ts`** — SQLite-based backup with WAL mode and configurable TTL, file-based `.bak` backup, or no-backup mode.
-
-- **`index.ts`** — Barrel exports: `configExists`, `loadConfig`, `saveConfig`, `mergeToolsIntoConfig`.
-
-**Dynamic tool discovery:** At startup, `server.ts` builds a `TOOL_REGISTRY` array of all registered tool names. `mergeToolsIntoConfig()` compares this against the tools in the config file — new tools are added as enabled, existing tools preserve their enabled/disabled state. This means the config file always reflects the actual available tools without hardcoding.
+| Module | Purpose |
+|--------|---------|
+| `parser.ts` | Ordered `RawConfig` array for round-trip fidelity (unknown fields and comments preserved) |
+| `schema.ts` | `ZenithConfig` interface, `DEFAULT_CONFIG`, `configToRaw()`, `rawToConfig()` |
+| `loader.ts` | `loadConfig()`, `saveConfig()`, `mergeToolsIntoConfig()` |
+| `wizard.ts` | First-run interactive wizard (auto-write, backup mode, port, char_budget) |
+| `auto-write.ts` | Registers Zenith in other MCP clients via adapters |
+| `backup.ts` | SQLite/file/none backup modes |
 
 ---
 
-## 9. Retrieval Pipeline
+## 9. Dynamic Retrieval & Interception Pipeline
 
-Opt-in (disabled by default) system for dynamically filtering the tool set presented to LLM clients based on workspace context and conversation history. Reduces context waste when Zenith is used as a proxy managing many MCP servers.
+The retrieval pipeline is **opt-in and disabled by default** (`defaultRetrievalConfig().enabled = false`). It is designed to reduce active tool-list bloat when Zenith manages or proxies larger tool sets — it is NOT a search ranking pipeline.
 
-**Enabled via:** `defaultRetrievalConfig()` in `src/retrieval/models.ts` (defaults to `enabled: false`)
+**6-Stage Fallback Hierarchy:**
 
-### Architecture
+1. **BMXF Blend**: Combines environmental context (workspace analysis) and conversational signals with Weighted RRF fusion.
+2. **BMXF Env-Only**: Ranks tools using workspace fingerprint.
+3. **Keyword Env-Only**: Matches keywords against tool schemas.
+4. **Static Categories**: Ranks tools based on project classification (e.g., Rust, Python, Go, Node).
+5. **Frequency Prior**: Demotes tools that are historically unused.
+6. **Universal Fallback**: Exposes up to 12 core namespace tools.
 
+Exposes a synthetic `request_tool` to allow client-side promotion of demoted/inactive tools.
+
+Key components: `pipeline.ts`, `session.ts`, `ranking/`, `telemetry/`, `observability/`, `routing-tool.ts`, `zenith-integration.ts`, `zenith-tool-registry.ts`.
+
+> **Note:** The retrieval source directory (`src/retrieval/**`) is currently excluded from the main TypeScript compilation in `tsconfig.json`.
+
+---
+
+## 10. Compression Architecture
+
+Context compression replaces raw file text with structurally-aware compressed representations.
+
+### Flow
+
+1. **Analysis**: Tree-sitter extracts the source code AST, mapping functions, control structures, and declaration bodies via `getCompressionStructure()`.
+2. **Codec Bridge**: `core/toon_bridge.ts` sends the structural mapping to `zenith-toon`'s `compressSourceStructured()`. Falls back to `compressString()` when tree-sitter structure is unavailable.
+3. **Execution**: The TOON codec reduces text size based on character budget constraints by preserving signature headers and collapsing interior execution blocks while maintaining syntax validity.
+4. **Validation**: The caller verifies that compressed output is actually useful (`isCompressionUseful()`) — shorter than the original AND fits the budget — before injecting it into context.
+
+### Subprocess Isolation
+
+`compression.ts` spawns a Node subprocess (`toon_bridge_cli.js`) with a 30-second timeout for memory boundary enforcement. The bridge itself performs in-process TypeScript compression. This is "no Python dependency" but NOT "no child process."
+
+---
+
+## 11. zenith-toon Package
+
+Zero-dependency TypeScript compression codec library.
+
+| Module | Role |
+|--------|------|
+| `pipeline.ts` | `ToonPipeline` — main compression orchestration |
+| `sagerank.ts` | `SageRank` — multi-signal importance ranking for text segments |
+| `bmx-plus.ts` | `BMXPlus` — custom BM25 variant for high-speed text relevance scoring |
+| `string-codec.ts` | `StringCodec` — multi-strategy string encoding |
+| `budget.ts` | `BudgetAllocator` — proportional token/character budget distribution |
+| `dedup.ts` | Near-duplicate detection and removal |
+| `config.ts` | Configuration types |
+| `presets.ts` | Profiles: compact, balanced, verbose |
+| `router.ts` | Content-type routing for compression strategy selection |
+| `encoder.ts` | Encoder abstraction with caching |
+| `types.ts` | Core types |
+| `utils.ts` | Shared utilities |
+
+### BMX-Plus
+
+BMX-Plus (`BMXPlusIndex` class) is an original, unpublished lexical search algorithm created by the project author. It uses **no pre-trained models** — it is a pure algorithmic scoring function built on BM25's proven TF saturation curve with three innovations:
+
+1. **Term-adaptive entropy-aware IDF** — Each term receives a scaling factor γ_t = IDF_t / IDF_max. Rare terms get full entropy weight; common terms get none — independent of corpus size.
+2. **Variance-blended informativeness** — Shannon entropy (when TFs vary across documents) is smoothly blended with IDF-derived informativeness (1 − df/N) using TF variance as the interpolation weight, avoiding hard discontinuities.
+3. **tanh Soft-AND coverage bonus** — Inspired by RankEvolve, a `tanh(termScore)` coverage accumulator rewards documents that match multiple query terms rather than letting a single dominant term inflate the score.
+
+All scoring is executed within a **Term-At-A-Time (TAAT) posting-list architecture** — the primary source of BMX-Plus's speed advantage over document-at-a-time BM25 implementations. Additional algorithmic details:
+
+- **Self-tuning parameters**: α and β are derived from corpus statistics (average document length, total document count) — no manual tuning required.
+- **Lucene-variant IDF**: `log((N − df + 0.5) / (df + 0.5) + 1)` (always non-negative).
+- **Fast sigmoid**: Padé rational approximation to σ(x) for entropy computation (|error| < 0.01, branch-free hot path).
+- **Lazy entropy recomputation**: Incremental updates (`updateIndex`/`removeFromIndex`) mark terms dirty; entropies are flushed only for query-relevant terms at search time.
+- **BM25 TF saturation**: k1 = 1.5, b = 0.75 (standard parameters, unchanged).
+
+#### BEIR Benchmark Results
+
+Benchmarked against standard BM25 across 9 BEIR datasets spanning 3.6K to 4.6M documents (~8.2M total):
+
+| Dataset | Corpus | Queries | NDCG@10 (BM25) | NDCG@10 (BMX+) | Δ NDCG@10 | Recall@100 (BM25) | Recall@100 (BMX+) | Speedup |
+|---------|--------|---------|----------------|----------------|-----------|-------------------|-------------------|---------|
+| nfcorpus | 3,633 | 323 | 0.3054 | 0.3013 | −0.0041 | 0.2358 | 0.2350 | **26.2×** |
+| scifact | 5,183 | 300 | 0.6623 | 0.6615 | −0.0009 | 0.8759 | 0.8826 | **7.0×** |
+| arguana | 8,674 | 1,406 | 0.3484 | 0.3508 | +0.0024 | 0.9523 | 0.9523 | **3.7×** |
+| scidocs | 25,657 | 1,000 | 0.1514 | 0.1503 | −0.0010 | 0.3491 | 0.3460 | **6.3×** |
+| fiqa | 57,638 | 648 | 0.2357 | 0.2317 | −0.0040 | 0.5090 | 0.5110 | **3.7×** |
+| trec-covid | 171,332 | 50 | 0.5849 | 0.5654 | −0.0195 | 0.0987 | 0.0935 | **3.1×** |
+| webis-touche2020 | 382,545 | 49 | 0.3654 | 0.3651 | −0.0003 | 0.5731 | 0.5683 | **6.8×** |
+| quora | 522,931 | 5,000 | 0.7368 | 0.7459 | +0.0092 | 0.9475 | 0.9531 | **1.5×** |
+| dbpedia-entity | 4,635,922 | 67 | 0.3092 | 0.3079 | −0.0013 | 0.4802 | 0.4878 | **3.7×** |
+
+**Summary**: Across all 9 datasets, BMX-Plus achieves **1.5–26× speedups** (median ~3.7×) while NDCG@10 deltas stay within ±0.02 of BM25 (median −0.001). On two datasets (arguana, quora) BMX-Plus outperforms BM25 in both NDCG@10 and recall@100.
+
+### Exports
+
+The package exports two primary compression functions consumed by `zenith-mcp`:
+
+- `compressSourceStructured(content, budget, blocks: StructureBlock[])` — Structure-aware compression using tree-sitter AST blocks.
+- `compressString(content, budget)` — Plain string compression fallback.
+
+---
+
+## 12. Database Architecture
+
+### Per-Project Database
+
+SQLite (via Node.js native `node:sqlite`) in WAL mode at `.mcp/symbols.db`:
+
+| Table | Contents |
+|-------|----------|
+| `files` | Indexed file metadata (path, hash) |
+| `symbols` | Extracted code symbols (definitions, references) |
+| `edges` | Caller → callee dependency links |
+| `versions` | Symbol body snapshots with MD5 dedup |
+| `patterns` | Reapply pattern cache |
+
+### Stash Tables
+
+For project-scoped work, stash and config backup tables are created in the same `.mcp/symbols.db` database. If no project root can be resolved, stash data falls back to `~/.zenith-mcp/global-stash.db`.
+
+| Table | Contents |
+|-------|----------|
+| `stash` | Failed edit/write payloads for recovery |
+| `config_backups` | Config backup history |
+
+### Global Database
+
+SQLite at `~/.zenith-mcp/global-stash.db`:
+
+| Table | Contents |
+|-------|----------|
+| `project_roots` | Registered project root mappings |
+
+---
+
+## 13. Build & Test
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build (zenith-toon first, then zenith-mcp)
+pnpm build
+
+# Run tests
+pnpm test              # vitest run --coverage
+
+# Type-check
+pnpm check
+
+# Clean
+pnpm clean
 ```
-src/retrieval/
-├── models.ts          — Core types: RetrievalConfig, ScoredTool, SessionRoutingState, RankingEvent
-├── pipeline.ts        — RetrievalPipeline: main orchestration, 6-tier fallback
-├── base.ts            — ToolRetriever / PassthroughRetriever interfaces
-├── session.ts         — SessionStateManager: promote/demote tool tracking
-├── catalog.ts         — Tool catalog snapshot builder
-├── keyword-matcher.ts — Trigger-based keyword matching (Tier 3)
-├── static-categories.ts — Predefined tool categories by project type (Tier 4)
-├── rollout.ts         — Canary/session group assignment
-├── routing-tool.ts    — Synthetic request_tool for demoted-tool access
-├── zenith-integration.ts — Pipeline factory, MCP handler interceptors
-├── zenith-tool-registry.ts — Local tool registry with Proxy-based live record
-├── assembler.ts       — TieredAssembler for description truncation
-├── ranking/
-│   ├── bmx-index.ts   — BMXF scoring index
-│   ├── fusion.ts      — Weighted RRF fusion + adaptive alpha
-│   ├── ranker.ts      — Scorer orchestration
-│   └── index.ts       — Re-exports
-├── telemetry/
-│   ├── scanner.ts     — Workspace fingerprinting
-│   ├── tokens.ts      — Token extraction from project files
-│   ├── evidence.ts    — Evidence aggregation
-│   └── monitor.ts     — Telemetry polling
-└── observability/
-    ├── logger.ts      — JSONL ranking event logger
-    ├── metrics.ts     — Rolling metrics (rescores, latency)
-    └── replay.ts      — Log replay for debugging
-```
 
-### 6-Tier Fallback Ladder
+### Tech Stack
 
-The pipeline tries tiers in order; first successful result wins:
-
-1. **BMXF blend** — env-signal + conversation-signal BMXF scoring with weighted RRF fusion and adaptive alpha blending
-2. **BMXF env-only** — environment-signal-only scoring (workspace fingerprint)
-3. **Keyword env-only** — trigger-based keyword matching against tool descriptions
-4. **Static categories** — project type classification (rust_cli, python_web, node_web, infrastructure, generic) with pre-defined tool priority lists
-5. **Frequency prior** — exponential-decay weighted frequency from historical ranking events log
-6. **Universal fallback** — namespace-priority selection (12 tools max, one per server)
-
-### Session Lifecycle
-
-- `getToolsForList(sessionId, conversationContext)` — main entry point, called on every `tools/list` request
-- Tracks turn boundaries, tool call history, argument keys, router proxy counts
-- Promote/demote tools based on ranking scores and usage patterns
-- `onToolCalled(sessionId, toolName, args, isRouterProxy)` — records direct vs proxy usage
-
-### Routing Tool
-
-When tools are demoted (not in active set), a synthetic `request_tool` is injected:
-- `describe=true` → returns full tool schema
-- `describe=false` → proxies the call through to the underlying tool
-- Proxied calls are tracked separately for promotion decisions
-
----
-
-## 10. MCP Roots Protocol
-
-The server implements the MCP Roots Protocol for dynamic directory negotiation.
-
-**Flow:**
-1. Client sends `initialize` with capabilities
-2. `oninitialized` handler checks `clientCapabilities.roots`
-3. If supported: calls `server.server.listRoots()` to get client's roots
-4. Roots are parsed via `roots-utils.js` (`file://` URIs resolved, validated as directories)
-5. `ctx.setAllowedDirectories(validatedRoots)` replaces all baseline directories
-6. `project-context.js` is notified via `onRootsChanged()` to refresh its root resolution
-7. At runtime: client sends `notifications/roots/list_changed`
-8. Server re-requests roots and repeats step 4–6
-
-**Important:** If the client does not support roots and no CLI directories were provided, `oninitialized` throws an explicit error. There is no silent fallback to `cwd` for allowed directories.
-
----
-
-## 11. Response Discipline (Agent Policy)
-
-This is enforced by design across all tools:
-
-- **Do not parrot inputs.** If the caller sent one path, do not return it.
-- **Minimal success responses.** `'Applied.'`, `'Created.'`, `'Deleted.'` are sufficient.
-- **Dry-run should be minimal.** A diff or `'Dry Run Successful'` is enough.
-- **Failure = actionable new info only.** `'OLD_TEXT_NOT_FOUND'`, `'Symbol not found.'`
-- **Stay in scope.** Read tools return content. Metadata tools return metadata. Don't duplicate.
-- **No verbose formatting.** No headers, separators, or "nice" formatting that wastes tokens.
-
-When modifying tools, guard aggressively against context bloat. If unsure whether to include a field, omit it.
-
----
-
-## 12. Environment Variables Reference
-
-All tuning and configuration settings live in `~/.zenith-mcp/config` (see Section 8). The only remaining environment variables are authentication secrets and OS platform paths:
-
-| Variable | Purpose |
-|----------|---------|
-| `ZENITH_MCP_API_KEY` / `MCP_BRIDGE_API_KEY` / `COMMANDER_API_KEY` | HTTP bearer token (required for HTTP mode) |
-| `TOON_PROJECT_DIR` | Path to `toon` compression project |
-| `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` | OS-provided paths used by platform adapters for config file discovery on Windows |
-
-**Config file settings (not env vars):** `session_ttl_ms`, `char_budget`, `search_char_budget`, `default_excludes`, `sensitive_patterns`, `refactor_max_chars`, `refactor_max_context`, `refactor_version_ttl_hours` — all live in the `### Advanced` section of `~/.zenith-mcp/config`.
-
----
-
-## 13. Adding a New Tool
-
-1. Create `tools/my_new_tool.js`
-2. Export `register(server, ctx)`
-3. Use `zod` for strict `inputSchema`
-4. **Mandatory:** Call `await ctx.validatePath(args.path)` (or `args.source` / `args.destination`) before any `fs` operation
-5. Set `annotations: { readOnlyHint, idempotentHint, destructiveHint }`
-6. Import and call `registerMyNewTool(server, ctx)` in `core/server.js`
-7. Follow response discipline: minimal outputs, no parroting inputs
-
----
-
-## 14. Testing Considerations
-
-- The project uses **Vitest** with `@vitest/coverage-v8`
-- `dist/core/` and `dist/tools/` are hand-authored source (dist-only layout). `dist/adapters/` and `dist/config/` are compiled from `src/` via `tsc`.
-- Tests in `tests/` reference `dist/` modules
-- Tree-sitter WASM files must be present for symbol-aware tests
-- The `toon` compression bridge requires Python with the `toon` module installed (optional for most tests)
-- SQLite databases are created in `.mcp/` directories and `~/.zenith-mcp/` — clean these between test runs if needed
-
-## 15. Hybrid Source Layout
-
-Zenith-MCP uses a hybrid source layout:
-
-| Directory | Language | Role | Version Controlled |
-|-----------|----------|------|--------------------|
-| `dist/core/` | JavaScript | Hand-authored MCP server core | Yes |
-| `dist/tools/` | JavaScript | Hand-authored MCP tool implementations | Yes |
-| `dist/cli/` | JavaScript | Hand-authored CLI entry points | Yes |
-| `dist/server/` | JavaScript | Hand-authored HTTP entry point | Yes |
-| `dist/grammars/` | WASM + SCM | Tree-sitter grammars and queries | Yes |
-| `src/adapters/` | TypeScript | MCP config adapter integrations | Yes |
-| `src/config/` | TypeScript | Unified config system: parser, schema, loader, wizard, auto-write, backup | Yes |
-| `src/retrieval/` | TypeScript | Retrieval pipeline, ranking, telemetry, observability | Yes |
-| `dist/adapters/` | JavaScript | tsc output from `src/adapters/` | No |
-| `dist/config/` | JavaScript | tsc output from `src/config/` | No |
-| `dist/retrieval/` | JavaScript | tsc output from `src/retrieval/` | No |
-
-**Important:** Do NOT add `dist/` to `.gitignore`. Only `dist/adapters/`, `dist/config/`, and `dist/retrieval/` are tsc output. All other `dist/` subdirectories contain hand-authored source code.
-
-The retrieval pipeline is opt-in — `defaultRetrievalConfig()` sets `enabled: false`. The pipeline is initialized at server startup but remains inert until explicitly activated via config.
-
-The build script includes a prebuild safety check that aborts if `dist/core/server.js` is missing, preventing accidental destruction of source via `rm -rf dist`.
+| Technology | Version | Purpose |
+|------------|---------|---------|
+| TypeScript | ^5.8.2 | Primary language |
+| Node.js | ≥ 22.0.0 | Runtime (required for native `node:sqlite`) |
+| pnpm | 11.2.1 | Package manager |
+| Turborepo | ^2.5.0 | Monorepo build orchestration |
+| Express | ^5.2.1 | HTTP server framework |
+| MCP SDK | ^1.25.2 | Protocol implementation (patched) |
+| web-tree-sitter | ^0.26.8 | Code parsing (WASM) |
+| Zod | ^4.3.6 | Schema validation |
+| Vitest | ^4.1.5 | Test framework |
+| glob | ^10.5.0 | File globbing |
+| minimatch | ^10.0.1 | Pattern matching |
+| diff | ^5.1.0 | Diff computation |
+| js-yaml | ^4.1.0 | YAML parsing |
+| json5 | ^2.2.3 | JSON5 parsing |
+| jsonc-parser | ^3.3.1 | JSONC parsing |
+| @iarna/toml | — | TOML parsing |

@@ -19,7 +19,7 @@ Most MCP filesystem servers give you a hammer and ask you to sculpt. Zenith give
 | **Search intelligence** | Grep or basic glob | BM25 pre-filter + ripgrep + BM25 post-rank, structural similarity, definition lookup |
 | **Cross-file refactoring** | Not available | Impact-graph traversal (callers/callees), outlier detection, atomic multi-file apply with rollback |
 | **Edit safety** | Write and hope | All-or-nothing in-memory validation → atomic temp-file swap → SQLite stash on failure |
-| **Symbol versioning** | Not available | Every symbol edit auto-snapshots the original; point-in-time rollback via `stashRestore` |
+| **Symbol versioning** | Not available | Every symbol edit auto-snapshots the original; point-in-time rollback via `refactor_batch` |
 | **Security model** | CWD or basic prefix check | `validatePath` with symlink resolution + re-check, exclusive-write `wx` flag, sensitive-file blocking, per-session isolation |
 | **Transport** | stdio only | stdio **and** HTTP (Streamable HTTP + legacy SSE, bearer auth, per-session context, idle reaping) |
 
@@ -37,7 +37,7 @@ This unlocks capabilities that are simply impossible with text search:
 - **`search_file` symbol lookup** — Read just the body of `BM25Index.score` across a 10,000-line file, with optional surrounding context.
 - **`search_files` structural mode** — Find all functions with the same AST shape (Jaccard similarity over 3-gram node fingerprints) to detect copy-paste patterns or candidates for a common abstraction.
 - **`search_files` definition mode** — Locate every file that *defines* `AuthService.login` using the parse tree, not a fragile regex.
-- **Syntax gate** — After any edit, `checkSyntaxErrors()` walks the new AST and warns if `ERROR` or missing nodes were introduced.
+- **Syntax gate** — After any edit, `syntaxWarn()` walks the new AST and warns if `ERROR` or missing nodes were introduced.
 
 ### Intelligent two-stage search
 
@@ -78,6 +78,15 @@ Each git repository gets a `.mcp/symbols.db` (auto-gitignored) with:
 
 Rollback is a single tool call: `refactor_batch restore`.
 
+### TOON compression engine
+
+The `zenith-toon` package provides intelligent context compression for tool outputs:
+
+- **Structure-aware**: Uses tree-sitter AST analysis to identify code structure, preserving signature headers while compressing interior blocks.
+- **BMX-Plus scoring**: An original, unpublished lexical search algorithm created by the project author. Built on BM25's TF saturation curve with three innovations: term-adaptive entropy-aware IDF (γ_t = IDF_t / IDF_max), variance-blended informativeness (Shannon entropy ↔ IDF smoothly interpolated via TF variance), and tanh Soft-AND coverage bonus. All executed within a TAAT (Term-At-A-Time) posting-list architecture. Uses **no pre-trained models** — purely algorithmic. Benchmarked against standard BM25 across 9 BEIR datasets (~8.2M documents total), achieving **1.5–26× speedups** (median ~3.7×) while NDCG@10 deltas stay within ±0.02 of BM25.
+- **SageRank**: Multi-signal importance ranking for text segments (structural importance, semantic density, position, references).
+- **Budget management**: Character-aware budget allocation ensures tool outputs fit within context windows without losing critical information.
+
 ### Security-first design
 
 - **`validatePath()`** — expands `~`, normalizes, prefix-checks against allowed directories, calls `fs.realpath()` to resolve symlinks, then re-checks the resolved path. Throws before any `fs` call if the check fails.
@@ -103,7 +112,12 @@ Rollback is a single tool call: `refactor_batch restore`.
 
 ## Quick Start
 
+### Prerequisites
+- **Node.js** ≥ 22.0.0 (required for native `node:sqlite`)
+- **pnpm** 11+
+
 ### stdio (Local)
+
 Standard MCP stdio transport for local clients like Claude Desktop or VS Code.
 
 ```bash
@@ -111,6 +125,7 @@ npx zenith-mcp /path/to/dir1 /path/to/dir2
 ```
 
 ### HTTP (Remote)
+
 Express-based HTTP server supporting both Streamable HTTP and legacy SSE transports.
 
 ```bash
@@ -118,14 +133,26 @@ ZENITH_MCP_API_KEY=secret npx zenith-mcp-http /path/to/dir1 --port=3100 --host=0
 ```
 
 **HTTP Endpoints:**
-- `POST /mcp` — Streamable HTTP (initialize + messages)
-- `GET /mcp` — Streamable HTTP SSE notification stream
-- `DELETE /mcp` — Streamable HTTP session teardown
-- `GET /sse` — Legacy SSE transport
-- `POST /messages` — Legacy SSE message endpoint
-- `GET /health` — Health check
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/mcp` | Streamable HTTP (initialize + messages) |
+| `GET` | `/mcp` | Streamable HTTP SSE notification stream |
+| `DELETE` | `/mcp` | Streamable HTTP session teardown |
+| `GET` | `/sse` | Legacy SSE transport |
+| `POST` | `/messages` | Legacy SSE message endpoint |
+| `GET` | `/health` | Health check |
 
 Sessions are isolated per client and reaped after 30 minutes of idle time (configurable via `session_ttl_ms` in `~/.zenith-mcp/config`). All HTTP requests require `Authorization: Bearer <API_KEY>`.
+
+### Building from Source
+
+```bash
+git clone https://github.com/itstanner5216/zenith-mcp.git
+cd zenith-mcp
+pnpm install
+pnpm build     # Builds zenith-toon first, then zenith-mcp
+```
 
 ---
 
@@ -156,7 +183,7 @@ MCP clients that support Roots can dynamically update allowed directories at run
 ## Tools
 
 ### `read_file`
-Read a text file with flexible options (streaming line chunks, windowed reads, or exact line ranges).
+Read a text file with flexible options (streaming line chunks, windowed reads, or exact line ranges). Uses a single flat parameter schema.
 
 - `path` (string)
 - `maxChars` (number, optional, default 50000, up to 400000)
@@ -167,7 +194,7 @@ Read a text file with flexible options (streaming line chunks, windowed reads, o
 - `context` (number, optional, default 30) — window radius
 - `ranges` (array of `{startLine, endLine}`, optional) — explicit line ranges
 - `showLineNumbers` (boolean, optional)
-- `compression` (boolean, optional) — compress whitespace via structured compression
+- `compression` (boolean, optional) — compress via structured in-process TS compression
 
 > **Note:** For grep and symbol-based searching within a single file, use `search_file` instead.
 
@@ -189,7 +216,6 @@ Create, overwrite, or append to a file. Auto-creates parent directories. Atomic 
 - `path` (string)
 - `content` (string)
 - `failIfExists` (boolean, optional) — fail if file already exists
-- `createOnly` (boolean, optional) — compatibility alias for `failIfExists`
 - `append` (boolean, optional) — append instead of overwriting; smart-resumes overlapping tails
 
 ### `edit_file`
@@ -230,278 +256,224 @@ Directory exploration with two modes.
 Multi-mode search with ripgrep + BM25 ranking and JS fallback.
 
 - **mode: `content`** — text/regex search (always case-insensitive)
-  - `path` (string)
-  - `contentQuery` (string) — text or regex to search for
-  - `pattern` (string, optional) — glob to limit files
-  - `contextLines` (number, optional, default 0)
-  - `literalSearch` (boolean, optional, default false)
-  - `countOnly` (boolean, optional, default false)
-  - `includeHidden` (boolean, optional, default false)
-  - `maxResults` (number, optional, default 50)
+  - `path`, `contentQuery`, `pattern`, `contextLines`, `literalSearch`, `countOnly`, `includeHidden`, `maxResults`
 
 - **mode: `files`** — file discovery
-  - `path` (string)
-  - `pattern` (string, optional)
-  - `namePattern` (string, optional)
-  - `pathContains` (string, optional)
-  - `extensions` (string[], optional)
-  - `includeMetadata` (boolean, optional, default false)
-  - `includeHidden` (boolean, optional, default false)
-  - `maxResults` (number, optional, default 100)
+  - `path`, `pattern`, `namePattern`, `pathContains`, `extensions`, `includeMetadata`, `includeHidden`, `maxResults`
 
-- **mode: `symbol`** — find symbols by name substring, or list all symbols when omitted
-  - `path` (string)
-  - `symbolQuery` (string, optional) — omit to list all symbols
-  - `symbolKind` (enum, optional, default `"any"`)
-  - `pattern` (string, optional)
-  - `maxResults` (number, optional, default 50)
+- **mode: `symbol`** — find symbols by name
+  - `path`, `symbolQuery`, `symbolKind`
 
-- **mode: `structural`** — find structurally similar symbols (AST fingerprinting)
-  - `path` (string)
-  - `structuralQuery` (string) — symbol name to find similar definitions of
-  - `symbolKind` (enum, optional, default `"any"`)
-  - `maxResults` (number, optional, default 20)
+- **mode: `structural`** — find code with similar AST shape
+  - `path`, `structuralQuery`
 
-- **mode: `definition`** — find files defining a specific symbol
-  - `path` (string)
-  - `definesSymbol` (string) — dot-qualified supported
-  - `namePattern` (string, optional)
-  - `pathContains` (string, optional)
-  - `extensions` (string[], optional)
-  - `maxResults` (number, optional, default 100)
+- **mode: `definition`** — find symbol definitions
+  - `path`, `definesSymbol`, `namePattern`, `pathContains`, `extensions`, `maxResults`
 
 ### `search_file`
-Single-file search by regex or symbol name. Read-only.
-
-- `path` (string) — file to search
-- `grep` (string, optional) — case-insensitive regex to match lines
-- `grepContext` (number, optional, default 0, max 30) — context lines around matches
-- `symbol` (string, optional) — symbol name, dot-qualified for methods (e.g. `AuthService.login`)
-- `nearLine` (number, optional) — disambiguate multiple symbol matches
-- `expandLines` (number, optional, default 0, max 50) — extra context around symbol
-- `maxChars` (number, optional, default 50000, up to 400000)
+Single-file grep or symbol lookup.
+- `path` (string)
+- `grep` (string, optional) — regex pattern
+- `grepContext` (number, optional) — context lines for grep
+- `symbol` (string, optional) — symbol name lookup
+- `nearLine` (number, optional) — disambiguation hint
+- `expandLines` (number, optional) — surrounding context
+- `maxChars` (number, optional)
 
 ### `file_manager`
-Directory and file management operations.
-- **mode: `mkdir`** — `path`
-- **mode: `delete`** — `path` (file only, irreversible)
-- **mode: `move`** — `source`, `destination`
-- **mode: `info`** — `path` (returns size, created, modified, accessed, type, permissions)
+File system operations with four modes.
+- **`mkdir`**: `path`
+- **`delete`**: `path` (file-only)
+- **`move`**: `source`, `destination`
+- **`info`**: `path` (file metadata)
 
 ### `stashRestore`
-Retry failed edits and manage stash entries.
-
-- **mode: `apply`** — retry a stashed edit or write
-  - `stashId` (number)
-  - `corrections` (array, optional) — disambiguation for failed edits
-  - `newPath` (string, optional) — redirect a failed write
-  - `dryRun` (boolean, optional)
-
-- **mode: `restore`** — clear a stash entry by ID
-  - `stashId` (number)
-
-- **mode: `list`** — show all stash entries
-  - `type` (enum `"edit" | "write"`, optional)
-
-- **mode: `read`** — view a stash entry's contents
-  - `stashId` (number)
-
-> **Note:** For symbol version rollback (`restore`/`history`), use `refactor_batch`.
+Retry, inspect, or clear stashed edit/write failures.
+- **`apply`**: `stashId`, `corrections`, `newPath`, `dryRun` — retry with optional corrections
+- **`restore`**: `stashId` — clear a stash entry
+- **`list`**: `type` — list stash entries
+- **`read`**: `stashId` — inspect stash details
 
 ### `refactor_batch`
-Apply one edit pattern across multiple similar symbols, with outlier detection and rollback.
+Cross-file symbol refactoring with impact analysis and version rollback.
+- **`query`**: `target`, `fileScope`, `direction`, `depth` — traverse symbol graph
+- **`loadDiff`**: `selection`, `contextLines`, `loadMore` — load symbol bodies + outlier detection
+- **`apply`**: `payload`, `dryRun` — apply multi-file edits atomically
+- **`reapply`**: `symbolGroup`, `newTargets`, `ack`, `dryRun` — apply cached pattern
+- **`restore`**: `symbol`, `file`, `version`, `dryRun` — rollback to snapshot
+- **`history`**: `symbol`, `file` — view version history
 
-- **mode: `query`** — impact analysis (callers or callees)
-  - `target` (string) — symbol name
-  - `fileScope` (string, optional)
-  - `direction` (enum `"forward" | "reverse"`, default `"forward"`)
-  - `depth` (number, default 1, max 5)
+---
 
-- **mode: `loadDiff`** — load symbol bodies with context into an editable diff
-  - `selection` (array) — indices from prior query or explicit `{symbol, file}` pairs
-  - `contextLines` (number, optional, default 5, max 30)
-  - `loadMore` (boolean, optional, default false) — paginate truncated results
+## Architecture
 
-- **mode: `apply`** — apply edited diff to selected occurrences
-  - `payload` (string) — edited diff with symbol headers
-  - `dryRun` (boolean, optional)
-
-- **mode: `reapply`** — reuse a cached payload on new targets
-  - `symbolGroup` (string)
-  - `newTargets` (array) — names or `{symbol, file}` pairs
-  - `ack` (array, optional) — acknowledge flagged outliers by index
-  - `dryRun` (boolean, optional)
-
-- **mode: `restore`** — rollback a symbol to a prior version snapshot
-  - `symbol` (string)
-  - `file` (string)
-  - `version` (number, optional) — omit to list available versions
-  - `dryRun` (boolean, optional)
-
-- **mode: `history`** — list available version snapshots for a symbol
-  - `symbol` (string)
-  - `file` (string, optional)
-
-## Tool Annotations
-
-| Tool                  | readOnlyHint | idempotentHint | destructiveHint | Notes                                           |
-|-----------------------|--------------|----------------|-----------------|-------------------------------------------------|
-| `read_file`           | `true`       | —              | —               | Pure read                                       |
-| `read_media_file`     | `true`       | —              | —               | Pure read                                       |
-| `read_multiple_files` | `true`       | —              | —               | Pure read                                       |
-| `directory`           | `true`       | —              | —               | Pure read                                       |
-| `search_files`        | `true`       | —              | —               | Pure read                                       |
-| `search_file`         | `true`       | —              | —               | Pure read (single-file)                         |
-| `write_file`          | `false`      | `false`        | `true`          | Overwrites existing files                       |
-| `edit_file`           | `false`      | `false`        | `true`          | Re-applying edits can fail or double-apply      |
-| `file_manager`        | `false`      | `false`        | `true`          | Mixed: mkdir is idempotent, delete/move are not |
-| `stashRestore`        | `false`      | `false`        | `true`          | Restores and applies are stateful               |
-| `refactor_batch`      | `false`      | `false`        | `true`          | Multi-file writes                               |
-
-## Usage with Claude Desktop
-
-Add this to your `claude_desktop_config.json`:
-
-### NPX (stdio)
-```json
-{
-  "mcpServers": {
-    "zenith": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "zenith-mcp",
-        "/Users/username/Desktop"
-      ]
-    }
-  }
-}
+### Monorepo Structure
+```
+zenith-mcp/
+├── packages/
+│   ├── zenith-mcp/     # Main MCP server
+│   └── zenith-toon/    # TOON compression codec library
+├── src/                # Root-level bridge scripts & type declarations
+├── docs/               # Documentation & design notes
+└── patches/            # Dependency patches
 ```
 
-### HTTP
-```json
-{
-  "mcpServers": {
-    "zenith": {
-      "url": "http://localhost:3100/mcp",
-      "headers": {
-        "Authorization": "Bearer your-api-key"
-      }
-    }
-  }
-}
-```
+### Key Components
 
-## Usage with VS Code
+- **Core Engine** (`src/core/`) — Server factory, filesystem context, path validation, SQLite abstraction, file I/O, diffs
+- **Tree-sitter** (`src/core/tree-sitter.ts`) — WASM grammar loading, AST parsing, symbol extraction, structural fingerprints
+- **Edit Engine** (`src/core/edit-engine.ts`) — Pure in-memory 3-mode edit application with atomic verification
+- **Symbol Index** (`src/core/symbol-index.ts`) — Per-project SQLite DB with symbol graph and version snapshots
+- **BM25 Search** (`src/core/shared.ts`) — Entropy-weighted BM25 ranking with ripgrep integration
+- **TOON Compression** (`src/core/compression.ts`, `toon_bridge.ts`) — Structure-aware context compression via zenith-toon
+- **Adapters** (`src/adapters/`) — Auto-configuration for multiple MCP client platforms
+- **Config** (`src/config/`) — Plain-text config management with wizard, auto-write, and backup
 
-**Method 1: User Configuration**
-Open the Command Palette (`Ctrl + Shift + P`) and run `MCP: Open User Configuration`.
+### Database
 
-**Method 2: Workspace Configuration**
-Add the configuration to `.vscode/mcp.json` in your workspace.
+SQLite via Node.js native `node:sqlite` in WAL mode:
 
-### NPX Example
-```json
-{
-  "servers": {
-    "zenith": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "zenith-mcp",
-        "${workspaceFolder}"
-      ]
-    }
-  }
-}
-```
+| Database | Location | Tables |
+|----------|----------|--------|
+| Per-project | `.mcp/symbols.db` | `files`, `symbols`, `edges`, `versions`, `patterns`, `stash`, `config_backups` |
+| Global | `~/.zenith-mcp/global-stash.db` | `project_roots` |
+
+---
 
 ## Configuration
 
-All settings live in `~/.zenith-mcp/config`. A first-run interactive wizard generates this file on initial startup. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) Section 8 for the full config format.
-
-The only environment variables are authentication secrets and OS paths:
-
-| Variable | Description |
-|----------|-------------|
-| `ZENITH_MCP_API_KEY` / `MCP_BRIDGE_API_KEY` / `COMMANDER_API_KEY` | API key for HTTP mode (required) |
-| `TOON_PROJECT_DIR` | Path to `toon` compression project |
-
-All tuning parameters (`session_ttl_ms`, `char_budget`, `search_char_budget`, `refactor_max_chars`, `refactor_max_context`, `refactor_version_ttl_hours`, `default_excludes`, `sensitive_patterns`) are in the `### Advanced` section of the config file. Tool enable/disable is in the `### Tools` section.
-
-## Adapter Configuration
-
-Zenith-MCP can auto-configure MCP client config files for 16 platforms.
-
-### Supported Adapters
-
-| Adapter | Config Format | Platform |
-|---------|---------------|----------|
-| Claude Desktop | JSON | macOS, Windows |
-| OpenCode | TOML | Linux, macOS |
-| VS Code Copilot | JSON | All |
-| Cline | JSON | All |
-| Codex CLI | JSON | All |
-| Codex Desktop | JSON5 | All |
-| Continue.dev | JSON | All |
-| Gemini CLI | JSON | All |
-| GitHub Copilot | JSON | All |
-| JetBrains | YAML | All |
-| OpenClaw | JSON | All |
-| Raycast | JSON | macOS |
-| Roo Code | JSON | All |
-| Warp | YAML | macOS, Linux |
-| Zed | JSON | All |
-| Antigravity | JSON | All |
-
-### Auto-Write Configuration
-
-Auto-write is controlled via the unified config file at `~/.zenith-mcp/config`:
+Settings are stored in `~/.zenith-mcp/config` using a plain-text format:
 
 ```text
+Port: 7000
+
+### Tools
+read_file: enabled
+edit_file: enabled
+search_files: enabled
+
 ### Auto Write
-status: enabled
+status: disabled
 backup_dir: ~/.zenith-mcp/mcp_backups/
 backup_mode: file
-custom_mcp_paths:
+
+### Advanced
+char_budget: 400000
+search_char_budget: 15000
+session_ttl_ms: 1800000
+default_excludes: node_modules,.git,.next,...
+sensitive_patterns: **/.env,**/*.pem,...
 ```
 
-- `status` — enable/disable auto-write (opt-in, disabled by default)
-- `backup_dir` — directory for config file backups before modification
-- `backup_mode` — `file` (`.bak` copies), `sqlite` (SQLite with 24h TTL), or `none`
-- `custom_mcp_paths` — comma-separated additional MCP config paths to scan
+A first-run wizard runs automatically if no configuration exists.
 
-The first-run wizard prompts for these settings on initial startup.
+---
 
-## Project Structure
+## Client Configuration
 
+### Cursor IDE
+Add to `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "zenith-mcp": {
+      "command": "npx",
+      "args": ["zenith-mcp", "/path/to/project"]
+    }
+  }
+}
 ```
-src/                    — TypeScript source (all modules)
-  core/                 — Server core, security, search, tree-sitter, edit engine, symbol index
-  tools/                — 11 MCP tool implementations
-  cli/                  — stdio entry point
-  server/               — HTTP entry point (Express 5)
-  adapters/             — 16 MCP client config adapters
-  config/               — Unified config system: parser, schema, loader, wizard, auto-write, backup
-  retrieval/            — Opt-in 6-tier tool retrieval pipeline
-  toon/                 — In-process compression library (BMX+, SageRank, codec)
-  utils/                — Project scope resolution
-dist/                   — Compiled output (gitignored)
-  grammars/             — Copied Tree-sitter grammars and query files
 
-grammars/               — Tree-sitter WASM grammars and SCM queries (source of truth copied into dist/ during build)
-tests/                  — Test suites (Vitest)
+### Claude Desktop
+Add to your Claude Desktop config:
+```json
+{
+  "mcpServers": {
+    "zenith-mcp": {
+      "command": "npx",
+      "args": ["zenith-mcp", "/path/to/project"]
+    }
+  }
+}
 ```
+
+### VS Code
+Add to `.vscode/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "zenith-mcp": {
+      "command": "npx",
+      "args": ["zenith-mcp", "/path/to/project"]
+    }
+  }
+}
+```
+
+### OpenCode
+Add to `opencode.json`:
+```json
+{
+  "mcp": {
+    "zenith-mcp": {
+      "command": "npx",
+      "args": ["zenith-mcp", "/path/to/project"]
+    }
+  }
+}
+```
+
+---
 
 ## Development
 
+### Build
 ```bash
-npm install
-npm run build    # tsc + copy grammars to dist/
-npm test         # vitest run --coverage
-npm run watch    # tsc --watch
+pnpm install
+pnpm build     # Builds zenith-toon first, then zenith-mcp
 ```
+
+### Test
+```bash
+pnpm test      # vitest run --coverage
+```
+
+### Type Check
+```bash
+pnpm check     # Type-check without emitting
+```
+
+### Clean
+```bash
+pnpm clean     # Remove build artifacts
+```
+
+---
+
+## Tech Stack
+
+| Technology | Version | Purpose |
+|------------|---------|---------|
+| TypeScript | ^5.8.2 | Primary language |
+| Node.js | ≥ 22.0.0 | Runtime (native `node:sqlite`) |
+| pnpm | 11.2.1 | Package manager |
+| Turborepo | ^2.5.0 | Monorepo build orchestration |
+| Express | ^5.2.1 | HTTP server |
+| MCP SDK | ^1.25.2 | Protocol implementation |
+| web-tree-sitter | ^0.26.8 | Code parsing (40+ languages) |
+| Zod | ^4.3.6 | Schema validation |
+| Vitest | ^4.1.5 | Test framework |
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run `pnpm build && pnpm test`
+5. Submit a pull request
 
 ## License
 
-MIT License. See the LICENSE file in the project repository.
+MIT
