@@ -14,6 +14,8 @@ src/**/*.d.ts
 # pnpm
 .turbo/
 pnpm-debug.log*
+package-lock.json
+yarn.lock
 
 # TypeScript project-reference build state
 *.tsbuildinfo
