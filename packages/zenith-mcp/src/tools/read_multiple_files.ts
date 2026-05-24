@@ -53,7 +53,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
     server.registerTool<ReadMultipleFilesArgs>("read_multiple_files", {
         title: "Read Multiple Files",
         description: "Read multiple files at once. Large files are truncated.",
-        inputSchema: {
+        inputSchema: z.object({
             paths: z.array(z.string())
                 .min(1)
                 .max(50)
@@ -61,7 +61,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             maxCharsPerFile: z.number().optional().describe("Max characters per file."),
             compression: z.boolean().optional().default(true).describe("Compress whitespace in returned content."),
             showLineNumbers: z.boolean().optional().default(false).describe("Prefix each line with its line number."),
-        },
+        }),
         annotations: { readOnlyHint: true }
     }, async (args: ReadMultipleFilesArgs) => {
         const fileCount = args.paths.length;

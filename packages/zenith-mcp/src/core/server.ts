@@ -1,6 +1,23 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createRequire } from 'module';
+// ---------------------------------------------------------------------------
+// core/server.ts — SDK-agnostic server orchestration
+//
+// This file owns ONLY logic that is genuinely shared across all entrypoints:
+//   - resolveInitialAllowedDirectories / validateDirectories  (CLI + HTTP)
+//   - TOOL_REGISTRY                                            (single source of truth)
+//   - registerEnabledTools(toolServer, ctx)                    (config load + tool wiring)
+//   - updateAllowedDirectoriesFromRoots(requestedRoots, ctx)   (roots-callback body)
+//
+// What this file deliberately does NOT do:
+//   - construct an McpServer (different SDKs have different constructor shapes)
+//   - call setNotificationHandler (different SDKs take different first args:
+//       v1 takes a Zod schema, v2 takes a method-name string)
+//   - call oninitialized / listRoots wiring (lives next to its own setNotificationHandler)
+//
+// Each entrypoint constructs its own McpServer using its preferred SDK, then
+// calls registerEnabledTools to load tools, then inlines its own roots wiring
+// (a 6-line block that calls updateAllowedDirectoriesFromRoots inside).
+// ---------------------------------------------------------------------------
+
 import fs from "fs/promises";
 import path from "path";
 import { normalizePath, expandHome } from './path-utils.js';
@@ -23,9 +40,6 @@ import { configureRegistry } from '../adapters/index.js';
 import { loadConfig, syncToolsWithConfig, patchToolsInConfig, expandTilde } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
 import { onRootsChanged } from './project-context.js';
-
-const _require = createRequire(import.meta.url);
-const _pkg = _require('../../package.json') as { version: string };
 
 export async function resolveInitialAllowedDirectories(args: string[]): Promise<string[]> {
   return Promise.all(args.map(async (dir: string) => {
@@ -83,21 +97,37 @@ const TOOL_REGISTRY: Array<{
   { name: "refactor_batch",      register: registerRefactorBatch },
 ];
 
-export function createFilesystemServer(ctx: FilesystemContext): McpServer {
-  const server = new McpServer(
-  { name: "zenith-mcp", version: _pkg.version },
-  {
-    instructions: "Each call must set mode and the corresponding params, unless the schema lists the param explicitly as optional. Global Mode Rule: tool params apply only to the mode specified in the tools description. A param is shared only when explicitly listed for multiple modes."
-  }
-);
+/**
+ * Exposed list of every tool name the server knows about, in registration order.
+ * Used by entrypoints that need to advertise the available tools (e.g. for
+ * health checks or schema dumps) without having to import every tool module.
+ */
+export const ALL_TOOL_NAMES: ReadonlyArray<string> = TOOL_REGISTRY.map(t => t.name);
 
+/**
+ * Default server instructions string. Each entrypoint passes this (or its own
+ * override) into its SDK-specific `new McpServer(..., { instructions })` call.
+ */
+export const SERVER_INSTRUCTIONS =
+  "Each call must set mode and the corresponding params, unless the schema lists the param explicitly as optional. Global Mode Rule: tool params apply only to the mode specified in the tools description. A param is shared only when explicitly listed for multiple modes.";
+
+/**
+ * Loads config, syncs the on-disk tool list against the in-code TOOL_REGISTRY,
+ * configures the auto-write adapter if enabled, and calls each enabled tool's
+ * `register(toolServer, ctx)` against the supplied SDK-agnostic ToolServer.
+ *
+ * `ToolServer` is this package's minimal abstraction for the subset of
+ * `registerTool(...)` behavior used by the tool modules. It is intended to map
+ * cleanly onto the MCP SDK servers at runtime, but the SDKs' TypeScript
+ * declarations are not currently assignable to `ToolServer` in every entrypoint
+ * without an adapter or cast. Keep this contract SDK-agnostic here, and let
+ * SDK-specific entrypoints bridge any typing differences as needed.
+ */
+export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): void {
   // ── Config: load, sync discovered tools, patch if needed ─────────────
   const config: ZenithConfig = loadConfig();
 
-  // Build the list of available tool names dynamically from the registry.
   const availableToolNames: string[] = TOOL_REGISTRY.map((t) => t.name);
-
-  // Sync tools with registry (adds new, removes stale).
   const { config: syncedConfig, changed } = syncToolsWithConfig(config, availableToolNames);
 
   // Only write to disk if tools actually changed, and use surgical patching
@@ -115,77 +145,28 @@ export function createFilesystemServer(ctx: FilesystemContext): McpServer {
   }
 
   // ── Register only the tools that are enabled in config ───────────────
-  const toolServer = server as ToolServer;
   for (const entry of TOOL_REGISTRY) {
     if (syncedConfig.tools[entry.name]) {
       entry.register(toolServer, ctx);
     }
   }
-
-  return server;
 }
 
-export function attachRootsHandlers(server: McpServer, ctx: FilesystemContext): void {
-  async function updateAllowedDirectoriesFromRoots(requestedRoots: Array<{ uri: string; name?: string }>): Promise<void> {
-    const validatedRootDirs = await getValidRootDirectories(requestedRoots);
-    if (validatedRootDirs.length > 0) {
-      ctx.setAllowedDirectories(validatedRootDirs);
-      onRootsChanged(ctx);
-      console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
-    } else {
-      console.error("No valid root directories provided by client");
-    }
+/**
+ * Applies a fresh roots list to the FilesystemContext. Called by each
+ * entrypoint from inside its SDK-specific `setNotificationHandler` /
+ * `oninitialized` blocks. Returns nothing; logs to stderr on the human path.
+ */
+export async function updateAllowedDirectoriesFromRoots(
+  requestedRoots: Array<{ uri: string; name?: string }>,
+  ctx: FilesystemContext,
+): Promise<void> {
+  const validatedRootDirs = await getValidRootDirectories(requestedRoots);
+  if (validatedRootDirs.length > 0) {
+    ctx.setAllowedDirectories(validatedRootDirs);
+    onRootsChanged(ctx);
+    console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
+  } else {
+    console.error("No valid root directories provided by client");
   }
-
-  server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
-    try {
-      const response = await server.server.listRoots();
-      if (response && 'roots' in response) {
-        await updateAllowedDirectoriesFromRoots(
-          response.roots.map(r =>
-            r.name !== undefined
-              ? { uri: r.uri, name: r.name }
-              : { uri: r.uri }
-          )
-        );
-      }
-    } catch (error) {
-      console.error("Failed to request roots from client:", error instanceof Error ? error.message : String(error));
-    }
-  });
-
-  server.server.oninitialized = async () => {
-    const clientCapabilities = server.server.getClientCapabilities();
-    if (clientCapabilities?.roots) {
-      try {
-        const response = await server.server.listRoots();
-        if (response && 'roots' in response) {
-          await updateAllowedDirectoriesFromRoots(
-            response.roots.map(r =>
-              r.name !== undefined
-                ? { uri: r.uri, name: r.name }
-                : { uri: r.uri }
-            )
-          );
-        } else {
-          console.error("Client returned no roots set, keeping current settings");
-        }
-      } catch (error) {
-        console.error("Failed to request initial roots from client:", error instanceof Error ? error.message : String(error));
-      }
-    } else {
-      const currentDirs = ctx.getAllowedDirectories();
-      if (currentDirs.length > 0) {
-        console.error("Client does not support MCP Roots, using allowed directories set from server args:", currentDirs);
-      } else {
-        throw new Error(
-          `Server cannot operate: No allowed directories available. ` +
-          `Server was started without command-line directories and client either ` +
-          `does not support MCP roots protocol or provided empty roots. ` +
-          `Please either: 1) Start server with directory arguments, or ` +
-          `2) Use a client that supports MCP roots protocol and provides valid root directories.`
-        );
-      }
-    }
-  };
 }
