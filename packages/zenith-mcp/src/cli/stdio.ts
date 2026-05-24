@@ -2,11 +2,10 @@
 // ---------------------------------------------------------------------------
 // cli/stdio.ts — stdio MCP entrypoint
 //
-// SDK ownership: this entrypoint is on @modelcontextprotocol/server@2.0.0-alpha.2.
-// The v2 SDK's task-queue dispatch model is the reason: under concurrent
-// requests, v2 enqueues per-task instead of v1's fire-and-forget
-// `Promise.resolve().then(handler)`, which is the parallel-dispatch race
-// that surfaces in agent-driven workloads (write+stat fired together).
+// SDK ownership: this entrypoint is on @modelcontextprotocol/server@2.0.0-alpha.2
+// for v2-specific compatibility/evaluation needs. This does not imply that
+// regular v2 tool dispatch avoids the parallel-dispatch race seen in v1;
+// keep that limitation in mind when reasoning about concurrent requests.
 //
 // Roots wiring lives directly in this file (no wrapper) — the v2 API
 // `setNotificationHandler('notifications/roots/list_changed', handler)`
