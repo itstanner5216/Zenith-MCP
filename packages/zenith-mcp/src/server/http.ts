@@ -19,9 +19,9 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 // Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
 //         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
-//         The stdio entrypoint uses v2 (see src/cli/stdio.ts) for its task-queue
-//         dispatch model. The tool implementations are SDK-agnostic via the
-//         ToolServer abstraction in src/tools/types.ts.
+//         The stdio entrypoint uses v2 (see src/cli/stdio.ts), while the tool
+//         implementations remain SDK-agnostic via the ToolServer abstraction in
+//         src/tools/types.ts.
 import { createRequire } from 'module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
