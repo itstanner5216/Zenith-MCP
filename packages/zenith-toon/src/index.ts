@@ -1,6 +1,25 @@
-// Ported from: toon/__init__.py public surface
-// Python __init__.py exports: encode_output, compress, CompressConfig, TOONCompressor
-// Additional re-exports for Wave 4 and integration use.
+// zenith-toon — Token-Optimized Output Normalization
+//
+// A compression library for making codebase scanning cheap. When a model is
+// orienting in a codebase (understanding structure, finding relationships),
+// it should not pay full token cost for content that's largely noise.
+//
+// Architecture:
+//   Layer 1 (LIVE): String codecs — compressString(), compressSourceStructured()
+//     Content-type-aware compression of single strings. Language-aware when the
+//     consumer provides tree-sitter structure (see compressSourceStructured).
+//
+//   Layer 2 (WIRING IN PROGRESS): Multi-entry pipeline — compress()
+//     For inputs that are lists/objects: dedup → score → tier → budget → per-entry codec.
+//     Components: Deduplicator, BMXPlusIndex, SageRank, BudgetAllocator, encodeRecursive.
+//
+//   Layer 3: Config & routing — ToonConfig, PRESETS, routeField()
+//     Rule-based field routing for dict-shaped entries in the pipeline.
+//
+// Language awareness is provided by the consumer via the `structure` parameter
+// to compressSourceStructured(). In Zenith-MCP, this comes from:
+//   src/core/tree-sitter/compression-structure.ts (17 languages with anchor rules)
+//   src/core/tree-sitter/languages.ts (43 grammar mappings)
 
 // ---------------------------------------------------------------------------
 // Legacy API (backward-compatible)

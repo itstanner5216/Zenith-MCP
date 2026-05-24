@@ -1,14 +1,3 @@
-// Ported from: toon/router.py
-// Python line count: 119 (after stripping self-test at line 123, skipping 163 lines)
-// Port verification:
-//   - field_matcher_matches: all four conditions (field_path exact+prefix, field_pattern,
-//     min_length, max_length) ported with identical AND logic
-//   - Non-string values silently skip min_length/max_length checks (same as Python)
-//   - Prefix match requires trailing "." to prevent "payload_extra" matching "payload"
-//   - route_field priority chain: preserve_rules → encode_rules → default_codec → "passthrough"
-//   - Global kill-switch: config.enabled=false → always "passthrough"
-//   - re.search(pattern, last_segment) → new RegExp(pattern).exec(lastSegment) (no anchoring)
-
 import type { FieldMatcher, ToonConfig } from './config.js';
 
 // ---------------------------------------------------------------------------

@@ -1,21 +1,3 @@
-// Ported from: toon/budget.py
-// Python line count: 122
-// Port verification:
-//   - TIER_RATIOS: {"high": 0.60, "medium": 0.30, "low": 0.10} preserved exactly
-//   - OVERHEAD_RESERVE: 0.05 (5%) preserved exactly
-//   - reserve = int(total_budget * OVERHEAD_RESERVE) -> Math.floor equivalent via int()
-//   - preserve_tokens: sum of estimate_tokens_obj for each "preserve" tier entry
-//   - remaining = max(0, usable - preserve_tokens)
-//   - tier_budgets[tier_name] = int(remaining * ratio) -> Math.floor via int()
-//   - tier_budgets["cut"] = 0
-//   - tier iteration order: ["preserve", "high", "medium", "low", "cut"]
-//   - tier_scores: max(scores[i], 1e-10) for each index in tier
-//   - share formula: tier_scores[idx] / score_sum if score_sum > 0 else 1.0 / len(tier_indices)
-//   - entry_budgets[i] = max(10, int(tier_budget * share))
-//   - "preserve" tier: entry_budgets[i] = estimate_tokens_obj(entries[i]["content"])
-//   - "cut" tier: entry_budgets[i] stays 0
-//   - BudgetAllocation: entry_budgets, tier_budgets, total_budget, reserve
-
 import { estimateTokensObj } from './utils.js';
 import { EntryMeta } from './types.js';
 

@@ -1,20 +1,3 @@
-// Ported from: toon/engines/bmx_plus.py
-// Python line count: 482
-// Port verification:
-//   - _fastSigmoid: Padé rational approximation, identical clamp at ±8.0, same formula
-//   - _tokenize: _WORD_RE = /\b\w+\b/g applied to text.toLowerCase(), same as Python _WORD_RE.findall(text.lower())
-//   - buildIndex: resets state when chunks provided, builds posting lists, doc_freqs, term_total_freqs, computes entropies then parameters
-//   - search: TAAT accumulation, BM25 TF saturation (k1=1.5, b=0.75), entropy-aware IDF, tanh coverage bonus, Soft-AND final score, normalize_scores path, top_k slice
-//   - updateIndex: lazy entropy (dirty set), removes old doc first if chunk_id exists
-//   - removeFromIndex: decrements doc_freqs, prunes zero-freq terms from all caches, updates avg_doc_length
-//   - _computeParameters: alpha=max(0.5,min(1.5,avgdl/100)), beta=1/log(1+N) or 0.01, idf_max from idf_cache
-//   - _computeTermEntropies: df<2 shortcut, empty posting shortcut, IDF-info, TF variance, blend_alpha, Shannon entropy via sigmoid-mapped dist, blended info
-//   - _flushDirtyEntropies: intersection of dirty set and query terms only
-//   - documentCount/vocabularySize getters, getStats rounds to 2/4 decimal places matching Python round()
-//   - All Python defaultdict(float) accumulators use Map<string, number> with ?? 0 default
-//   - Math.log used for natural log (matching Python math.log)
-//   - JS /g regex is stateful — _WORD_RE recreated per call via lastIndex reset (see _tokenize)
-
 /**
  * BMX+ — Entropy-Weighted Lexical Search via Term-At-A-Time Evaluation.
  *
@@ -28,7 +11,7 @@
  */
 
 // Module-level word regex
-// Python's \w is unicode-aware by default. In JS, we must use \p{L} and \p{N}
+// JS \w is not unicode-aware — use \p{L} and \p{N} for equivalent behavior
 // with the 'u' flag to match \w's unicode behavior.
 const _WORD_RE = /[\p{L}\p{N}_]+/gu;
 
@@ -113,7 +96,6 @@ export class BMXPlusIndex {
   // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Python: _WORD_RE.findall(text.lower())
    * JS /g regex is stateful — use String.prototype.match which returns all
    * matches without the statefulness issue of repeated .test()/.exec() calls.
    */
@@ -384,9 +366,6 @@ export class BMXPlusIndex {
       infoWeights.set(t, v);
       infoTotal += v;
     }
-    // infoTotal is accumulated but not used beyond this point (matches Python)
-
-    // TAAT accumulation — Python uses defaultdict(float)
     const scores = new Map<string, number>();
     const infoAccum = new Map<string, number>();
     const tanhCoverage = new Map<string, number>();

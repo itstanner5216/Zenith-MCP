@@ -1,19 +1,3 @@
-// Ported from: toon/presets.py
-// Python line count: 95 (no self-test)
-// Port verification:
-//   - All four presets preserved: "generic", "codex_logs", "mcp_responses", "aggressive"
-//   - All field values are character-for-character identical to Python source
-//   - PRESETS dict -> Record<string, ToonConfig> with same key names
-//   - Python uses direct ToonConfig()/FieldMatcher()/etc. constructors;
-//     TS uses defaultToonConfig/defaultFieldMatcher/etc. factories with same field values
-//   - "generic": encode_rules=[min_length=500, truncate budget=400]
-//   - "codex_logs": preserve_rules pattern "(message|reasoning)$",
-//     encode_rules: payload.output truncate/400, payload.arguments parse_json,
-//     (output|stdout|stderr)$ truncate/300
-//   - "mcp_responses": preserve_rules pattern "(error|status|message|id|type)$",
-//     encode_rules: min_length=1000 truncate/500
-//   - "aggressive": bmx enabled=true, encode_rules: min_length=200 truncate/200
-
 import {
   defaultToonConfig,
   defaultFieldMatcher,

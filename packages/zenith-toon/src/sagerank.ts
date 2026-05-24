@@ -1,20 +1,3 @@
-// Ported from: engines/sagerank.py
-// Python line count: 846
-// Port verification:
-//   - Graph build: posting-list intersection (TAAT), eIDF-weighted cosine similarity,
-//     self-tuning threshold at 1% of max similarity (_buildGraph)
-//   - Scoring: BM25-style saturation TF, entropy-blended eIDF per term (_computeEidf)
-//   - Convergence: power iteration PageRank, damping=0.85, max_iter=50, epsilon=1e-6,
-//     L1 norm convergence check, dangling-node mass to personalization (_pagerank)
-//   - Query bias: BMX+ TAAT query scoring blended into personalization vector (_scoreQuery)
-//   - Coverage selection: greedy MMR-like PR(i)*(lambda + (1-lambda)*novel/total) (_extractWithCoverage)
-//   - Position prior: centrality-detected lead bias + fixed trail boost (_positionPrior)
-//   - Keyword extraction: eIDF * sqrt(df) scoring (_getKeywords)
-//   - All math: Math.log (natural), Math.sqrt, Math.exp, Math.abs, Math.floor for floor-div
-//   - Python // → Math.floor(a/b), Python ** → Math.pow or ** operator
-//   - Python None → null, falsy-length guards on arrays/maps
-//   - Python Counter → Map<string,number> with manual increment
-
 // ════════════════════════════════════════════════════════════════════════
 //  Constants
 // ════════════════════════════════════════════════════════════════════════
@@ -161,7 +144,7 @@ export class SageRank {
 
   static _tokenize(text: string): string[] {
     const lower = text.toLowerCase();
-    // Python's \w is unicode-aware by default. In JS, we must use \p{L} and \p{N}
+    // JS \w is not unicode-aware — use \p{L} and \p{N} for equivalent behavior
     const matches = lower.match(/[\p{L}\p{N}_]+/gu);
     return matches !== null ? matches : [];
   }
@@ -809,7 +792,6 @@ export class SageRank {
     }
 
     // lead_bias: recompute position prior first element minus 1
-    // Python: self._position_prior(centrality, n)[0] - 1.0 if n > 0 else 0.0
     const leadBias =
       n > 0 ? SageRank._positionPrior(centrality, n)[0]! - 1.0 : 0.0;
 

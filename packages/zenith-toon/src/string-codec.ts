@@ -1,6 +1,17 @@
-// Ported from: toon/string_codec.py
-// Python line count: 977
-// Port verification: dispatch order (source → stack → JSON → log → truncate), all 6 compressors, structure-aware compression, doc-block stripping
+// string-codec.ts — Content-type-aware text compression
+//
+// Two public entry points:
+//   - compressString(text, budget) — auto-detects content type and compresses
+//   - compressSourceStructured(text, budget, structure) — language-aware compression
+//     using tree-sitter block/anchor metadata provided by the consumer
+//
+// Language awareness: The `structure` parameter in compressSourceStructured is
+// produced by tree-sitter in the consuming package. In Zenith-MCP this is:
+//   zenith-mcp/src/core/tree-sitter/compression-structure.ts → getCompressionStructure()
+// which extracts function blocks, class definitions, and control-flow anchors
+// for 17 languages (JS, TS, Python, Go, Rust, Java, C, C++, C#, Kotlin, PHP,
+// Ruby, Swift, Bash, Lua, Nix, TSX). All 43 supported grammars get block-level
+// structure; the 17 above additionally get intra-block anchor priorities.
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
 import type { StructureBlock, Anchor } from './types.js';
@@ -8,28 +19,20 @@ import type { StructureBlock, Anchor } from './types.js';
 // ---------------------------------------------------------------------------
 // Detection patterns
 // ---------------------------------------------------------------------------
-
-// Python: re.compile(r'\b(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b', re.IGNORECASE)
 const _LOG_SEVERITY_RE =
   /\b(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b/i;
-
-// Python: re.compile(r'^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}', re.MULTILINE)
 const _TIMESTAMP_LINE_RE = /^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}/;
 
 const _ERROR_KEYWORDS: ReadonlySet<string> = new Set([
   'error', 'fatal', 'critical', 'exception', 'traceback',
   'caused by', 'failed', 'killed', 'oom', 'panic', 'crash', 'abort',
 ]);
-
-// Python: re.compile(r'^\s+(at\s+|File\s+")', re.MULTILINE)
 const _FRAME_RE = /^\s+(at\s+|File\s+")/;
 
 // Stack-trace header detection: language-agnostic structural signal.
 // Matches Python "Traceback (most recent call last):", JVM "Caused by:" chains,
 // and class names ending in Error/Exception/Fault/Panic at line start.
 const _STACK_HEADER_RE = /^(?:Traceback \(most recent call last\):|Caused by:\s|[\w.$]+(?:Error|Exception|Fault|Panic)(?::|$))/;
-
-// Python: re.compile(r'(java\.|javax\.|sun\.|org\.springframework\.|org\.python\.|importlib\.|_bootstrap|site-packages)')
 const _USER_FRAME_EXCLUDES =
   /(java\.|javax\.|sun\.|org\.springframework\.|org\.python\.|importlib\.|_bootstrap|site-packages)/;
 
@@ -59,18 +62,10 @@ const _DUNDER_KEEPERS: ReadonlySet<string> = new Set([
   '__str__', '__repr__', '__len__', '__iter__', '__next__',
   '__getitem__', '__setitem__', '__contains__',
 ]);
-
-// Python:
 // r'^(?:(?:async\s+)?def\s+(\w+)|class\s+(\w+)|(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?class\s+(\w+)|(?:export\s+)?(?:interface|type|enum)\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\())'
 const _DEF_RE = /^(?:(?:async\s+)?def\s+(\w+)|class\s+(\w+)|(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?class\s+(\w+)|(?:export\s+)?(?:interface|type|enum)\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\())/;
-
-// Python: r'^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)'
 const _SOURCE_IMPORT_RE = /^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)/;
-
-// Python: r'^\s*@\w+'
 const _DECORATOR_RE = /^\s*@\w+/;
-
-// Python: r'^\s*(?:\*\s*)?@(?:param|returns?|type|template|typedef|property|throws?)\b'
 const _DOC_TAG_RE = /^\s*(?:\*\s*)?@(?:param|returns?|type|template|typedef|property|throws?)\b/;
 
 const _MIN_OMISSION_THRESHOLD = 3;
@@ -116,13 +111,11 @@ function _isStackTrace(text: string): boolean {
 }
 
 function _isJsonString(text: string): boolean {
-  // Python: stripped.startswith('{') or stripped.startswith('[') and len(stripped) > 2
   const stripped = text.trim();
   return (stripped.startsWith('{') || stripped.startsWith('[')) && stripped.length > 2;
 }
 
 function _isLogOutput(text: string): boolean {
-  // Python: lines = text.split('\n', 20)  — splits at most 20 times → up to 21 parts
   const lines = text.split('\n', 21).slice(0, 21);
   let tsCount = 0;
   let sevCount = 0;
@@ -134,7 +127,6 @@ function _isLogOutput(text: string): boolean {
 }
 
 function _isSourceCode(text: string): boolean {
-  // Python: for line in text.split('\n', 50) — split at most 50 times → up to 51 parts
   let score = 0;
   const lines = text.split('\n', 51).slice(0, 51);
   for (const line of lines) {
@@ -328,7 +320,6 @@ function _compressJson(obj: unknown, budget: number, depth: number): string {
     }
 
   } else {
-    // Python: json.dumps(obj, default=str)
     let s: string;
     if (obj === null || obj === undefined) {
       s = 'null';
@@ -343,7 +334,6 @@ function _compressJson(obj: unknown, budget: number, depth: number): string {
       s = JSON.stringify(String(obj));
     }
     if (s.length > depthBudget) {
-      // Python: json.dumps(str(obj)[:depth_budget - 10] + '...')
       const objStr = String(obj === null || obj === undefined ? 'None' : obj);
       return JSON.stringify(objStr.slice(0, depthBudget - 10) + '...');
     }
@@ -479,7 +469,6 @@ function _compressSourceCode(text: string, budget: number): string {
       if (s.startsWith('"""') || s.startsWith("'''")) {
         const marker = s.slice(0, 3);
         modDocIndices.push(i);
-        // Python: not (s.count(marker) >= 2 and len(s) > 3) => multi-line
         const countMarker = s.split(marker).length - 1;
         if (!(countMarker >= 2 && s.length > 3)) {
           let j = i + 1;
@@ -727,7 +716,6 @@ function _compressSourceStructured(
   }
 
   // Score each block — mutate a local copy to avoid affecting caller
-  // Python mutates block dicts in place; we do the same with a working copy
   const workingStructure: Array<StructureBlock & { priority: number }> = structure.map((block) => {
     const name = (block.name ?? '').trim();
     const exported = block.exported ?? false;
@@ -1079,7 +1067,7 @@ function _contentAwareTruncate(text: string, budget: number): string {
 /**
  * Compress a string using content-type detection and type-specific strategies.
  *
- * Dispatch order (follows Python source exactly):
+ * Dispatch order:
  *   1. _isSourceCode (import/def patterns are unambiguous structural signals)
  *   2. _isStackTrace
  *   3. _isJsonString → parse + _compressJson

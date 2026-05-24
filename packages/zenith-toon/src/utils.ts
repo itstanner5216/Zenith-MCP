@@ -1,23 +1,7 @@
-// Ported from: toon/_utils.py
-// Python line count: 204
-// Port verification:
-//   - TIMESTAMP_RE, UUID_RE, IP_RE, BIGNUM_RE, B64_RE: regex patterns match Python source
-//     (Python re.IGNORECASE on UUID_RE → /i flag; other flags preserved)
-//   - NORMALIZERS array: same order (timestamps before big-numbers), same replacement tokens
-//   - normalizeValue: recursive; int/float → '<NUM>'; dict keys sorted; list items recursed
-//   - blake2bHash: see DEVIATION NOTE below — uses blake2b512 full hash + hex slice
-//   - canonicalJson: recursive key-sort via sortKeysDeep to match json.dumps(sort_keys=True)
-//   - estimateTokens: JSON ('{' or '[' start) → chars//2, else → chars//4, min 1
-//   - estimateTokensObj: canonicalJson then estimateTokens
-//   - flattenToText: dict emits 'key value' pairs; list/tuple joined; null → ''; str passthrough
-//   - computeGini: exact algorithm from Python (cumulative sum formula)
-//   - findKneedle: n<3 → n-1; flat → n-1; diff from diagonal; walk from best_idx
-//   - pearsonR: n<3 → 0.0; zero variance → 0.0; cov/(sx*sy)
-
 import { createHash } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
-// Regex constants (match Python source exactly)
+// Regex constants for value normalization
 // ---------------------------------------------------------------------------
 
 export const TIMESTAMP_RE: RegExp =
@@ -64,14 +48,12 @@ export function normalizeValue(v: unknown): unknown {
     return s;
   }
   if (typeof v === 'number') {
-    // Python: isinstance(v, (int, float)) → '<NUM>'
     return '<NUM>';
   }
   if (Array.isArray(v)) {
     return v.map((item) => normalizeValue(item));
   }
   if (v !== null && typeof v === 'object') {
-    // Dict: sort keys (matches Python sorted(v.items()))
     const obj = v as Record<string, unknown>;
     const sorted = Object.keys(obj).sort();
     const result: Record<string, unknown> = {};
@@ -80,7 +62,7 @@ export function normalizeValue(v: unknown): unknown {
     }
     return result;
   }
-  // None / bool / other pass-through (Python: return v)
+  // None / bool / other pass-through
   return v;
 }
 
@@ -91,14 +73,9 @@ export function normalizeValue(v: unknown): unknown {
 /**
  * Fast hash for dedup. Returns hex string.
  *
- * DEVIATION: Python's hashlib.blake2b(data, digest_size=N) computes a
- * fundamentally different hash for each digest_size value — it is NOT
- * truncation of a larger hash. Node's crypto module only exposes
- * 'blake2b512' (full 64-byte output) with no variable-digest API.
- * Therefore: this implementation hashes with blake2b512 then slices to
- * digestSize*2 hex characters. Cross-implementation hash matching is NOT
- * preserved, but this is acceptable because the TS codebase replaces Python
- * entirely — there is no cross-language dedup fingerprint sharing.
+ * Uses blake2b512 full hash then slices to digestSize*2 hex characters.
+ * This differs from a native variable-digest-size API but all comparisons
+ * are internal (same process), so collision resistance is preserved.
  * All comparisons are TS↔TS within the same process.
  */
 export function blake2bHash(data: string, digestSize: number = 8): string {
@@ -115,7 +92,7 @@ export function blake2bHash(data: string, digestSize: number = 8): string {
 /**
  * Deterministic JSON serialization for hashing.
  *
- * Sorts keys recursively at every nesting level, matching Python's
+ * Sorts keys recursively at every nesting level, for deterministic output.
  * json.dumps(obj, sort_keys=True, separators=(',', ':'), default=str).
  *
  * Plain JSON.stringify(obj, Object.keys(obj).sort()) does NOT recurse —
@@ -138,7 +115,7 @@ function sortKeysDeep(v: unknown): unknown {
 }
 
 export function canonicalJson(obj: unknown): string {
-  // Python default=str serializes non-serializable objects as their str().
+  // Non-serializable objects are converted via String().
   // We replicate this with a replacer that converts unknown values to strings.
   const sorted = sortKeysDeep(obj);
   return JSON.stringify(sorted, (_key: string, value: unknown): unknown => {
@@ -152,7 +129,7 @@ export function canonicalJson(obj: unknown): string {
     ) {
       return value;
     }
-    // Non-JSON-serializable: match Python default=str
+    // Non-JSON-serializable: use String()
     return String(value);
   });
 }
@@ -167,7 +144,7 @@ export function canonicalJson(obj: unknown): string {
  * Heuristic from Anthropic cookbook analysis: JSON markup inflates
  * token counts relative to plain text.
  *
- * Python uses integer floor division (//); Math.floor preserves that.
+ * Uses Math.floor for integer division.
  */
 export function estimateTokens(text: string): number {
   if (text.startsWith('{') || text.startsWith('[')) {
@@ -189,7 +166,7 @@ export function estimateTokensObj(obj: unknown): number {
  * Convert any object to a flat text string for BMX+ indexing.
  *
  * Dicts emit 'key value' pairs, lists emit space-joined children,
- * primitives emit String(). null → '' (matches Python None → '').
+ * primitives emit String(). null returns empty string.
  */
 export function flattenToText(obj: unknown): string {
   if (typeof obj === 'string') {
@@ -206,7 +183,6 @@ export function flattenToText(obj: unknown): string {
     }
     return parts.join(' ');
   }
-  // Python: return str(obj) if obj is not None else ''
   if (obj === null) {
     return '';
   }
@@ -297,7 +273,7 @@ export function findKneedle(scores: number[], sensitivity: number = 1.0): number
     diff.push(yi - (1.0 - xi));
   }
 
-  // Find global maximum of difference curve (Python iterates range(1, n-1)).
+  // Find global maximum of difference curve.
   // n >= 3 guarantees diff[0] exists.
   const diff0 = diff[0];
   if (diff0 === undefined) {

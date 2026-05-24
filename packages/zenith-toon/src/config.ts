@@ -1,18 +1,3 @@
-// Ported from: toon/config.py
-// Python line count: 315
-// Port verification:
-//   - All dataclass fields preserved with exact default values
-//   - BudgetTier, FieldMatcher, CodecConfig, EncoderRule: all required fields, no defaults changed
-//   - ArrayCodecConfig defaults: enabled=true, threshold=5, sample_size=3
-//   - StringCodecConfig defaults: enabled=true, default_budget=500, min_length=200, parse_json=true, stack_trace_max_user_frames=10
-//   - DedupConfig defaults: enabled=true, scope="session", maxsize=5000
-//   - BMXConfig defaults: enabled=false, mode="self", query=null, core_fraction=0.15, gini_threshold=0.2, tiers=[{0.75,"high"},{0.25,"medium"},{0.0,"low"}]
-//   - ToonConfig defaults: enabled=true, preserve_rules=[], encode_rules=[], default_codec=null, array/string/dedup/bmx=defaults, emit_markers=true, emit_stats=false
-//   - preset() raises Error for unknown names with sorted valid keys list
-//   - fromCompressConfig() maps all fields: preserve_rules, encode_rules, array, string, dedup, bmx, emit_markers, emit_stats
-//   - tier_ratios sorted descending by percentile
-//   - deepCopyConfig uses JSON.parse/JSON.stringify (all configs are JSON-safe)
-
 /**
  * A single tier boundary used by BMX scoring to bucket entries.
  * Entries whose normalised score is >= percentile are assigned tier_name.
@@ -230,7 +215,7 @@ interface LegacyCompressConfig {
  * Raises Error for unknown presets, listing the valid ones.
  *
  * Note: In the TS port, PRESETS must be passed in directly to avoid
- * the circular-import lazy-load pattern used in the Python source.
+ * circular imports by using factory functions.
  */
 export function toonConfigPreset(
   name: string,

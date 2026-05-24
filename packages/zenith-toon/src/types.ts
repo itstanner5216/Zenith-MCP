@@ -1,16 +1,4 @@
-// Ported from: toon/config.py, toon/dedup.py, toon/pipeline.py, toon/encoder.py, toon/_utils.py
-// Python line count: N/A (aggregate of shared shapes across 5 files)
-// Port verification:
-//   - All dataclass fields present with correct types
-//   - Optional fields use T | null to match Python Optional[T]
-//   - Python Any at public boundaries -> unknown
-//   - camelCase field names match the bridge contract (startLine/endLine from tree-sitter.ts)
-//   - DedupStats.totalRemoved exposed as a getter (matches Python @property)
-//   - TemplateInfo matches dedup.py fields exactly
-//   - CompressConfig defaults match pipeline.py defaults
-
 // ---------------------------------------------------------------------------
-// Shared structural types (used by Wave 2 and Wave 3 modules)
 // ---------------------------------------------------------------------------
 
 export interface StructureBlock {
@@ -109,7 +97,7 @@ export interface DedupStats {
   template: number;
 }
 
-/** Computed property equivalent to Python DedupStats.total_removed */
+/** Computed total of all removed entries across dedup tiers */
 export function dedupStatsTotal(stats: DedupStats): number {
   return stats.exact + stats.near + stats.template;
 }
@@ -191,7 +179,7 @@ export interface CompressedOutput {
 
 /**
  * TOON metadata summary for compressed arrays.
- * Exact field names and values must match Python encoder output.
+ * Field names match the toon encoder output format.
  */
 export interface ToonArrayMeta {
   __toon: true;

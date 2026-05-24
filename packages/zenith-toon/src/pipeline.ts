@@ -1,21 +1,3 @@
-// Ported from: toon/pipeline.py
-// Python line count: 572 (up to `if __name__ == "__main__":` at line 573)
-// Port verification:
-//   - 5-phase scoring: Phase 0 (count guard) → Phase 1 (BMX+ index) →
-//     Phase 2 (SageRank/hybrid centrality) → Gini check → hubness detection
-//     → Phase 3 (Kneedle core) → Phase 4 (BMX+ relevance vs core) →
-//     redundancy check → Phase 5 (tier assignment p75/p25)
-//   - Deterministic seeding: Python uses random.Random(md5.hexdigest()) for n>1000.
-//     TS uses Mulberry32 PRNG seeded from MD5 hex prefix (see seededPRNG below).
-//     Same input → same output; exact float values differ from Python's Mersenne Twister.
-//   - Pipeline order: dedup → _scoreEntries → BudgetAllocator.allocate → _compressEntries
-//   - compress() returns same top-level type as input (single obj or list)
-//   - TOONCompressor.feed() returns null for deduped entries (None in Python)
-//   - _compressEntry: template marker, str → compressString, dict → _compressDict,
-//     array/tuple → encodeRecursive, else passthrough
-//   - _compressDict: preserve_fields passthrough, encode_fields array/str compress, else passthrough
-//   - CompressConfig defaults match Python exactly
-
 import { createHash } from 'node:crypto';
 import {
   flattenToText,
@@ -350,12 +332,8 @@ function _scoreEntries(
     self_scores = sage_result.scores;
   } else {
     // Hybrid: SageRank sample + BMX+ scoring
-    // Deterministic seed for reproducibility.
-    // DEVIATION from Python: Python uses random.Random(md5.hexdigest()) which
-    // gives a Mersenne Twister PRNG seeded with the hex string. Here we use
-    // Mulberry32 seeded from the first 8 hex chars of MD5 as a 32-bit uint.
-    // Same input → same output (deterministic); exact float values differ
-    // from Python's Mersenne Twister. Statistical equivalence is preserved.
+    // Deterministic seeding: Mulberry32 PRNG from MD5 hex prefix.
+
     let seed_text: string;
     if (texts.length > 0) {
       const first_text = texts[0];
@@ -827,19 +805,13 @@ function _compressDict(
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic PRNG (replaces Python random.Random(md5.hexdigest()))
+// Deterministic PRNG
 // ---------------------------------------------------------------------------
 
 /**
  * Create a deterministic PRNG seeded from an MD5 hex digest.
- *
- * Python uses random.Random(hashlib.md5(seed_text.encode()).hexdigest())
- * which seeds a Mersenne Twister with the full hex string. Here we use
- * Mulberry32 seeded from the first 8 hex chars of MD5 as a 32-bit uint.
- *
- * Deviation: exact float sequences differ from Python's Mersenne Twister,
- * but determinism is preserved (same input → same output) and the sampling
- * distribution is statistically equivalent (uniform over the index range).
+ * Uses Mulberry32 seeded from the first 8 hex chars of MD5 as a 32-bit uint.
+ * Same input always produces same output (deterministic sampling).
  */
 function seededPRNG(seed: string): () => number {
   const hex = createHash('md5')

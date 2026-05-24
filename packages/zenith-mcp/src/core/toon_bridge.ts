@@ -1,3 +1,14 @@
+// toon_bridge.ts — Connects zenith-toon's compression to tree-sitter language awareness
+//
+// This is the integration layer where language structure meets compression:
+//   1. Detects file language via getLangForFile() (43 grammars)
+//   2. Extracts block + anchor structure via getCompressionStructure() (tree-sitter)
+//   3. Passes structure to zenith-toon's compressSourceStructured()
+//
+// Without this bridge, zenith-toon falls back to compressString() which still
+// works but lacks structural awareness (no priority-based block selection,
+// no anchor preservation within partially-shown functions).
+
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { getCompressionStructure, getLangForFile } from './tree-sitter.js';

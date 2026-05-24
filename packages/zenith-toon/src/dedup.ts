@@ -1,19 +1,3 @@
-// Ported from: toon/dedup.py
-// Python line count: 278
-// Port verification:
-//   - Tier 1 exact hash: blake2bHash(canonicalJson(entry)) with default digest_size=8
-//   - Tier 2 near-dup: normalize_value for dicts, _normalize_string for strings, then hash
-//   - Tier 2 dict path: schema_h = blake2bHash(canonicalJson(sorted(keys)), digest_size=4)
-//   - Tier 3 template detection: 3+ entries, >30% static keys (>80% same value threshold)
-//   - _compute_template_key: most_common via manual count, frequency > 0.8, len(static) > len(keys)*0.3
-//   - _collapse_templates: removes middle entries (first_index < orig_idx < last_index), annotates first with __toon_template/template_count/template_first/template_last
-//   - LRU eviction: OrderedDict(last=False) -> Map insertion order + shift() from front
-//   - reset() clears all four state maps
-//   - _detect_type: "dict"|"list"|"string"|"primitive"
-//   - TemplateInfoFull re-exported as TemplateInfo (public alias per Python naming)
-//   - DedupStats, DedupResult, EntryMeta re-exported from ./types.js
-//   - NORMALIZERS: each entry is [() => RegExp, string] — call factory per use
-
 import {
   blake2bHash,
   canonicalJson,
@@ -34,7 +18,7 @@ export type { DedupStats, DedupResult };
 /**
  * TemplateInfo as defined in dedup.py: first_content, last_content, count,
  * first_index, last_index. This is TemplateInfoFull in types.ts — we re-export
- * it under the Python name so import sites can use "TemplateInfo".
+ * it as TemplateInfo for public API convenience.
  */
 export type TemplateInfo = TemplateInfoFull;
 

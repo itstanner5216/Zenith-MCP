@@ -1,16 +1,3 @@
-// Ported from: toon/encoder.py
-// Python line count: 132
-// Port verification:
-//   - encodeOutput: threshold <= 0 raises error with identical message format
-//   - encodeRecursive: null → null; list > threshold → {__toon: true, count, sample:[first 3]}
-//   - encodeRecursive: list <= threshold → recursively encoded items
-//   - encodeRecursive: dict → all values recursively encoded, keys preserved
-//   - encodeRecursive: tuple (no native TS tuples) treated as list — handled at call site
-//   - encodeRecursive: primitives (string, number, boolean) returned unchanged
-//   - __toon metadata format: { __toon: true, count: N, sample: [...] } matches Python exactly
-//   - compress re-exported from ./pipeline.js (intentional forward reference for Wave 3)
-
-// Re-export: available after pipeline.ts is created in Wave 3
 export { compress } from './pipeline.js';
 
 // ---------------------------------------------------------------------------
@@ -69,7 +56,7 @@ export function encodeOutput(result: unknown, threshold: number = 5): unknown {
  *   Encoded value
  */
 export function encodeRecursive(value: unknown, threshold: number): unknown {
-  // Handle null (Python: None → None)
+  // Handle null
   if (value === null) {
     return null;
   }
@@ -102,6 +89,5 @@ export function encodeRecursive(value: unknown, threshold: number): unknown {
   }
 
   // Primitive types (string, number, boolean, undefined) — return unchanged
-  // Python: str, int, float, bool → return value unchanged
   return value;
 }
