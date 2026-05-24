@@ -34,6 +34,10 @@ function makeMockCtx(overrides = {}) {
     };
 }
 
+function makeMockToolServer() {
+    return { registerTool: vi.fn() };
+}
+
 function makeMockServer() {
     return {
         server: {
@@ -95,30 +99,24 @@ async function getToolMocks(customMocks = {}) {
     return { mod, mocks };
 }
 
-describe('createFilesystemServer', () => {
-    it('returns an object with a server property', async () => {
-        const { mod } = await getToolMocks();
-        const ctx = makeMockCtx();
-        const result = mod.createFilesystemServer(ctx);
-        expect(result).toBeDefined();
-        expect(result.server).toBeDefined();
-    });
-
+describe('registerEnabledTools', () => {
     it('registers all 11 tools', async () => {
         const { mod, mocks } = await getToolMocks();
+        const toolServer = makeMockToolServer();
         const ctx = makeMockCtx();
-        mod.createFilesystemServer(ctx);
+        mod.registerEnabledTools(toolServer, ctx);
         for (const modPath of TOOL_REGISTERS) {
             expect(mocks[modPath]).toHaveBeenCalledTimes(1);
         }
     });
 
-    it('passes server and ctx to each register call', async () => {
+    it('passes tool server and ctx to each register call', async () => {
         const { mod, mocks } = await getToolMocks();
+        const toolServer = makeMockToolServer();
         const ctx = makeMockCtx();
-        const result = mod.createFilesystemServer(ctx);
+        mod.registerEnabledTools(toolServer, ctx);
         for (const modPath of TOOL_REGISTERS) {
-            expect(mocks[modPath]).toHaveBeenCalledWith(result, ctx);
+            expect(mocks[modPath]).toHaveBeenCalledWith(toolServer, ctx);
         }
     });
 
@@ -145,7 +143,7 @@ describe('createFilesystemServer', () => {
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
         vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
         const mod = await import(SERVER_MOD);
-        mod.createFilesystemServer(makeMockCtx());
+        mod.registerEnabledTools(makeMockToolServer(), makeMockCtx());
         expect(configureRegistry).toHaveBeenCalledWith('/backup');
     });
 
@@ -166,7 +164,7 @@ describe('createFilesystemServer', () => {
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
         vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
         const mod = await import(SERVER_MOD);
-        mod.createFilesystemServer(makeMockCtx());
+        mod.registerEnabledTools(makeMockToolServer(), makeMockCtx());
         expect(configureRegistry).not.toHaveBeenCalled();
     });
 });
@@ -268,9 +266,8 @@ describe('validateDirectories', () => {
     });
 });
 
-describe('attachRootsHandlers', () => {
+describe('updateAllowedDirectoriesFromRoots', () => {
     let mod;
-    let mockServer;
     let ctx;
     let onRootsChanged;
     let getValidRootDirectories;
@@ -285,164 +282,37 @@ describe('attachRootsHandlers', () => {
             [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
         });
         mod = result.mod;
-        mockServer = makeMockServer();
         ctx = customCtx ?? makeMockCtx();
     }
 
-    it('registers a notification handler for RootsListChangedNotificationSchema', async () => {
+    it('updates allowed directories from valid roots', async () => {
         await setup();
-        mod.attachRootsHandlers(mockServer, ctx);
-        expect(mockServer.server.setNotificationHandler).toHaveBeenCalledTimes(1);
+        await mod.updateAllowedDirectoriesFromRoots(
+            [{ uri: 'file:///project/a' }, { uri: 'file:///project/b' }],
+            ctx,
+        );
+        expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(['/project/a', '/project/b']);
     });
 
-    it('assigns oninitialized callback', async () => {
+    it('calls onRootsChanged with context after updating roots', async () => {
         await setup();
-        mod.attachRootsHandlers(mockServer, ctx);
-        expect(mockServer.server.oninitialized).toBeDefined();
-        expect(typeof mockServer.server.oninitialized).toBe('function');
+        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///project/a' }], ctx);
+        expect(onRootsChanged).toHaveBeenCalledWith(ctx);
     });
 
-    describe('oninitialized — client supports roots', () => {
-        beforeEach(async () => {
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.getClientCapabilities.mockReturnValue({ roots: { listChanged: true } });
-            mockServer.server.listRoots.mockResolvedValue({
-                roots: [{ uri: 'file:///project/a' }, { uri: 'file:///project/b' }],
-            });
-        });
-
-        it('calls listRoots on client', async () => {
-            await mockServer.server.oninitialized();
-            expect(mockServer.server.listRoots).toHaveBeenCalled();
-        });
-
-        it('updates allowed directories from roots', async () => {
-            await mockServer.server.oninitialized();
-            expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(['/project/a', '/project/b']);
-        });
-
-        it('calls onRootsChanged with context', async () => {
-            await mockServer.server.oninitialized();
-            expect(onRootsChanged).toHaveBeenCalled();
-        });
+    it('does not call setAllowedDirectories with empty validated roots', async () => {
+        await setup();
+        getValidRootDirectories.mockResolvedValue([]);
+        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///invalid' }], ctx);
+        expect(ctx.setAllowedDirectories).not.toHaveBeenCalled();
     });
 
-    describe('oninitialized — client returns empty roots', () => {
-        beforeEach(async () => {
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.getClientCapabilities.mockReturnValue({ roots: { listChanged: true } });
-            mockServer.server.listRoots.mockResolvedValue({ roots: [] });
-        });
-
-        it('does not throw when roots are empty', async () => {
-            await expect(mockServer.server.oninitialized()).resolves.toBeUndefined();
-        });
-
-        it('does not call setAllowedDirectories with empty roots', async () => {
-            await mockServer.server.oninitialized();
-            expect(ctx.setAllowedDirectories).not.toHaveBeenCalled();
-        });
-    });
-
-    describe('oninitialized — client does not support roots', () => {
-        beforeEach(async () => {
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.getClientCapabilities.mockReturnValue(null);
-        });
-
-        it('does not throw when existing allowed directories exist', async () => {
-            await expect(mockServer.server.oninitialized()).resolves.toBeUndefined();
-        });
-
-        it('throws when no allowed directories are available', async () => {
-            const ctxEmpty = makeMockCtx({ allowedDirs: [] });
-            onRootsChanged = vi.fn();
-            getValidRootDirectories = vi.fn(async (roots) =>
-                roots.map(r => r.uri.replace('file://', ''))
-            );
-            const result = await getToolMocks({
-                [PROJECT_CONTEXT]: () => ({ onRootsChanged }),
-                [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
-            });
-            const ms = makeMockServer();
-            result.mod.attachRootsHandlers(ms, ctxEmpty);
-            ms.server.getClientCapabilities.mockReturnValue(null);
-            await expect(ms.server.oninitialized())
-                .rejects.toThrow('Server cannot operate');
-        });
-    });
-
-    describe('oninitialized — listRoots response has no roots key', () => {
-        beforeEach(async () => {
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.getClientCapabilities.mockReturnValue({ roots: {} });
-            mockServer.server.listRoots.mockResolvedValue({});
-        });
-
-        it('does not throw when response lacks roots property', async () => {
-            await expect(mockServer.server.oninitialized()).resolves.toBeUndefined();
-        });
-    });
-
-    describe('RootsListChanged notification handler', () => {
-        beforeEach(async () => {
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.listRoots.mockResolvedValue({
-                roots: [{ uri: 'file:///new/root' }],
-            });
-        });
-
-        it('handles root change notification and updates directories', async () => {
-            const handler = mockServer.server.setNotificationHandler.mock.calls[0][1];
-            await handler();
-            expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(['/new/root']);
-        });
-
-        it('catches errors when listRoots fails', async () => {
-            const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-            mockServer.server.listRoots.mockRejectedValue(new Error('connection lost'));
-            const handler = mockServer.server.setNotificationHandler.mock.calls[0][1];
-            await handler();
-            expect(consoleSpy).toHaveBeenCalledWith('Failed to request roots from client:', 'connection lost');
-            consoleSpy.mockRestore();
-        });
-    });
-
-    describe('oninitialized error handling', () => {
-        it('catches errors when listRoots fails during init', async () => {
-            const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-            await setup();
-            mod.attachRootsHandlers(mockServer, ctx);
-            mockServer.server.getClientCapabilities.mockReturnValue({ roots: {} });
-            mockServer.server.listRoots.mockRejectedValue(new Error('timeout'));
-            await expect(mockServer.server.oninitialized()).resolves.toBeUndefined();
-            expect(consoleSpy).toHaveBeenCalledWith('Failed to request initial roots from client:', 'timeout');
-            consoleSpy.mockRestore();
-        });
-    });
-
-    describe('updateAllowedDirectoriesFromRoots', () => {
-        it('logs when no valid root directories are provided', async () => {
-            const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-            getValidRootDirectories = vi.fn(async () => []);
-            const result = await getToolMocks({
-                [PROJECT_CONTEXT]: () => ({ onRootsChanged: vi.fn() }),
-                [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
-            });
-            const m = result.mod;
-            const ms = makeMockServer();
-            const c = makeMockCtx();
-            m.attachRootsHandlers(ms, c);
-            ms.server.getClientCapabilities.mockReturnValue({ roots: {} });
-            ms.server.listRoots.mockResolvedValue({ roots: [{ uri: 'file:///invalid' }] });
-            await ms.server.oninitialized();
-            expect(consoleSpy).toHaveBeenCalledWith('No valid root directories provided by client');
-            consoleSpy.mockRestore();
-        });
+    it('logs when no valid root directories are provided', async () => {
+        const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        await setup();
+        getValidRootDirectories.mockResolvedValue([]);
+        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///invalid' }], ctx);
+        expect(consoleSpy).toHaveBeenCalledWith('No valid root directories provided by client');
+        consoleSpy.mockRestore();
     });
 });

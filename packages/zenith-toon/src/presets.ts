@@ -26,11 +26,7 @@ export const PRESETS: Record<string, ToonConfig> = {
     ],
   }),
 
-  // codex_logs
-  // Tuned for Codex-style agent traces where payload.output and
-  // payload.arguments carry the bulk of the tokens, and
-  // message / reasoning must be kept verbatim.
-  "codex_logs": defaultToonConfig({
+  "logs": defaultToonConfig({
     preserve_rules: [
       defaultFieldMatcher({ field_pattern: "(message|reasoning)$" }),
     ] satisfies FieldMatcher[],

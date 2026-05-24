@@ -16,9 +16,7 @@ export const BIGNUM_RE: RegExp = /\b\d{10,}\b/g;
 
 export const B64_RE: RegExp = /\b[A-Za-z0-9+/]{20,}={0,2}\b/g;
 
-// NOTE: JS regex with /g flag is STATEFUL — each regex in NORMALIZERS is a
-// factory function to produce a fresh instance per call, avoiding lastIndex
-// contamination across calls.
+// NOTE: JS regex with /g flag is STATEFUL — each regex in NORMALIZERS is a factory function to produce a fresh instance per call, avoiding lastIndex contamination across calls.
 export const NORMALIZERS: ReadonlyArray<readonly [() => RegExp, string]> = [
   [(): RegExp => /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<TS>'],
   [(): RegExp => /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<UUID>'],
@@ -33,10 +31,7 @@ export const NORMALIZERS: ReadonlyArray<readonly [() => RegExp, string]> = [
 
 /**
  * Recursively normalize variable fields in a JSON-like structure.
- *
- * Replaces timestamps, UUIDs, IPs, large numbers, and base64 blobs with
- * placeholder tokens so that structurally identical entries with different
- * volatile values hash to the same fingerprint.
+ *.
  */
 export function normalizeValue(v: unknown): unknown {
   if (typeof v === 'string') {
@@ -91,12 +86,8 @@ export function blake2bHash(data: string, digestSize: number = 8): string {
 
 /**
  * Deterministic JSON serialization for hashing.
- *
  * Sorts keys recursively at every nesting level, for deterministic output.
  * json.dumps(obj, sort_keys=True, separators=(',', ':'), default=str).
- *
- * Plain JSON.stringify(obj, Object.keys(obj).sort()) does NOT recurse —
- * this function uses sortKeysDeep to handle arbitrarily nested objects.
  */
 function sortKeysDeep(v: unknown): unknown {
   if (Array.isArray(v)) {
@@ -140,11 +131,6 @@ export function canonicalJson(obj: unknown): string {
 
 /**
  * Conservative token estimation. JSON: chars/2, text: chars/4.
- *
- * Heuristic from Anthropic cookbook analysis: JSON markup inflates
- * token counts relative to plain text.
- *
- * Uses Math.floor for integer division.
  */
 export function estimateTokens(text: string): number {
   if (text.startsWith('{') || text.startsWith('[')) {
@@ -164,9 +150,6 @@ export function estimateTokensObj(obj: unknown): number {
 
 /**
  * Convert any object to a flat text string for BMX+ indexing.
- *
- * Dicts emit 'key value' pairs, lists emit space-joined children,
- * primitives emit String(). null returns empty string.
  */
 export function flattenToText(obj: unknown): string {
   if (typeof obj === 'string') {
@@ -229,14 +212,8 @@ export function computeGini(values: number[]): number {
  * Find knee point in a sorted-descending score curve.
  *
  * Returns index of the knee (boundary between core and periphery).
- * Implements Satopää et al. 2011 (IEEE ICDCS) simplified for 1D sorted data.
- *
- * Args:
- *   scores: Descending-sorted list of scores.
- *   sensitivity: Kneedle S parameter. S=1.0 recommended for online settings.
- *
- * Returns:
- *   Index of the knee point.
+ * Implements Satopää et al. 2011 (IEEE ICDCS) simplified for 1D sorted 
+ * data.
  */
 export function findKneedle(scores: number[], sensitivity: number = 1.0): number {
   const n = scores.length;

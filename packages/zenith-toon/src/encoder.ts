@@ -47,13 +47,9 @@ export function encodeOutput(result: unknown, threshold: number = 5): unknown {
 
 /**
  * Recursively encode a value, compressing arrays > threshold.
- *
  * Args:
  *   value: Value to encode
  *   threshold: Array length threshold
- *
- * Returns:
- *   Encoded value
  */
 export function encodeRecursive(value: unknown, threshold: number): unknown {
   // Handle null

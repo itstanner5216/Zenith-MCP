@@ -6,7 +6,6 @@ import type { FieldMatcher, ToonConfig } from './config.js';
 
 /**
  * Evaluate whether matcher accepts the given field.
- *
  * All specified (non-null) conditions are AND-ed. A matcher whose
  * every attribute is null matches unconditionally.
  *
@@ -25,7 +24,6 @@ export function fieldMatcherMatches(
     if (fieldPath !== matcher.field_path) {
       // Prefix check: matcher "payload" should match "payload.output"
       // but NOT "payload_extra". We require the candidate to start
-      // with "<matcher.field_path>." so segment boundaries are respected.
       if (!fieldPath.startsWith(matcher.field_path + ".")) {
         return false;
       }
@@ -72,12 +70,10 @@ export function fieldMatcherMatches(
  * Determine the compression action for a field.
  *
  * Priority (highest -> lowest):
- *
  * 1. preserve_rules — if any matcher hits -> "preserve".
  * 2. encode_rules   — first match wins -> that rule's codec.strategy.
  * 3. default_codec  — if set -> its strategy.
  * 4. -> "passthrough".
- *
  * @param fieldPath - Dot-delimited path to the field.
  * @param value     - Runtime value at fieldPath.
  * @param config    - The active ToonConfig.

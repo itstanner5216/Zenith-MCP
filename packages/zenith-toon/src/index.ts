@@ -1,15 +1,13 @@
 // zenith-toon — Token-Optimized Output Normalization
 //
-// A compression library for making codebase scanning cheap. When a model is
-// orienting in a codebase (understanding structure, finding relationships),
-// it should not pay full token cost for content that's largely noise.
+// A compression library for making codebase scanning cheap. When a model is orienting in a codebase (understanding structure, finding relationships), it should not pay full token cost for content that's largely noise.
 //
 // Architecture:
 //   Layer 1 (LIVE): String codecs — compressString(), compressSourceStructured()
 //     Content-type-aware compression of single strings. Language-aware when the
 //     consumer provides tree-sitter structure (see compressSourceStructured).
 //
-//   Layer 2 (WIRING IN PROGRESS): Multi-entry pipeline — compress()
+//     Multi-entry pipeline — compress()
 //     For inputs that are lists/objects: dedup → score → tier → budget → per-entry codec.
 //     Components: Deduplicator, BMXPlusIndex, SageRank, BudgetAllocator, encodeRecursive.
 //
@@ -95,6 +93,8 @@ export type {
 export type {
   StructureBlock,
   Anchor,
+  ASTEdge,
+  ASTEdgeResult,
   EntryMeta,
   TemplateInfoFull,
   CompressConfig as CompressConfigShape,

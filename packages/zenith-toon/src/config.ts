@@ -57,7 +57,7 @@ export interface EncoderRule {
 }
 
 /**
- * Controls threshold-based array folding (TOON v1 behaviour).
+ * Controls threshold-based array folding.
  */
 export interface ArrayCodecConfig {
   enabled: boolean;
@@ -232,8 +232,7 @@ export function toonConfigPreset(
 }
 
 /**
- * Convert a legacy CompressConfig into a ToonConfig.
- * This is the backward-compatibility bridge.
+ * Convert a legacy CompressConfig 
  */
 export function toonConfigFromCompressConfig(cc: LegacyCompressConfig): ToonConfig {
   // Preserve rules from cc.preserve_fields

@@ -3,30 +3,83 @@
 // This is the integration layer where language structure meets compression:
 //   1. Detects file language via getLangForFile() (43 grammars)
 //   2. Extracts block + anchor structure via getCompressionStructure() (tree-sitter)
-//   3. Passes structure to zenith-toon's compressSourceStructured()
+//   3. Queries call graph edges from the symbol index (SQLite)
+//   4. Passes structure + AST edges to zenith-toon's compressSourceStructured()
 //
-// Without this bridge, zenith-toon falls back to compressString() which still
-// works but lacks structural awareness (no priority-based block selection,
-// no anchor preservation within partially-shown functions).
+// The AST edges come from the symbol index's edges table which tracks
+// caller→callee relationships. This gives SageRank structural awareness
+// beyond text similarity: functions that call each other get connected
+// in the PageRank graph, making "hub" functions (called by many) and
+// "authority" functions (calling many) rank higher.
 
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { getCompressionStructure, getLangForFile } from './tree-sitter.js';
 import { compressSourceStructured, compressString } from 'zenith-toon';
-import type { StructureBlock } from 'zenith-toon';
+import type { StructureBlock, ASTEdge } from 'zenith-toon';
+import { getFileBlockEdges, getFileDefinitions, type DbConnection } from './db-adapter.js';
+
+/**
+ * Build AST edges for compression ranking.
+ * Maps symbol index edges to block indices for SageRank integration.
+ */
+function buildASTEdges(
+    conn: DbConnection,
+    filePath: string,
+    structure: StructureBlock[],
+): ASTEdge[] {
+    // Get definitions from the symbol index
+    const defs = getFileDefinitions(conn, filePath);
+    if (defs.length === 0) return [];
+
+    // Build name→blockIndex map by matching line ranges
+    const nameToBlockIndex = new Map<string, number>();
+    for (let i = 0; i < structure.length; i++) {
+        const block = structure[i]!;
+        // Find matching definition by line range overlap
+        for (const def of defs) {
+            if (def.name === block.name ||
+                (def.line <= block.startLine && def.endLine >= block.startLine)) {
+                nameToBlockIndex.set(def.name, i);
+                break;
+            }
+        }
+    }
+
+    // Query edges and map to block indices
+    const blockNames = [...nameToBlockIndex.keys()];
+    if (blockNames.length === 0) return [];
+
+    const { edges: dbEdges } = getFileBlockEdges(conn, filePath, blockNames);
+    
+    // Convert to ASTEdge format
+    return dbEdges.map(e => ({
+        from: e.from,
+        to: e.to,
+        weight: e.weight,
+        kind: e.kind,
+    }));
+}
 
 /**
  * Compress source text using tree-sitter structure + toon codec.
  * Falls back to unstructured compression when tree-sitter can't parse.
+ * 
+ * @param content - Source text to compress
+ * @param budget - Target size in characters
+ * @param filePath - Path to file (for language detection)
+ * @param dbConn - Optional SQLite connection for AST edge lookup
  */
 export async function compressToon(
     content: string,
     budget: number,
     filePath?: string,
+    dbConn?: DbConnection | null,
 ): Promise<string> {
     if (content.length <= budget) return content;
 
     let structure: StructureBlock[] | null = null;
+    let astEdges: ASTEdge[] | undefined;
     const langName = filePath ? getLangForFile(filePath) : null;
 
     if (langName) {
@@ -42,6 +95,15 @@ export async function compressToon(
                     exported: d.exported ?? false,
                     anchors: d.anchors ?? [],
                 }));
+
+                // Build AST edges if db connection is available
+                if (dbConn && filePath && structure.length > 0) {
+                    try {
+                        astEdges = buildASTEdges(dbConn, filePath, structure);
+                    } catch {
+                        // Edge lookup failed — continue without AST edges
+                    }
+                }
             }
         } catch {
             // tree-sitter unavailable or parse failed — fall through to unstructured
@@ -49,7 +111,7 @@ export async function compressToon(
     }
 
     return structure
-        ? compressSourceStructured(content, budget, structure)
+        ? compressSourceStructured(content, budget, structure, astEdges)
         : compressString(content, budget);
 }
 

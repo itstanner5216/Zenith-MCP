@@ -24,9 +24,6 @@ export type { ScoredEntries, CompressedOutput };
 
 /**
  * Configuration for the TOON compression pipeline.
- *
- * All defaults are documented with their evidence basis.
- * Engineering heuristics are explicitly flagged as unvalidated.
  */
 export class CompressConfig {
   /** Method for adaptive core_fraction detection.
@@ -34,8 +31,7 @@ export class CompressConfig {
    * Alternative: "fixed" uses core_fraction_fixed value. */
   core_fraction_method: string = 'kneedle';
 
-  /** Fixed core fraction (used only when core_fraction_method="fixed").
-   * Engineering heuristic — not empirically validated. */
+  /** Fixed core fraction (used only when core_fraction_method="fixed"). */
   core_fraction_fixed: number = 0.15;
 
   /** Gini coefficient below which self-scoring is abandoned.
@@ -59,8 +55,7 @@ export class CompressConfig {
    * At 5000, memory overhead ≈ 500KB. Covers typical session lengths. */
   dedup_maxsize: number = 5000;
 
-  /** Budget halving per JSON depth level.
-   * Engineering heuristic — not empirically validated. */
+  /** Budget halving per JSON depth level. */
   string_budget_ratio: number = 0.5;
 
   /** Max user-code frames to retain in stack trace compression.
@@ -148,10 +143,6 @@ export class CompressConfig {
 
 /**
  * Stateful compressor for streaming mode.
- *
- * In streaming mode, self-scoring is not available (requires the full
- * corpus). Only dedup and string codec / structural compression apply.
- *
  * Usage:
  *   const compressor = new TOONCompressor();
  *   for (const entry of toolOutputStream) {
@@ -171,7 +162,6 @@ export class TOONCompressor {
 
   /**
    * Process a single entry in streaming mode.
-   *
    * Returns compressed entry, or null if deduplicated away.
    */
   feed(entry: unknown): unknown | null {
@@ -199,7 +189,6 @@ export class TOONCompressor {
 
 /**
  * Full TOON compression pipeline.
- *
  * Runs all three stages: dedup → self-scoring → budget-aware compression.
  *
  * @param data Tool output data. Can be a single object or list of objects.
@@ -701,7 +690,6 @@ function _compressEntries(
 
 /**
  * Compress a single entry using type-appropriate strategy.
- *
  * Dispatch: template-annotated → marker, str → string codec,
  * dict → field routing, list/tuple → encodeRecursive, else passthrough.
  */

@@ -856,4 +856,206 @@ export class SageRank {
     const [, eidf] = SageRank._computeEidf(postingLists, docFreqs, n);
     return SageRank._getKeywords(eidf, docFreqs, topK);
   }
+
+  // ════════════════════════════════════════════════════════════════
+  //  AST-Aware Ranking (Call Graph Integration)
+  // ════════════════════════════════════════════════════════════════
+
+  /**
+   * Merge AST edges into text-similarity adjacency graph.
+   * AST edges represent call/reference relationships from the symbol index.
+   * 
+   * @param textAdjacency - Adjacency from text similarity
+   * @param astEdges - Edges from call graph / symbol references
+   * @param n - Number of nodes
+   * @param astWeight - How much to weight AST edges relative to text (default 2.0)
+   */
+  private _mergeASTEdges(
+    textAdjacency: Map<number, Map<number, number>>,
+    astEdges: Array<{ from: number; to: number; weight: number }>,
+    n: number,
+    astWeight: number = 2.0,
+  ): Map<number, Map<number, number>> {
+    // Clone the text adjacency
+    const merged = new Map<number, Map<number, number>>();
+    for (const [i, neighbors] of textAdjacency.entries()) {
+      merged.set(i, new Map(neighbors));
+    }
+
+    // Ensure all nodes exist
+    for (let i = 0; i < n; i++) {
+      if (!merged.has(i)) merged.set(i, new Map());
+    }
+
+    // Add AST edges (bidirectional for PageRank flow)
+    for (const edge of astEdges) {
+      if (edge.from < 0 || edge.from >= n) continue;
+      if (edge.to < 0 || edge.to >= n) continue;
+      if (edge.from === edge.to) continue;
+
+      const w = edge.weight * astWeight;
+
+      // Forward edge (caller → callee)
+      const fwdNeighbors = merged.get(edge.from)!;
+      fwdNeighbors.set(edge.to, (fwdNeighbors.get(edge.to) ?? 0) + w);
+
+      // Backward edge (callee → caller) with reduced weight
+      // Callees pointing back to callers helps find "hub" functions
+      const bwdNeighbors = merged.get(edge.to)!;
+      bwdNeighbors.set(edge.from, (bwdNeighbors.get(edge.from) ?? 0) + w * 0.5);
+    }
+
+    return merged;
+  }
+
+  /**
+   * Rank sentences/blocks with AST call graph awareness.
+   * 
+   * Uses the existing text-similarity graph but augments it with edges
+   * from the symbol index call graph. This means:
+   * - Functions that call many others have high out-degree → authority
+   * - Functions called by many others have high in-degree → hub
+   * - Bridge functions connecting clusters have high betweenness
+   * 
+   * @param sentences - Text content of each block/function
+   * @param topK - Number of top items to select
+   * @param astEdges - Call graph edges from symbol index
+   * @param query - Optional query for topic-biased ranking
+   */
+  rankWithAST(
+    sentences: string[],
+    topK: number,
+    astEdges: Array<{ from: number; to: number; weight: number }>,
+    query: string | null = null,
+  ): SageResult {
+    const n = sentences.length;
+    if (n === 0) {
+      return makeSageResult([], [], [], [], { ast_aware: true, ast_edges: 0 });
+    }
+    if (n === 1) {
+      return makeSageResult(sentences, [1.0], [0], [], { 
+        sentences: 1, 
+        ast_aware: true, 
+        ast_edges: astEdges.length 
+      });
+    }
+    const effectiveTopK = Math.min(topK, n);
+
+    // 1. Tokenise
+    const sentTokens = sentences.map((s) => SageRank._tokenize(s));
+
+    // 2. Build inverted index
+    const [postingLists, docFreqs, docLengths, avgDl] =
+      SageRank._buildPostingLists(sentTokens);
+
+    // 3. Entropy-weighted IDF
+    const [, eidf, , idfMax] = SageRank._computeEidf(
+      postingLists,
+      docFreqs,
+      n,
+    );
+
+    // 4. Text similarity graph
+    const [textAdjacency, textEdgeCount] = this._buildGraph(
+      postingLists,
+      eidf,
+      docLengths,
+      avgDl,
+      n,
+    );
+
+    // 5. Merge AST edges into graph
+    const adjacency = this._mergeASTEdges(textAdjacency, astEdges, n);
+
+    // Count merged edges
+    let mergedEdgeCount = 0;
+    for (const neighbors of adjacency.values()) {
+      mergedEdgeCount += neighbors.size;
+    }
+    mergedEdgeCount = Math.floor(mergedEdgeCount / 2); // Bidirectional
+
+    // 6. Degree centrality (from merged graph)
+    const centrality: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const nbrs = adjacency.get(i);
+      let sum = 0.0;
+      if (nbrs) {
+        for (const w of nbrs.values()) sum += w;
+      }
+      centrality.push(sum);
+    }
+
+    // 7. Adaptive position prior
+    const position = SageRank._positionPrior(centrality, n);
+
+    // 8. Optional query scoring
+    let queryScores: Map<number, number> | null = null;
+    if (query !== null && query.length > 0) {
+      const qt = SageRank._tokenize(query);
+      if (qt.length > 0) {
+        queryScores = this._scoreQuery(
+          qt,
+          postingLists,
+          eidf,
+          docLengths,
+          avgDl,
+        );
+      }
+    }
+
+    // 9. Personalization vector
+    const personalization = new Map<number, number>();
+    for (let i = 0; i < n; i++) {
+      let pVal = position[i]!;
+      if (queryScores !== null && queryScores.size > 0) {
+        pVal *= (queryScores.get(i) ?? 0.0) + 0.01;
+      }
+      personalization.set(i, pVal);
+    }
+
+    // 10. PageRank on merged graph
+    const [prScores, prIters] = this._pagerank(adjacency, personalization, n);
+
+    // 11. Coverage-aware extraction
+    const selected = this._extractWithCoverage(
+      prScores,
+      sentTokens,
+      eidf,
+      effectiveTopK,
+      n,
+    );
+
+    // 12. Keywords
+    const keywords = SageRank._getKeywords(eidf, docFreqs, 10);
+
+    // 13. Normalise scores to [0, 1]
+    let scores: number[] = [];
+    for (let i = 0; i < n; i++) {
+      scores.push(prScores.get(i) ?? 0.0);
+    }
+    if (this._normalize && scores.length > 0) {
+      const maxS = Math.max(...scores);
+      if (maxS > 0) {
+        scores = scores.map((s) => s / maxS);
+      }
+    }
+
+    const leadBias =
+      n > 0 ? SageRank._positionPrior(centrality, n)[0]! - 1.0 : 0.0;
+
+    const stats: Record<string, number | boolean | string> = {
+      sentences: n,
+      vocabulary: postingLists.size,
+      text_edges: textEdgeCount,
+      ast_edges: astEdges.length,
+      merged_edges: mergedEdgeCount,
+      pagerank_iters: prIters,
+      idf_max: Math.round(idfMax * 10000) / 10000,
+      lead_bias: Math.round(leadBias * 10000) / 10000,
+      query_biased: query !== null,
+      ast_aware: true,
+    };
+
+    return makeSageResult(sentences, scores, selected, keywords, stats);
+  }
 }

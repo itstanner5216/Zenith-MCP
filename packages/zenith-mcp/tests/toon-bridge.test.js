@@ -83,6 +83,7 @@ describe('compressToon', () => {
             expect.arrayContaining([
                 expect.objectContaining({ name: 'foo', kind: 'function', type: 'function', exported: true, anchors: ['param'] }),
             ]),
+            undefined,  // astEdges (optional, no db connection in test)
         );
         expect(compressString).not.toHaveBeenCalled();
     });
@@ -102,6 +103,7 @@ describe('compressToon', () => {
             [
                 { name: 'MyClass', kind: 'class', type: 'class', startLine: 0, endLine: 20, exported: false, anchors: [] },
             ],
+            undefined,  // astEdges (optional, no db connection in test)
         );
     });
 
@@ -120,6 +122,7 @@ describe('compressToon', () => {
             [
                 { name: 'helper', kind: 'function', type: 'function', startLine: 5, endLine: 15, exported: false, anchors: [] },
             ],
+            undefined,  // astEdges (optional, no db connection in test)
         );
     });
 
@@ -190,6 +193,7 @@ describe('compressToon', () => {
                 expect.objectContaining({ name: 'A', kind: 'class' }),
                 expect.objectContaining({ name: 'B', kind: 'function' }),
             ]),
+            undefined,  // astEdges (optional, no db connection in test)
         );
     });
 });

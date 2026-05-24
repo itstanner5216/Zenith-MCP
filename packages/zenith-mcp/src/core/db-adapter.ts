@@ -448,6 +448,110 @@ export function insertEdge(conn: DbConnection, containerDefId: number, reference
 }
 
 /**
+ * Get call graph edges between blocks in a single file.
+ * Returns edges suitable for SageRank AST-aware ranking.
+ * 
+ * For each definition in the file that calls another definition in the same file,
+ * returns an edge with:
+ *   - from: index of caller in blockNames array
+ *   - to: index of callee in blockNames array  
+ *   - weight: 1.0 (or call count if multiple calls)
+ *   - kind: 'call' | 'reference'
+ * 
+ * Also tracks external references (symbols called but not defined in this file).
+ * 
+ * SQL: 
+ *   SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count
+ *   FROM edges e
+ *   JOIN symbols caller ON caller.id = e.container_def_id
+ *   WHERE caller.file_path = ? AND caller.kind = 'def'
+ *   GROUP BY caller.name, e.referenced_name
+ */
+export function getFileBlockEdges(
+    conn: DbConnection,
+    filePath: string,
+    blockNames: string[]
+): {
+    edges: Array<{ from: number; to: number; weight: number; kind: 'call' | 'reference' }>;
+    externalRefs: Array<{ from: number; name: string; count: number }>;
+    stats: { internalEdges: number; externalRefs: number; totalCalls: number };
+} {
+    // Build name → index lookup
+    const nameToIndex = new Map<string, number>();
+    for (let i = 0; i < blockNames.length; i++) {
+        nameToIndex.set(blockNames[i]!, i);
+    }
+
+    // Query all edges where the caller is a definition in this file
+    const rows = prepareOrCache(
+        conn,
+        `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count
+         FROM edges e
+         JOIN symbols caller ON caller.id = e.container_def_id
+         WHERE caller.file_path = ? AND caller.kind = 'def'
+         GROUP BY caller.name, e.referenced_name`
+    ).all(filePath) as { caller_name: string; callee_name: string; call_count: number }[];
+
+    const edges: Array<{ from: number; to: number; weight: number; kind: 'call' | 'reference' }> = [];
+    const externalRefs: Array<{ from: number; name: string; count: number }> = [];
+    let totalCalls = 0;
+
+    for (const row of rows) {
+        const fromIdx = nameToIndex.get(row.caller_name);
+        const toIdx = nameToIndex.get(row.callee_name);
+        totalCalls += row.call_count;
+
+        if (fromIdx === undefined) {
+            // Caller not in our block list (shouldn't happen but be defensive)
+            continue;
+        }
+
+        if (toIdx !== undefined) {
+            // Internal edge: both caller and callee are in our blocks
+            edges.push({
+                from: fromIdx,
+                to: toIdx,
+                weight: Math.sqrt(row.call_count), // Diminishing returns for many calls
+                kind: 'call'
+            });
+        } else {
+            // External reference: callee is not defined in this file
+            externalRefs.push({
+                from: fromIdx,
+                name: row.callee_name,
+                count: row.call_count
+            });
+        }
+    }
+
+    return {
+        edges,
+        externalRefs,
+        stats: {
+            internalEdges: edges.length,
+            externalRefs: externalRefs.length,
+            totalCalls
+        }
+    };
+}
+
+/**
+ * Get definitions in a file with their line ranges.
+ * Used to map tree-sitter blocks to symbol names.
+ * 
+ * SQL: SELECT id, name, line, end_line, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line
+ */
+export function getFileDefinitions(
+    conn: DbConnection,
+    filePath: string
+): Array<{ id: number; name: string; line: number; endLine: number; type: string | null }> {
+    return prepareOrCache(
+        conn,
+        `SELECT id, name, line, end_line AS endLine, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
+    ).all(filePath) as Array<{ id: number; name: string; line: number; endLine: number; type: string | null }>;
+}
+
+/**
  * SQL: DELETE FROM edges
  */
 export function deleteAllEdges(conn: DbConnection): void {

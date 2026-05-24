@@ -1,6 +1,3 @@
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
 export interface StructureBlock {
   name: string;
   kind: string;
@@ -17,6 +14,41 @@ export interface Anchor {
   endLine: number;
   kind: string;
   priority: number;
+}
+
+// ---------------------------------------------------------------------------
+// AST-aware SageRank edges
+// ---------------------------------------------------------------------------
+
+/**
+ * Represents a directed edge in the AST call/reference graph.
+ * Used to augment SageRank's text-similarity graph with structural relationships.
+ */
+export interface ASTEdge {
+  /** Source block index (the caller/referencer) */
+  from: number;
+  /** Target block index (the callee/referenced) */
+  to: number;
+  /** Edge weight (1.0 for calls, 0.5 for type refs, etc.) */
+  weight: number;
+  /** Edge type for debugging/analysis */
+  kind?: 'call' | 'reference' | 'type_ref' | 'import' | 'inherit';
+}
+
+/**
+ * Result from building AST edges for a set of blocks.
+ */
+export interface ASTEdgeResult {
+  /** Edges between blocks in this file */
+  edges: ASTEdge[];
+  /** Names of external symbols referenced (not defined in this file) */
+  externalRefs: string[];
+  /** Statistics */
+  stats: {
+    totalEdges: number;
+    callEdges: number;
+    typeRefEdges: number;
+  };
 }
 
 // ---------------------------------------------------------------------------

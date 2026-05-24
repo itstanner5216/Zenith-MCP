@@ -2,19 +2,15 @@
 //
 // Two public entry points:
 //   - compressString(text, budget) — auto-detects content type and compresses
-//   - compressSourceStructured(text, budget, structure) — language-aware compression
-//     using tree-sitter block/anchor metadata provided by the consumer
+//   - compressSourceStructured(text, budget, structure) — language-aware compression using tree-sitter block/anchor metadata provided by the consumer
 //
 // Language awareness: The `structure` parameter in compressSourceStructured is
 // produced by tree-sitter in the consuming package. In Zenith-MCP this is:
-//   zenith-mcp/src/core/tree-sitter/compression-structure.ts → getCompressionStructure()
-// which extracts function blocks, class definitions, and control-flow anchors
-// for 17 languages (JS, TS, Python, Go, Rust, Java, C, C++, C#, Kotlin, PHP,
-// Ruby, Swift, Bash, Lua, Nix, TSX). All 43 supported grammars get block-level
-// structure; the 17 above additionally get intra-block anchor priorities.
+//   zenith-mcp/src/core/tree-sitter/compression-structure.ts → getCompressionStructure() which extracts function blocks, class definitions, and control-flow anchors
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
-import type { StructureBlock, Anchor } from './types.js';
+import { SageRank } from './sagerank.js';
+import type { StructureBlock, Anchor, ASTEdge } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Detection patterns
@@ -30,11 +26,8 @@ const _ERROR_KEYWORDS: ReadonlySet<string> = new Set([
 const _FRAME_RE = /^\s+(at\s+|File\s+")/;
 
 // Stack-trace header detection: language-agnostic structural signal.
-// Matches Python "Traceback (most recent call last):", JVM "Caused by:" chains,
 // and class names ending in Error/Exception/Fault/Panic at line start.
 const _STACK_HEADER_RE = /^(?:Traceback \(most recent call last\):|Caused by:\s|[\w.$]+(?:Error|Exception|Fault|Panic)(?::|$))/;
-const _USER_FRAME_EXCLUDES =
-  /(java\.|javax\.|sun\.|org\.springframework\.|org\.python\.|importlib\.|_bootstrap|site-packages)/;
 
 // ---------------------------------------------------------------------------
 // Source code detection patterns
@@ -62,7 +55,7 @@ const _DUNDER_KEEPERS: ReadonlySet<string> = new Set([
   '__str__', '__repr__', '__len__', '__iter__', '__next__',
   '__getitem__', '__setitem__', '__contains__',
 ]);
-// r'^(?:(?:async\s+)?def\s+(\w+)|class\s+(\w+)|(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?class\s+(\w+)|(?:export\s+)?(?:interface|type|enum)\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\())'
+
 const _DEF_RE = /^(?:(?:async\s+)?def\s+(\w+)|class\s+(\w+)|(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?class\s+(\w+)|(?:export\s+)?(?:interface|type|enum)\s+(\w+)|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\())/;
 const _SOURCE_IMPORT_RE = /^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)/;
 const _DECORATOR_RE = /^\s*@\w+/;
@@ -76,12 +69,6 @@ const _MIN_OMISSION_THRESHOLD = 3;
 
 /**
  * Detects whether text is a multi-line stack trace (not a single-line error).
- *
- * Design decision: single-line error messages like "TypeError: Cannot read
- * property 'x' of undefined" are NOT stack traces — they're error strings that
- * should flow through normal text compression. This function identifies actual
- * structural stack traces (multiple frames, exception chains) that benefit from
- * the dedicated stack-trace formatting path.
  */
 function _isStackTrace(text: string): boolean {
   const sample = text.slice(0, 2000);
@@ -101,10 +88,7 @@ function _isStackTrace(text: string): boolean {
   if (frameCount >= 2) return true;
   if (headerCount >= 1 && frameCount >= 1) return true;
 
-  // Tertiary: chained-exception header pattern (JVM "Caused by:" chains can
-  // appear with no leading indent on the per-frame "at" lines, in which case
-  // _FRAME_RE won't match. Multiple headers in a small window strongly imply
-  // a chained exception even without parseable frames.
+  // Tertiary: chained-exception header pattern (JVM "Caused by:" chains can appear with no leading indent on the per-frame "at" lines, in which case _FRAME_RE won't match. Multiple headers in a small window strongly imply a chained exception even without parseable frames.
   if (headerCount >= 2) return true;
 
   return false;
@@ -161,13 +145,19 @@ function _isCommentOnlyLine(line: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Stack Trace Compression
+// Stack Trace Compression (SageRank-enhanced)
 // ---------------------------------------------------------------------------
+
+// Minimum frames to trigger SageRank — below this, simple priority scoring is fine
+const _SAGERANK_FRAME_THRESHOLD = 5;
 
 function _compressStackTrace(text: string, budget: number, maxUserFrames: number): string {
   const lines = text.split('\n');
-  // priority_lines: [priority, index, line]
-  const priorityLines: Array<[number, number, string]> = [];
+  
+  // Phase 1: Classify lines into categories
+  const headers: Array<[number, string]> = [];  // Always keep — exception headers
+  const frames: Array<[number, string]> = [];   // Stack frames — run SageRank on these
+  const other: Array<[number, string]> = [];    // Context lines — lowest priority
 
   for (const [i, line] of lines.entries()) {
     const stripped = line.trim();
@@ -175,60 +165,166 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
 
     const lower = stripped.toLowerCase();
 
-    // Priority 1: Exception headers (always keep)
-    if (lower.includes('exception') || lower.includes('error:') || lower.includes('caused by:')) {
-      priorityLines.push([1000.0 - i * 0.01, i, line]);
+    // Exception headers: always keep
+    if (lower.includes('exception') || lower.includes('error:') || lower.includes('caused by:') || _STACK_HEADER_RE.test(stripped)) {
+      headers.push([i, line]);
       continue;
     }
 
-    // Priority 2: Stack frames (user-code vs library)
+    // Stack frames: these go through SageRank
     if (_FRAME_RE.test(line)) {
-      if (!_USER_FRAME_EXCLUDES.test(stripped)) {
-        // User-code frame: high priority, inversely proportional to depth
-        const positionScore = 1.0 / Math.max(1, i);
-        priorityLines.push([100.0 * positionScore, i, line]);
-      } else {
-        // Library frame: low priority
-        priorityLines.push([1.0 / Math.max(1, i), i, line]);
-      }
+      frames.push([i, line]);
       continue;
     }
 
-    // Priority 3: Other content
-    priorityLines.push([0.1, i, line]);
+    // Everything else: context
+    other.push([i, line]);
   }
 
-  // Sort by priority descending, greedily select within budget
-  priorityLines.sort((a, b) => b[0] - a[0]);
-  const selected: Array<[number, string]> = [];
-  let used = 0;
-  let userFrameCount = 0;
+  // Phase 2: Calculate header cost (headers always included)
+  let headerCost = 0;
+  for (const [, line] of headers) {
+    headerCost += line.length + 1;
+  }
+  const frameBudget = Math.max(0, budget - headerCost);
 
-  for (const [pri, idx, line] of priorityLines) {
-    const lineLen = line.length + 1; // +1 for newline
-    if (used + lineLen > budget) continue;
-
-    // Cap user frames at maxUserFrames
-    if (pri >= 1.0 && pri < 100.0) {
-      // Library frame scored by 1/position — not a user frame
-      // no-op
-    } else if (pri >= 100.0 && pri < 1000.0) {
-      // User-code frame range
-      if (userFrameCount >= maxUserFrames) continue;
-      userFrameCount++;
+  // Phase 3: Select frames using SageRank if we have enough
+  let selectedFrameIndices: number[];
+  
+  if (frames.length <= _SAGERANK_FRAME_THRESHOLD) {
+    // Few frames: keep all that fit
+    selectedFrameIndices = [];
+    let used = 0;
+    for (let fi = 0; fi < frames.length; fi++) {
+      const lineLen = frames[fi]![1].length + 1;
+      if (used + lineLen <= frameBudget) {
+        selectedFrameIndices.push(fi);
+        used += lineLen;
+      }
     }
-    selected.push([idx, line]);
-    used += lineLen;
+  } else {
+    // Enough frames to benefit from SageRank
+    const sagerank = new SageRank(
+      1.5,    // k1 (BM25)
+      0.75,   // b (BM25)
+      0.85,   // damping (PageRank)
+      50,     // maxIter
+      1e-6,   // epsilon
+      0.6,    // coverageWeight — higher = prefer diverse frames
+      5,      // minSentenceLength — frames are short, lower threshold
+      true,   // normalize
+    );
+    
+    const frameTexts = frames.map(([, line]) => line);
+    
+    // Calculate how many frames we can fit
+    const avgFrameLen = frameTexts.reduce((sum, f) => sum + f.length, 0) / frameTexts.length;
+    const estimatedTopK = Math.min(
+      maxUserFrames * 2,  // Allow some library frames too
+      Math.max(3, Math.floor(frameBudget / (avgFrameLen + 1))),
+      frames.length
+    );
+    
+    const result = sagerank.rankSentences(frameTexts, estimatedTopK, null);
+    
+    // result.selectedIndices are the most central frames
+    // Verify they fit in budget
+    selectedFrameIndices = [];
+    let used = 0;
+    
+    // First pass: add SageRank-selected frames
+    for (const fi of result.selectedIndices) {
+      const lineLen = frames[fi]![1].length + 1;
+      if (used + lineLen <= frameBudget) {
+        selectedFrameIndices.push(fi);
+        used += lineLen;
+      }
+    }
+    
+    // Second pass: if budget remains, fill with highest-scored non-selected
+    if (used < frameBudget) {
+      const scores = result.scores;
+      const selectedSet = new Set(selectedFrameIndices);
+      const remaining = frames
+        .map((_, i) => i)
+        .filter(i => !selectedSet.has(i))
+        .sort((a, b) => scores[b]! - scores[a]!);
+      
+      for (const fi of remaining) {
+        const lineLen = frames[fi]![1].length + 1;
+        if (used + lineLen <= frameBudget) {
+          selectedFrameIndices.push(fi);
+          used += lineLen;
+        }
+      }
+    }
   }
 
-  // Restore original line order
-  selected.sort((a, b) => a[0] - b[0]);
-  let result = selected.map(([, line]) => line).join('\n');
-  const omitted = lines.length - selected.length;
-  if (omitted > 0) {
-    result += `\n... [${omitted} frames omitted]`;
+  // Phase 4: Build final selection (headers + selected frames, in original order)
+  const selected: Array<[number, string]> = [...headers];
+  for (const fi of selectedFrameIndices) {
+    selected.push(frames[fi]!);
   }
-  return result;
+  selected.sort((a, b) => a[0] - b[0]);
+
+  if (selected.length === 0 && lines.length > 0) {
+    return `[TRUNCATED: lines 1-${lines.length}]`;
+  }
+
+  const keptIndices = selected.map(([idx]) => idx);
+
+  // Phase 5: Fill tiny gaps (< _MIN_OMISSION_THRESHOLD) to avoid excessive markers
+  const tinyGapLines = new Set<number>();
+  for (let i = 1; i < keptIndices.length; i++) {
+    const prev = keptIndices[i - 1]!;
+    const curr = keptIndices[i]!;
+    const gap = curr - prev - 1;
+    if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
+      for (let g = prev + 1; g < curr; g++) tinyGapLines.add(g);
+    }
+  }
+
+  // Add tiny gap lines to selected (within budget)
+  let usedAfterGaps = selected.reduce((sum, [, line]) => sum + line.length + 1, 0);
+  for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
+    const lineLen = lines[idx]!.length + 1;
+    if (usedAfterGaps + lineLen <= budget) {
+      selected.push([idx, lines[idx]!]);
+      usedAfterGaps += lineLen;
+    }
+  }
+  selected.sort((a, b) => a[0] - b[0]);
+  const finalKeptIndices = selected.map(([idx]) => idx);
+
+  // Phase 6: Build result with markers only for gaps >= threshold
+  const resultParts: string[] = [];
+
+  // Check for leading gap
+  if (finalKeptIndices[0]! >= _MIN_OMISSION_THRESHOLD) {
+    resultParts.push(`[TRUNCATED: lines 1-${finalKeptIndices[0]!}]`);
+  }
+
+  for (let i = 0; i < selected.length; i++) {
+    resultParts.push(selected[i]![1]);
+
+    if (i < selected.length - 1) {
+      const currentIdx = finalKeptIndices[i]!;
+      const nextIdx = finalKeptIndices[i + 1]!;
+      const gap = nextIdx - currentIdx - 1;
+      if (gap >= _MIN_OMISSION_THRESHOLD) {
+        resultParts.push(`[TRUNCATED: lines ${currentIdx + 2}-${nextIdx}]`);
+      }
+    }
+  }
+
+  // Check for trailing gap
+  const lastKept = finalKeptIndices[finalKeptIndices.length - 1]!;
+  const trailingGap = lines.length - 1 - lastKept;
+  if (trailingGap >= _MIN_OMISSION_THRESHOLD) {
+    resultParts.push(`[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`);
+  }
+
+  return resultParts.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -342,18 +438,26 @@ function _compressJson(obj: unknown, budget: number, depth: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Log Compression
+// Log Compression (SageRank-enhanced)
 // ---------------------------------------------------------------------------
+
+// Minimum unique lines to trigger SageRank for logs
+const _SAGERANK_LOG_THRESHOLD = 8;
 
 function _compressLog(text: string, budget: number): string {
   const lines = text.split('\n');
 
-  const high: Array<[number, string]> = [];
-  const medium: Array<[number, string]> = [];
-  const low: Array<[number, string]> = [];
+  // Phase 1: Normalize and deduplicate
+  interface LogEntry {
+    originalIdx: number;
+    line: string;
+    normHash: string;
+    isError: boolean;
+    isWarning: boolean;
+  }
 
-  // Normalize + hash for dedup
-  const seenNormalized = new Map<string, number[]>();
+  const seenNormalized = new Map<string, LogEntry[]>();
+  const allEntries: LogEntry[] = [];
 
   for (const [i, line] of lines.entries()) {
     const stripped = line.trim();
@@ -366,86 +470,169 @@ function _compressLog(text: string, budget: number): string {
     }
     const normHash = blake2bHash(normalized);
 
+    const lower = stripped.toLowerCase();
+    const isError = [..._ERROR_KEYWORDS].some((kw) => lower.includes(kw));
+    const isWarning = _LOG_SEVERITY_RE.test(stripped) &&
+      ['warn', 'timeout', 'retry', 'refused', 'denied'].some((kw) => lower.includes(kw));
+
+    const entry: LogEntry = { originalIdx: i, line, normHash, isError, isWarning };
+    allEntries.push(entry);
+
     if (!seenNormalized.has(normHash)) {
       seenNormalized.set(normHash, []);
     }
-    // has() guard is 2 lines above — safe to unwrap
-    const groupEntry = seenNormalized.get(normHash);
-    if (groupEntry === undefined) continue; // unreachable, satisfies TS
-    groupEntry.push(i);
+    seenNormalized.get(normHash)!.push(entry);
+  }
 
-    // Only keep first and last of each normalized group
-    const group = groupEntry;
-    if (group.length > 2 && i !== group[0]) {
-      // Not first — only keep if it's currently the last
-      continue;
-    }
+  // Phase 2: Get unique log patterns (first occurrence of each normalized hash)
+  const uniquePatterns: Array<{ normHash: string; firstEntry: LogEntry; count: number }> = [];
+  for (const [normHash, entries] of seenNormalized.entries()) {
+    uniquePatterns.push({
+      normHash,
+      firstEntry: entries[0]!,
+      count: entries.length,
+    });
+  }
 
-    // Classify by severity
-    const lower = stripped.toLowerCase();
-    if ([..._ERROR_KEYWORDS].some((kw) => lower.includes(kw))) {
-      high.push([i, line]);
-    } else if (
-      _LOG_SEVERITY_RE.test(stripped) &&
-      ['warn', 'timeout', 'retry', 'refused', 'denied'].some((kw) => lower.includes(kw))
-    ) {
-      medium.push([i, line]);
-    } else {
-      low.push([i, line]);
+  if (uniquePatterns.length === 0) {
+    return lines.length > 0 ? `[TRUNCATED: lines 1-${lines.length}]` : '';
+  }
+
+  // Phase 3: Rank unique patterns
+  let rankedIndices: number[];
+
+  if (uniquePatterns.length <= _SAGERANK_LOG_THRESHOLD) {
+    // Few unique patterns: prioritize by error > warning > other, then by position
+    rankedIndices = uniquePatterns
+      .map((p, i) => ({ idx: i, ...p }))
+      .sort((a, b) => {
+        // Errors first
+        if (a.firstEntry.isError !== b.firstEntry.isError) {
+          return a.firstEntry.isError ? -1 : 1;
+        }
+        // Then warnings
+        if (a.firstEntry.isWarning !== b.firstEntry.isWarning) {
+          return a.firstEntry.isWarning ? -1 : 1;
+        }
+        // Then by original position
+        return a.firstEntry.originalIdx - b.firstEntry.originalIdx;
+      })
+      .map((p) => p.idx);
+  } else {
+    // Enough patterns: use SageRank with error/warning boost
+    const sagerank = new SageRank(
+      1.5,    // k1 (BM25)
+      0.75,   // b (BM25)
+      0.85,   // damping (PageRank)
+      50,     // maxIter
+      1e-6,   // epsilon
+      0.5,    // coverageWeight — balanced for logs
+      10,     // minSentenceLength
+      true,   // normalize
+    );
+
+    const patternTexts = uniquePatterns.map((p) => p.firstEntry.line);
+    const avgPatternLen = patternTexts.reduce((sum, t) => sum + t.length, 0) / patternTexts.length;
+    const estimatedTopK = Math.max(5, Math.floor(budget / (avgPatternLen + 1)));
+
+    const result = sagerank.rankSentences(patternTexts, Math.min(estimatedTopK, uniquePatterns.length), null);
+
+    // Combine SageRank scores with error/warning priority boost
+    const boostedScores = result.scores.map((score, i) => {
+      const pattern = uniquePatterns[i]!;
+      let boost = 1.0;
+      if (pattern.firstEntry.isError) boost = 3.0;  // Error lines get 3x boost
+      else if (pattern.firstEntry.isWarning) boost = 1.5;  // Warnings get 1.5x
+      // Repetition bonus: highly repeated patterns are important signals
+      boost *= Math.log2(1 + pattern.count);
+      return { idx: i, score: score * boost };
+    });
+
+    // Sort by boosted score
+    rankedIndices = boostedScores
+      .sort((a, b) => b.score - a.score)
+      .map((s) => s.idx);
+  }
+
+  // Phase 4: Select patterns within budget
+  const selectedPatterns: Array<{ normHash: string; firstEntry: LogEntry; count: number }> = [];
+  let used = 0;
+
+  for (const idx of rankedIndices) {
+    const pattern = uniquePatterns[idx]!;
+    const lineCost = pattern.firstEntry.line.length + 1;
+    const repeatMarkerCost = pattern.count > 1 ? `  [repeated ${pattern.count} times]`.length : 0;
+
+    if (used + lineCost + repeatMarkerCost > budget) continue;
+    selectedPatterns.push(pattern);
+    used += lineCost + repeatMarkerCost;
+  }
+
+  // Phase 5: For patterns with multiple occurrences, also try to include last occurrence
+  const finalEntries: LogEntry[] = [];
+  const includedIndices = new Set<number>();
+
+  for (const pattern of selectedPatterns) {
+    const entries = seenNormalized.get(pattern.normHash)!;
+    // Always include first
+    finalEntries.push(entries[0]!);
+    includedIndices.add(entries[0]!.originalIdx);
+
+    // Include last if different and budget allows
+    if (entries.length > 1) {
+      const lastEntry = entries[entries.length - 1]!;
+      const lastCost = lastEntry.line.length + 1;
+      if (used + lastCost <= budget && !includedIndices.has(lastEntry.originalIdx)) {
+        finalEntries.push(lastEntry);
+        includedIndices.add(lastEntry.originalIdx);
+        used += lastCost;
+      }
     }
   }
 
-  // Assemble within budget, HIGH first
-  const resultLines: Array<[number, string]> = [];
-  let remaining = budget;
+  // Phase 6: Sort by original position and build output
+  finalEntries.sort((a, b) => a.originalIdx - b.originalIdx);
 
-  // Count markers for deduplicated lines
-  const countMarkers = new Map<string, number>();
-  for (const [normHash, indices] of seenNormalized.entries()) {
-    if (indices.length > 2) {
-      countMarkers.set(normHash, indices.length);
-    }
-  }
-
-  for (const priorityGroup of [high, medium, low]) {
-    for (const [idx, line] of priorityGroup) {
-      const lineBudget = line.length + 1;
-      if (remaining < lineBudget) break;
-      resultLines.push([idx, line]);
-      remaining -= lineBudget;
-    }
-  }
-
-  // Sort by original position and format
-  resultLines.sort((a, b) => a[0] - b[0]);
   const outputParts: string[] = [];
-
-  for (const [, line] of resultLines) {
-    const stripped = line.trim();
-    let normalized = stripped;
-    for (const [reFn, token] of NORMALIZERS) {
-      normalized = normalized.replace(reFn(), token);
+  const patternCounts = new Map<string, number>();
+  for (const pattern of selectedPatterns) {
+    if (pattern.count > 1) {
+      patternCounts.set(pattern.normHash, pattern.count);
     }
-    const normHash = blake2bHash(normalized);
-    const count = countMarkers.get(normHash);
+  }
+
+  for (const entry of finalEntries) {
+    const count = patternCounts.get(entry.normHash);
     if (count !== undefined) {
-      outputParts.push(`${line}  [repeated ${count} times]`);
+      outputParts.push(`${entry.line}  [repeated ${count} times]`);
+      patternCounts.delete(entry.normHash); // Only annotate once
     } else {
-      outputParts.push(line);
+      outputParts.push(entry.line);
     }
   }
 
-  const omitted = lines.length - resultLines.length;
+  // Phase 7: Add truncation marker if needed
   let result = outputParts.join('\n');
-  if (omitted > 0) {
-    result += `\n... [${omitted} log lines omitted]`;
+  const keptIndices = [...includedIndices].sort((a, b) => a - b);
+
+  if (keptIndices.length > 0 && keptIndices.length < lines.filter(l => l.trim()).length) {
+    const lastKept = keptIndices[keptIndices.length - 1]!;
+    if (lastKept < lines.length - 1) {
+      result += `\n[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`;
+    }
+  } else if (keptIndices.length === 0 && lines.length > 0) {
+    result = `[TRUNCATED: lines 1-${lines.length}]`;
   }
+
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// Source Code Compression (unstructured path)
+// Source Code Compression (unstructured path, SageRank-enhanced)
 // ---------------------------------------------------------------------------
+
+// Minimum anchor groups to trigger SageRank for source code
+const _SAGERANK_SOURCE_THRESHOLD = 4;
 
 function _compressSourceCode(text: string, budget: number): string {
   const lines = text.split('\n');
@@ -494,8 +681,9 @@ function _compressSourceCode(text: string, budget: number): string {
     sigLine: number;
     decoratorLines: number[];
     name: string;
-    priority: number;
+    basePriority: number;  // Renamed: base priority from heuristics
     bodyLines: number[];
+    fullText: string;      // For SageRank similarity
   }
   const anchorGroups: AnchorGroup[] = [];
   let pendingDecorators: number[] = [];
@@ -531,14 +719,15 @@ function _compressSourceCode(text: string, budget: number): string {
       const isDunder = _DUNDER_KEEPERS.has(name);
       const isPrivate = name.startsWith('_') && !isDunder;
       const isEntry = _ENTRY_POINT_NAMES.has(name.toLowerCase());
-      const priority = (isEntry ? 300 : !isPrivate ? 200 : 100) - indent * 0.5;
+      const basePriority = (isEntry ? 300 : !isPrivate ? 200 : 100) - indent * 0.5;
 
       currentGroup = {
         sigLine: idx,
         decoratorLines: [...pendingDecorators],
         name,
-        priority,
+        basePriority,
         bodyLines: [],
+        fullText: '',  // Will be populated after parsing
       };
       anchorGroups.push(currentGroup);
       pendingDecorators = [];
@@ -554,6 +743,23 @@ function _compressSourceCode(text: string, budget: number): string {
       }
       alwaysLines.push(idx);
     }
+  }
+
+  // Build fullText for each anchor group (for SageRank similarity)
+  for (const group of anchorGroups) {
+    const groupLines: string[] = [];
+    for (const dl of group.decoratorLines) {
+      const line = lines[dl];
+      if (line !== undefined) groupLines.push(line);
+    }
+    const sigLine = lines[group.sigLine];
+    if (sigLine !== undefined) groupLines.push(sigLine);
+    // Include first 10 body lines for context
+    for (const bl of group.bodyLines.slice(0, 10)) {
+      const line = lines[bl];
+      if (line !== undefined) groupLines.push(line);
+    }
+    group.fullText = groupLines.join('\n');
   }
 
   // Build mandatory set
@@ -588,12 +794,48 @@ function _compressSourceCode(text: string, budget: number): string {
   if (modDocOmitted > 0) mandatoryChars += 50;
   let remaining = Math.max(0, budget - mandatoryChars);
 
-  // Fill bodies by priority
+  // Rank anchor groups using SageRank + base priority boost
+  let rankedGroups: AnchorGroup[];
+
+  if (anchorGroups.length <= _SAGERANK_SOURCE_THRESHOLD) {
+    // Few groups: use base priority directly
+    rankedGroups = [...anchorGroups].sort((a, b) => b.basePriority - a.basePriority);
+  } else {
+    // Enough groups: use SageRank for centrality ranking
+    const sagerank = new SageRank(
+      1.5,    // k1 (BM25)
+      0.75,   // b (BM25)
+      0.85,   // damping (PageRank)
+      50,     // maxIter
+      1e-6,   // epsilon
+      0.4,    // coverageWeight — lower for source code (we want related functions)
+      20,     // minSentenceLength — functions have more content
+      true,   // normalize
+    );
+
+    const groupTexts = anchorGroups.map((g) => g.fullText);
+    const result = sagerank.rankSentences(groupTexts, anchorGroups.length, null);
+
+    // Combine SageRank centrality with base priority
+    const combinedScores = result.scores.map((score, idx) => {
+      const group = anchorGroups[idx]!;
+      // Normalize base priority to 0-1 range (max is ~300)
+      const normalizedPriority = group.basePriority / 300;
+      // Combined score: 60% centrality, 40% priority
+      const combined = 0.6 * score + 0.4 * normalizedPriority;
+      return { group, score: combined };
+    });
+
+    rankedGroups = combinedScores
+      .sort((a, b) => b.score - a.score)
+      .map((s) => s.group);
+  }
+
+  // Fill bodies by ranked order
   const includedBody = new Set<number>();
   const MARKER_COST = 45;
 
-  const sortedGroups = [...anchorGroups].sort((a, b) => b.priority - a.priority);
-  for (const group of sortedGroups) {
+  for (const group of rankedGroups) {
     if (remaining <= 0) break;
     const body = group.bodyLines.filter((li) => !mandatory.has(li));
     if (body.length === 0) continue;
@@ -626,12 +868,15 @@ function _compressSourceCode(text: string, budget: number): string {
     result.push(line);
   }
   if (modDocOmitted > 0) {
-    result.push(`# ... [${modDocOmitted} docstring lines omitted]`);
+    // modDocKeep has the kept indices, modDocIndices has all docstring indices
+    const docOmitStart = modDocKeep[modDocKeep.length - 1]! + 1;
+    const docOmitEnd = modDocIndices[modDocIndices.length - 1]!;
+    result.push(`[TRUNCATED: lines ${docOmitStart + 1}-${docOmitEnd + 1}]`);
   }
 
   // Scan remaining lines in order, inserting omission markers at cut points
   let pendingBlanks: string[] = [];
-  let omitCount = 0;
+  let omitStart = -1;  // Track where omission began (0-indexed)
   let omitIndent = '    ';
 
   for (const [idx, line] of lines.entries()) {
@@ -643,9 +888,10 @@ function _compressSourceCode(text: string, budget: number): string {
     }
 
     if (allIncluded.has(idx)) {
-      if (omitCount > 0) {
-        result.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
-        omitCount = 0;
+      if (omitStart >= 0) {
+        // Emit marker for lines omitStart through idx-1 (1-based)
+        result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${idx}]`);
+        omitStart = -1;
       }
       result.push(...pendingBlanks);
       pendingBlanks = [];
@@ -653,12 +899,12 @@ function _compressSourceCode(text: string, budget: number): string {
       omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
     } else {
       pendingBlanks = []; // discard blanks belonging to omitted section
-      omitCount++;
+      if (omitStart < 0) omitStart = idx;  // Start new omission range
     }
   }
 
-  if (omitCount > 0) {
-    result.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
+  if (omitStart >= 0) {
+    result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${lines.length}]`);
   }
 
   return result.join('\n');
@@ -699,10 +945,14 @@ function _stripDocBlocksBeforeBlocks(
   return topLevelLines.filter((idx) => !remove.has(idx));
 }
 
+// Minimum anchor groups to trigger SageRank for structured source code
+const _SAGERANK_STRUCTURED_THRESHOLD = 4;
+
 function _compressSourceStructured(
   text: string,
   budget: number,
   structure: StructureBlock[],
+  astEdges?: ASTEdge[],
 ): string {
   const lines = text.split('\n');
   const n = lines.length;
@@ -749,10 +999,7 @@ function _compressSourceStructured(
   let topLevelLines = Array.from({ length: n }, (_, i) => i).filter((i) => !allBlockLines.has(i));
   topLevelLines = _stripDocBlocksBeforeBlocks(lines, topLevelLines, workingStructure);
 
-  // Helper: safe access into the (presumed in-range) `lines` array. We control
-  // every index passed here — they come from Array.from({length: n}) filters
-  // and from working-structure ranges that were already clamped to [0, n-1] —
-  // so undefined is a true invariant violation.
+  // Helper: safe access into the (presumed in-range) `lines` array. We control every index passed here — they come from Array.from({length: n}) filters and from working-structure ranges that were already clamped to [0, n-1] — so undefined is a true invariant violation.
   const lineAt = (idx: number): string => {
     const line = lines[idx];
     if (line === undefined) {
@@ -805,8 +1052,57 @@ function _compressSourceStructured(
   }
   let used = topLevelLines.reduce((sum, i) => sum + lineAt(i).length + 1, 0);
 
-  // Fill blocks by priority, highest first
-  const sortedBlocks = [...workingStructure].sort((a, b) => b.priority - a.priority);
+  // Rank blocks using SageRank with AST edges (if available) or priority-only
+  let sortedBlocks: Array<StructureBlock & { priority: number }>;
+
+  if (workingStructure.length <= _SAGERANK_STRUCTURED_THRESHOLD) {
+    // Few blocks: use priority directly
+    sortedBlocks = [...workingStructure].sort((a, b) => b.priority - a.priority);
+  } else {
+    // Build text representations for each block
+    const blockTexts = workingStructure.map((block) => {
+      const start = Math.max(0, block.startLine);
+      const end = Math.min(n - 1, block.endLine);
+      const blockLines: string[] = [];
+      // Include signature + first 15 lines of body for context
+      for (let ln = start; ln <= Math.min(end, start + 15); ln++) {
+        const line = lines[ln];
+        if (line !== undefined) blockLines.push(line);
+      }
+      return blockLines.join('\n');
+    });
+
+    const sagerank = new SageRank(
+      1.5,    // k1 (BM25)
+      0.75,   // b (BM25)
+      0.85,   // damping (PageRank)
+      50,     // maxIter
+      1e-6,   // epsilon
+      0.35,   // coverageWeight — lower for code blocks (related functions matter)
+      20,     // minSentenceLength
+      true,   // normalize
+    );
+
+    // Use AST-aware ranking if edges are provided
+    const result = astEdges && astEdges.length > 0
+      ? sagerank.rankWithAST(blockTexts, workingStructure.length, astEdges, null)
+      : sagerank.rankSentences(blockTexts, workingStructure.length, null);
+
+    // Combine SageRank centrality with base priority
+    // AST-aware ranking weighs call graph relationships heavily
+    const combinedScores = result.scores.map((score, idx) => {
+      const block = workingStructure[idx]!;
+      // Normalize priority to 0-1 range (max is ~300)
+      const normalizedPriority = block.priority / 300;
+      // 55% centrality, 45% priority (centrality slightly more important with AST)
+      const combined = 0.55 * score + 0.45 * normalizedPriority;
+      return { block, score: combined };
+    });
+
+    sortedBlocks = combinedScores
+      .sort((a, b) => b.score - a.score)
+      .map((s) => s.block);
+  }
 
   const lineCost = (idx: number): number => lineAt(idx).length + 1;
 
@@ -1049,31 +1345,33 @@ function _contentAwareTruncate(text: string, budget: number): string {
     headRatio = 0.5;
   }
 
-  const marker = '\n...[content truncated]...\n';
-  const usable = budget - marker.length;
+  // Compute line numbers for the truncation marker
+  const totalLines = text.split('\n').length;
+  const markerTemplate = '\n[TRUNCATED: lines X-Y]\n';
+  const usable = budget - markerTemplate.length;
   if (usable <= 0) {
     return text.slice(0, budget);
   }
   const headBudget = Math.floor(usable * headRatio);
   const tailBudget = usable - headBudget;
 
-  return text.slice(0, headBudget) + marker + text.slice(-tailBudget);
+  // Count lines in head and tail portions
+  const headText = text.slice(0, headBudget);
+  const tailText = text.slice(-tailBudget);
+  const headLines = headText.split('\n').length;
+  const tailLines = tailText.split('\n').length;
+  const firstOmitted = headLines + 1;
+  const lastOmitted = totalLines - tailLines;
+  
+  const marker = `\n[TRUNCATED: lines ${firstOmitted}-${lastOmitted}]\n`;
+
+  return headText + marker + tailText;
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/**
- * Compress a string using content-type detection and type-specific strategies.
- *
- * Dispatch order:
- *   1. _isSourceCode (import/def patterns are unambiguous structural signals)
- *   2. _isStackTrace
- *   3. _isJsonString → parse + _compressJson
- *   4. _isLogOutput
- *   5. _contentAwareTruncate (fallback)
- */
 export function compressString(text: string, budget: number, maxUserFrames = 10): string {
   // Enforce 70% retention floor — never compress below 70% of original
   const minBudget = Math.max(1, Math.floor(text.length * 0.70));
@@ -1118,10 +1416,11 @@ export function compressSourceStructured(
   text: string,
   budget: number,
   structure: StructureBlock[],
+  astEdges?: ASTEdge[],
 ): string {
   // Enforce 70% retention floor — never compress below 70% of original
   const minBudget = Math.max(1, Math.floor(text.length * 0.70));
   budget = Math.max(budget, minBudget);
   if (text.length <= budget) return text;
-  return _compressSourceStructured(text, budget, structure);
+  return _compressSourceStructured(text, budget, structure, astEdges);
 }
