@@ -116,9 +116,12 @@ export const SERVER_INSTRUCTIONS =
  * configures the auto-write adapter if enabled, and calls each enabled tool's
  * `register(toolServer, ctx)` against the supplied SDK-agnostic ToolServer.
  *
- * The ToolServer interface in `src/tools/types.ts` matches both v1's and v2's
- * `McpServer.registerTool(name, config, handler)` signature exactly, so either
- * SDK's McpServer can be passed in as the toolServer argument.
+ * `ToolServer` is this package's minimal abstraction for the subset of
+ * `registerTool(...)` behavior used by the tool modules. It is intended to map
+ * cleanly onto the MCP SDK servers at runtime, but the SDKs' TypeScript
+ * declarations are not currently assignable to `ToolServer` in every entrypoint
+ * without an adapter or cast. Keep this contract SDK-agnostic here, and let
+ * SDK-specific entrypoints bridge any typing differences as needed.
  */
 export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): void {
   // ── Config: load, sync discovered tools, patch if needed ─────────────
