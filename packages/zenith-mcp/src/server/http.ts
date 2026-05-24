@@ -17,19 +17,33 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+// Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
+//         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
+//         The stdio entrypoint uses v2 (see src/cli/stdio.ts) for its task-queue
+//         dispatch model. The tool implementations are SDK-agnostic via the
+//         ToolServer abstraction in src/tools/types.ts.
+import { createRequire } from 'module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import {
+    isInitializeRequest,
+    RootsListChangedNotificationSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { createFilesystemContext, type FilesystemContext } from '../core/lib.js';
 import {
-    createFilesystemServer,
-    attachRootsHandlers,
+    registerEnabledTools,
     resolveInitialAllowedDirectories,
+    updateAllowedDirectoriesFromRoots,
     validateDirectories,
+    SERVER_INSTRUCTIONS,
 } from '../core/server.js';
 import { ripgrepAvailable } from '../core/shared.js';
 import { configExists, loadConfig } from '../config/index.js';
+import type { ToolServer } from '../tools/types.js';
+
+const _require = createRequire(import.meta.url);
+const _pkg = _require('../../package.json') as { version: string };
 
 // ---------------------------------------------------------------------------
 // First-run wizard — ensure config exists before proceeding
@@ -136,12 +150,79 @@ setInterval(() => {
 }, REAP_INTERVAL_MS).unref(); // unref so the timer doesn't keep the process alive
 
 // ---------------------------------------------------------------------------
-// Helper: spin up a fresh ctx + server for a new session
+// Helper: spin up a fresh ctx + server for a new session.
+//
+// This is the v1-specific server construction. It mirrors what cli/stdio.ts
+// does for v2, but using v1 SDK APIs:
+//   - v1's `new McpServer(info, opts)` constructor
+//   - v1's `setNotificationHandler(RootsListChangedNotificationSchema, handler)`
+//     which takes a Zod schema rather than a method-name string
+//   - the rest of the roots / oninitialized wiring is logically identical to
+//     the v2 stdio path; only the SDK calls differ
 // ---------------------------------------------------------------------------
 function createSessionPair() {
     const ctx = createFilesystemContext([...baselineAllowedDirs]);
-    const server = createFilesystemServer(ctx);
-    attachRootsHandlers(server, ctx);
+    const server = new McpServer(
+        { name: 'zenith-mcp', version: _pkg.version },
+        { instructions: SERVER_INSTRUCTIONS },
+    );
+    registerEnabledTools(server as unknown as ToolServer, ctx);
+
+    // v1 roots wiring: setNotificationHandler takes a Zod schema as first arg.
+    server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+        try {
+            const response = await server.server.listRoots();
+            if (response && 'roots' in response) {
+                await updateAllowedDirectoriesFromRoots(
+                    response.roots.map(r =>
+                        r.name !== undefined
+                            ? { uri: r.uri, name: r.name }
+                            : { uri: r.uri }
+                    ),
+                    ctx,
+                );
+            }
+        } catch (error) {
+            console.error('Failed to request roots from client:', error instanceof Error ? error.message : String(error));
+        }
+    });
+
+    server.server.oninitialized = async () => {
+        const clientCapabilities = server.server.getClientCapabilities();
+        if (clientCapabilities?.roots) {
+            try {
+                const response = await server.server.listRoots();
+                if (response && 'roots' in response) {
+                    await updateAllowedDirectoriesFromRoots(
+                        response.roots.map(r =>
+                            r.name !== undefined
+                                ? { uri: r.uri, name: r.name }
+                                : { uri: r.uri }
+                        ),
+                        ctx,
+                    );
+                } else {
+                    console.error('Client returned no roots set, keeping current settings');
+                }
+            } catch (error) {
+                console.error('Failed to request initial roots from client:', error instanceof Error ? error.message : String(error));
+            }
+        } else {
+            const currentDirs = ctx.getAllowedDirectories();
+            if (currentDirs.length > 0) {
+                console.error('Client does not support MCP Roots, using allowed directories set from server args:', currentDirs);
+            } else {
+                throw new Error(
+                    'Server cannot operate: No allowed directories available. ' +
+                    'Server was started without command-line directories and client either ' +
+                    'does not support MCP roots protocol or provided empty roots. ' +
+                    'Please either: 1) Start server with directory arguments, or ' +
+                    '2) Use a client that supports MCP roots protocol and provides valid root directories.'
+                );
+            }
+        }
+    };
+
     return { ctx, server };
 }
 
