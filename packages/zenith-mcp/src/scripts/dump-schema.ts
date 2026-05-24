@@ -10,6 +10,9 @@
  * If output-file is provided, writes JSON there. Otherwise prints to stdout.
  */
 
+// scripts/dump-schema.ts stays on v1 SDK to match the HTTP entrypoint that
+// uses v1; this one-shot script is read-only and pinning it to the same SDK
+// the production HTTP path uses keeps the dumped schema shape consistent.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "url";

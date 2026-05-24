@@ -19,12 +19,12 @@ export function register(server: ToolServer, ctx: ToolContext): void {
     server.registerTool("write_file", {
         title: "Write File",
         description: "Create or overwrite a file. Auto-creates parent directories. Use 'append' to add instead of replace.",
-        inputSchema: {
+        inputSchema: z.object({
             path: z.string().describe("File to write."),
             content: z.string().describe("Content to write."),
             failIfExists: z.boolean().optional().default(false).describe("Fail if the file already exists."),
             append: z.boolean().optional().default(false).describe("Append instead of overwriting."),
-        },
+        }),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: WriteFileArgs) => {
         const validPath = await ctx.validateNewFilePath(args.path);

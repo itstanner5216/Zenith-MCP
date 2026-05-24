@@ -23,7 +23,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
     server.registerTool<MediaArgs>("read_media_file", {
         title: "Read Media File",
         description: "Read an image or audio file. Returns base64 data and MIME type.",
-        inputSchema: { path: z.string() },
+        inputSchema: z.object({ path: z.string() }),
         annotations: { readOnlyHint: true }
     }, async (args) => {
         const validPath = await ctx.validatePath(args.path);

@@ -30,7 +30,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
     server.registerTool("edit_file", {
         title: "Edit File",
         description: "Edit a text file.",
-        inputSchema: {
+        inputSchema: z.object({
             path: z.string().describe("File to edit."),
             edits: z.array(z.object({
                 mode: z.enum(["block", "content", "symbol"]),
@@ -44,7 +44,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 nearLine: z.number().optional().describe("Approx line number."),
             })),
             dryRun: z.boolean().default(false).describe("Preview without writing."),
-        },
+        }),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: EditFileArgs) => {
         const validPath = await ctx.validatePath(args.path);
