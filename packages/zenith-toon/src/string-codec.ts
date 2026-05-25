@@ -10,7 +10,7 @@
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
 import { SageRank } from './sagerank.js';
-import type { StructureBlock, Anchor, ASTEdge } from './types.js';
+import type { StructureBlock, ASTEdge } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Detection patterns
@@ -61,7 +61,7 @@ const _SOURCE_IMPORT_RE = /^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)/
 const _DECORATOR_RE = /^\s*@\w+/;
 const _DOC_TAG_RE = /^\s*(?:\*\s*)?@(?:param|returns?|type|template|typedef|property|throws?)\b/;
 
-const _MIN_OMISSION_THRESHOLD = 3;
+const _MIN_OMISSION_THRESHOLD = 10;
 
 // ---------------------------------------------------------------------------
 // Content Type Detection
@@ -999,7 +999,6 @@ function _compressSourceStructured(
   let topLevelLines = Array.from({ length: n }, (_, i) => i).filter((i) => !allBlockLines.has(i));
   topLevelLines = _stripDocBlocksBeforeBlocks(lines, topLevelLines, workingStructure);
 
-  // Helper: safe access into the (presumed in-range) `lines` array. We control every index passed here — they come from Array.from({length: n}) filters and from working-structure ranges that were already clamped to [0, n-1] — so undefined is a true invariant violation.
   const lineAt = (idx: number): string => {
     const line = lines[idx];
     if (line === undefined) {
@@ -1056,15 +1055,12 @@ function _compressSourceStructured(
   let sortedBlocks: Array<StructureBlock & { priority: number }>;
 
   if (workingStructure.length <= _SAGERANK_STRUCTURED_THRESHOLD) {
-    // Few blocks: use priority directly
     sortedBlocks = [...workingStructure].sort((a, b) => b.priority - a.priority);
   } else {
-    // Build text representations for each block
     const blockTexts = workingStructure.map((block) => {
       const start = Math.max(0, block.startLine);
       const end = Math.min(n - 1, block.endLine);
       const blockLines: string[] = [];
-      // Include signature + first 15 lines of body for context
       for (let ln = start; ln <= Math.min(end, start + 15); ln++) {
         const line = lines[ln];
         if (line !== undefined) blockLines.push(line);
@@ -1073,28 +1069,16 @@ function _compressSourceStructured(
     });
 
     const sagerank = new SageRank(
-      1.5,    // k1 (BM25)
-      0.75,   // b (BM25)
-      0.85,   // damping (PageRank)
-      50,     // maxIter
-      1e-6,   // epsilon
-      0.35,   // coverageWeight — lower for code blocks (related functions matter)
-      20,     // minSentenceLength
-      true,   // normalize
+      1.5, 0.75, 0.85, 50, 1e-6, 0.35, 20, true
     );
 
-    // Use AST-aware ranking if edges are provided
     const result = astEdges && astEdges.length > 0
       ? sagerank.rankWithAST(blockTexts, workingStructure.length, astEdges, null)
       : sagerank.rankSentences(blockTexts, workingStructure.length, null);
 
-    // Combine SageRank centrality with base priority
-    // AST-aware ranking weighs call graph relationships heavily
     const combinedScores = result.scores.map((score, idx) => {
       const block = workingStructure[idx]!;
-      // Normalize priority to 0-1 range (max is ~300)
       const normalizedPriority = block.priority / 300;
-      // 55% centrality, 45% priority (centrality slightly more important with AST)
       const combined = 0.55 * score + 0.45 * normalizedPriority;
       return { block, score: combined };
     });
@@ -1105,9 +1089,7 @@ function _compressSourceStructured(
   }
 
   const lineCost = (idx: number): number => lineAt(idx).length + 1;
-
   const renderedSignature = (idx: number): string => lineAt(idx) + `  # L${idx + 1}`;
-
   const renderedSignatureCost = (idx: number): number => renderedSignature(idx).length + 1;
 
   for (const block of sortedBlocks) {
@@ -1115,7 +1097,6 @@ function _compressSourceStructured(
     const end = Math.min(n - 1, block.endLine);
     if (start > end) continue;
 
-    // Only charge for lines not already included
     const newIndices = Array.from({ length: end - start + 1 }, (_, k) => start + k)
       .filter((i) => !resultLines.has(i));
     if (newIndices.length === 0) continue;
@@ -1127,7 +1108,6 @@ function _compressSourceStructured(
     const rangeMarkerCost = rangeMarker.length + 1;
 
     if (used + newSize <= budget) {
-      // Full block fits — annotate signature with 1-based line number
       for (const i of newIndices) {
         resultLines.set(i, lineAt(i));
       }
@@ -1135,190 +1115,97 @@ function _compressSourceStructured(
       used += newSize;
     } else if (!resultLines.has(start) && used + sigSize + rangeMarkerCost <= budget) {
       const bodyIndices = newIndices.filter((i) => i !== start);
-      const anchorSpecs = [...(block.anchors ?? [])].sort(
-        (a: Anchor, b: Anchor) => {
-          if (b.priority !== a.priority) return b.priority - a.priority;
-          return (a.startLine ?? start) - (b.startLine ?? start);
-        }
-      );
-
+      
+      const MARKER_COST = 45;
       const selectedSet = new Set<number>();
       let selectedBodyCost = 0;
-      const anchorPriorityByLine = new Map<number, number>();
       const remaining = budget - used - sigSize;
 
-      const bodyRenderCost = (indices: Set<number> | number[]): number => {
-        const sortedIndices = [...indices].sort((a, b) => a - b);
-        if (sortedIndices.length === 0) return 0;
-
-        let cost = 0;
-        let prevIdx = start;
-        for (const idx of sortedIndices) {
-          if (idx > prevIdx + 1 && (idx - prevIdx - 1) >= _MIN_OMISSION_THRESHOLD) {
-            const lineForIndent = lineAt(idx);
-            const indent = ' '.repeat(lineForIndent.length - lineForIndent.trimStart().length);
-            const gapMarker = `${indent}# ... [lines ${prevIdx + 2}-${idx} omitted]`;
-            cost += gapMarker.length + 1;
-          }
-          cost += lineCost(idx);
-          prevIdx = idx;
-        }
-        return cost;
-      };
-
-      const tryAddRange = (indices: number[], priority?: number): boolean => {
-        if (indices.length === 0) return false;
-
-        const newLocal = indices.filter((idx) => !selectedSet.has(idx));
-        if (newLocal.length === 0) return false;
-
-        const newCost = newLocal.reduce((sum, idx) => sum + lineCost(idx), 0);
-        const candidateCost = selectedBodyCost + newCost;
-        if (candidateCost > remaining) return false;
-
-        for (const idx of newLocal) {
-          selectedSet.add(idx);
-          if (priority !== undefined) {
-            anchorPriorityByLine.set(idx, Math.max(anchorPriorityByLine.get(idx) ?? priority, priority));
-          }
-        }
-        selectedBodyCost = candidateCost;
-        return true;
-      };
-
-      for (const anchor of anchorSpecs) {
-        const anchorStart = Math.max(start + 1, Math.min(end, anchor.startLine ?? (start + 1)));
-        const anchorEnd = Math.max(anchorStart, Math.min(end, anchor.endLine ?? anchorStart));
-        tryAddRange(
-          Array.from({ length: anchorEnd - anchorStart + 1 }, (_, k) => anchorStart + k)
-            .filter((idx) => bodyIndices.includes(idx)),
-          anchor.priority,
-        );
-      }
-
-      if (bodyRenderCost(selectedSet) > remaining) {
-        const removable = [...anchorPriorityByLine.keys()].sort((a, b) => {
-          const pa = anchorPriorityByLine.get(a) ?? 0;
-          const pb = anchorPriorityByLine.get(b) ?? 0;
-          if (pa !== pb) return pa - pb;
-          return b - a;
-        });
-        while (removable.length > 0 && bodyRenderCost(selectedSet) > remaining) {
-          const toRemove = removable.shift();
-          if (toRemove === undefined) break;
-          selectedSet.delete(toRemove);
-        }
-        selectedBodyCost = [...selectedSet].reduce((sum, idx) => sum + lineCost(idx), 0);
-      }
-
-      // Use any leftover budget to fill local context in source order
       for (const idx of bodyIndices) {
-        if (selectedSet.has(idx)) continue;
-        const candidate = new Set(selectedSet);
-        candidate.add(idx);
-        if (bodyRenderCost(candidate) > remaining) break;
+        const cost = lineCost(idx);
+        if (selectedBodyCost + cost + MARKER_COST > remaining) break;
         selectedSet.add(idx);
-        selectedBodyCost += lineCost(idx);
+        selectedBodyCost += cost;
       }
 
       if (selectedSet.size > 0) {
         const omittedLines = bodyIndices.filter((idx) => !selectedSet.has(idx));
-        let omittedCount = omittedLines.length;
+        const omittedCount = omittedLines.length;
+        
+        // Never truncate tiny blocks, even if it puts us slightly over budget
         if (omittedCount > 0 && omittedCount < _MIN_OMISSION_THRESHOLD) {
-          const candidate = new Set(selectedSet);
-          for (const idx of omittedLines) candidate.add(idx);
-          if (bodyRenderCost(candidate) <= remaining) {
-            for (const idx of omittedLines) {
-              selectedSet.add(idx);
-              selectedBodyCost += lineCost(idx);
-            }
-            omittedCount = 0;
+          for (const idx of omittedLines) {
+            selectedSet.add(idx);
+            selectedBodyCost += lineCost(idx);
           }
         }
 
-        const finalBody = [...selectedSet].sort((a, b) => a - b);
-        const bodyCost = bodyRenderCost(finalBody);
-
         resultLines.set(start, sigText);
-        for (const idx of finalBody) {
+        for (const idx of selectedSet) {
           resultLines.set(idx, lineAt(idx));
         }
-        used += sigSize + bodyCost;
-        continue;
-      }
-
-      // Signature + range omission marker
-      resultLines.set(start, sigText);
-      const markerLine = start + 1;
-      if (markerLine <= end && !resultLines.has(markerLine)) {
-        resultLines.set(markerLine, rangeMarker);
-        used += sigSize + rangeMarkerCost;
+        used += sigSize + selectedBodyCost;
       } else {
+        resultLines.set(start, sigText);
+        const markerLine = start + 1;
+        if (markerLine <= end && !resultLines.has(markerLine)) {
+          // Instead of adding rangeMarker to resultLines (which causes issues in the loop),
+          // we just omit the rest. The reassembly loop will naturally emit an omission marker!
+        }
         used += sigSize;
       }
     }
-    // else: budget exhausted, block entirely omitted
   }
 
-  // Reassemble in original line order with gap markers
-  if (resultLines.size >= 2) {
-    const tinyGapLines = new Set<number>();
-    const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
-    // resultLines.size >= 2 guarantees sortedKeys has at least 2 entries.
-    const first = sortedKeys[0];
-    if (first === undefined) {
-      throw new Error('invariant: resultLines.size >= 2 yet sortedKeys is empty');
-    }
-    let prev = first;
-    for (let ki = 1; ki < sortedKeys.length; ki++) {
-      const ln = sortedKeys[ki];
-      if (ln === undefined) continue;
-      const gap = ln - prev - 1;
-      if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
-        for (let g = prev + 1; g < ln; g++) tinyGapLines.add(g);
-      }
-      prev = ln;
-    }
-
-    for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
-      if (!resultLines.has(idx) && used + lineCost(idx) <= budget) {
-        resultLines.set(idx, lineAt(idx));
-        used += lineCost(idx);
-      }
-    }
-  }
-
+  // Reassemble in original line order with gap markers exactly like text version
   const output: string[] = [];
-  const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
-  let prev = -1;
-  let actualUsed = 0;
+  let omitCount = 0;
+  let omitIndent = '    ';
+  let pendingBlanks: string[] = [];
 
-  for (const ln of sortedKeys) {
-    const lineText = resultLines.get(ln) ?? '';
-    const lineSize = lineText.length + 1;
-    if (prev >= 0 && ln > prev + 1) {
-      let prevContent = '';
-      if (output.length > 0) {
-        const last = output[output.length - 1];
-        if (last === undefined) {
-          throw new Error('invariant: output is non-empty but indexed access returned undefined');
-        }
-        prevContent = last;
-      }
-      if (!prevContent.includes('# ...') && (ln - prev - 1) >= _MIN_OMISSION_THRESHOLD) {
-        const indent = ' '.repeat(lineText.length - lineText.trimStart().length);
-        const gapMarker = `${indent}# ... [lines ${prev + 2}-${ln} omitted]`;
-        const gapMarkerSize = gapMarker.length + 1;
-        if (actualUsed + gapMarkerSize + lineSize <= budget) {
-          output.push(gapMarker);
-          actualUsed += gapMarkerSize;
-        }
-      }
+  for (let idx = 0; idx < n; idx++) {
+    const line = lines[idx];
+    if (line === undefined) continue;
+
+    if (!line.trim()) {
+      pendingBlanks.push(line);
+      continue;
     }
-    if (actualUsed + lineSize > budget) break;
-    output.push(lineText);
-    actualUsed += lineSize;
-    prev = ln;
+
+    if (resultLines.has(idx)) {
+      if (omitCount > 0) {
+        // If we skipped a small amount of lines that somehow bypassed the threshold logic
+        if (omitCount < _MIN_OMISSION_THRESHOLD) {
+          for (let prevIdx = idx - omitCount; prevIdx < idx; prevIdx++) {
+            if (lines[prevIdx] && lines[prevIdx]!.trim()) {
+              output.push(lines[prevIdx]!);
+            }
+          }
+        } else {
+          output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
+        }
+        omitCount = 0;
+      }
+      output.push(...pendingBlanks);
+      pendingBlanks = [];
+      output.push(resultLines.get(idx)!);
+      omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
+    } else {
+      pendingBlanks = []; // discard blanks belonging to omitted section
+      omitCount++;
+    }
+  }
+
+  if (omitCount > 0) {
+    if (omitCount < _MIN_OMISSION_THRESHOLD) {
+      for (let prevIdx = n - omitCount; prevIdx < n; prevIdx++) {
+        if (lines[prevIdx] && lines[prevIdx]!.trim()) {
+          output.push(lines[prevIdx]!);
+        }
+      }
+    } else {
+      output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
+    }
   }
 
   return output.join('\n');

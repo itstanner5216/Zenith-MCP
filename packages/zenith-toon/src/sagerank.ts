@@ -897,12 +897,12 @@ export class SageRank {
 
       // Forward edge (caller → callee)
       const fwdNeighbors = merged.get(edge.from)!;
-      fwdNeighbors.set(edge.to, (fwdNeighbors.get(edge.to) ?? 0) + w);
+      fwdNeighbors.set(edge.to, (fwdNeighbors.get(edge.to) ?? 0) + w * 0.5);
 
       // Backward edge (callee → caller) with reduced weight
       // Callees pointing back to callers helps find "hub" functions
       const bwdNeighbors = merged.get(edge.to)!;
-      bwdNeighbors.set(edge.from, (bwdNeighbors.get(edge.from) ?? 0) + w * 0.5);
+      bwdNeighbors.set(edge.from, (bwdNeighbors.get(edge.from) ?? 0) + w * 2.0);
     }
 
     return merged;
