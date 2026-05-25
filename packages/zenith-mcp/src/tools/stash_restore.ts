@@ -5,7 +5,8 @@ import { randomBytes } from 'crypto';
 import { normalizeLineEndings, createMinimalDiff, findResumeOffset } from '../core/lib.js';
 import { getStashEntry, consumeAttempt, clearStash, listStash } from '../core/stash.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
-import { findRepoRoot, getDb, snapshotSymbol, getSessionId, } from '../core/symbol-index.js';
+import { getDb, snapshotSymbol, getSessionId, } from '../core/symbol-index.js';
+import { getProjectContext } from '../core/project-context.js';
 import type { ToolServer, ToolContext } from './types.js';
 import { errorMessage } from './types.js';
 
@@ -152,7 +153,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
                 if (!args.dryRun && pendingSnapshots && pendingSnapshots.length > 0) {
                     try {
-                        const repoRoot = findRepoRoot(validPath) || path.dirname(validPath);
+                        const pc = getProjectContext(ctx);
+                        const repoRoot = pc.getRoot(validPath) || path.dirname(validPath);
                         const db = getDb(repoRoot);
                         const sessionId = ctx.sessionId ?? getSessionId();
                         const relPath = path.relative(repoRoot, validPath);

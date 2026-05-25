@@ -202,12 +202,6 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
         const tag = isBatch ? `#${i + 1}: ` : '';
 
         // BLOCK mode
-        // BUG (tracked): block_start, block_end, and replacement_block are schema-optional but
-        // the !-assertions below provide zero runtime protection — if any field is absent the
-        // engine crashes with "Cannot read properties of undefined (reading 'trim'/'replace')".
-        // Fix: replace the three !-assertions with an explicit guard that pushes to errors[] and
-        // continues, consistent with how the other modes handle missing fields.
-        // The guard has been applied to the live dist already; implement it here properly.
         if (edit.mode === 'block') {
             if (!edit.block_start || !edit.block_end || edit.replacement_block === undefined) {
                 errors.push({
@@ -218,14 +212,42 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
 
             const lines = workingContent.split('\n');
-            const expectedStart = edit.block_start.trim();
-            const expectedEnd = edit.block_end.trim();
+
+            // Support multi-line block_start / block_end:
+            // Extract the first line as the start anchor, last line as the end anchor.
+            // Any intermediate lines from the input are used as verification
+            // to filter false-positive candidates.
+            const startInputLines = normalizeLineEndings(edit.block_start).split('\n');
+            const endInputLines = normalizeLineEndings(edit.block_end).split('\n');
+            const anchorStart = startInputLines[0]!.trim();
+            const anchorEnd = endInputLines[endInputLines.length - 1]!.trim();
+
+            // Collect intermediate lines for verification (all lines between
+            // the first line of block_start and the last line of block_end).
+            // These must appear in order within the candidate range.
+            const verifyLines: string[] = [];
+            for (let v = 1; v < startInputLines.length; v++) {
+                const trimmed = startInputLines[v]!.trim();
+                if (trimmed) verifyLines.push(trimmed);
+            }
+            for (let v = 0; v < endInputLines.length - 1; v++) {
+                const trimmed = endInputLines[v]!.trim();
+                if (trimmed) verifyLines.push(trimmed);
+            }
 
             const candidates: Array<{ start: number; end: number }> = [];
             for (let s = 0; s < lines.length; s++) {
-                if (lines[s]!.trim() !== expectedStart) continue;
+                if (lines[s]!.trim() !== anchorStart) continue;
                 for (let e = s; e < lines.length; e++) {
-                    if (lines[e]!.trim() !== expectedEnd) continue;
+                    if (lines[e]!.trim() !== anchorEnd) continue;
+                    // Verify intermediate lines exist in order within [s, e]
+                    if (verifyLines.length > 0) {
+                        let vi = 0;
+                        for (let k = s + 1; k < e && vi < verifyLines.length; k++) {
+                            if (lines[k]!.trim() === verifyLines[vi]) vi++;
+                        }
+                        if (vi < verifyLines.length) continue; // intermediate verification failed
+                    }
                     candidates.push({ start: s, end: e });
                     break;
                 }
@@ -240,7 +262,7 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             if (candidates.length === 1) {
                 chosen = candidates[0]!;
             } else {
-                // Check disambiguations map
+                // Check disambiguations map (from stashRestore corrections)
                 const dis = disambiguations?.get(i);
                 if (dis?.startLine !== undefined) {
                     chosen = candidates.find(c => c.start === dis.startLine! - 1);
@@ -249,9 +271,19 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                         continue;
                     }
                 } else {
-                    const locs = candidates.map(c => `lines ${c.start + 1}-${c.end + 1}`).join(', ');
-                    errors.push({ i, msg: `${tag}Ambiguous: ${locs}.` });
-                    continue;
+                    // Preemptive disambiguation via nearLine: pick the closest
+                    // candidate without requiring a stash round-trip
+                    const nearLine = dis?.nearLine ?? edit.nearLine;
+                    if (nearLine !== undefined) {
+                        candidates.sort((a, b) =>
+                            Math.abs(a.start - (nearLine - 1)) - Math.abs(b.start - (nearLine - 1))
+                        );
+                        chosen = candidates[0]!;
+                    } else {
+                        const locs = candidates.map(c => `lines ${c.start + 1}-${c.end + 1}`).join(', ');
+                        errors.push({ i, msg: `${tag}Ambiguous: ${locs}. Provide startLine or nearLine.` });
+                        continue;
+                    }
                 }
             }
 

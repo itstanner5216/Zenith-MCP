@@ -16,10 +16,13 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc"
+    "clean": "shx rm -rf dist tsconfig.tsbuildinfo",
+    "build": "tsc --build",
+    "rebuild": "tsc --build --force"
   },
   "devDependencies": {
     "@types/node": "^22.19.17",
+    "shx": "^0.3.4",
     "typescript": "^5.8.2"
   }
 }

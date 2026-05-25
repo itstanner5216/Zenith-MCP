@@ -12,10 +12,10 @@ importers:
   .:
     devDependencies:
       turbo:
-        specifier: ^2.5.0
+        specifier: ^2.9.14
         version: 2.9.14
       typescript:
-        specifier: ^5.8.2
+        specifier: ^5.9.3
         version: 5.9.3
 
   packages/zenith-mcp:
@@ -114,6 +114,9 @@ importers:
       '@types/node':
         specifier: ^22.19.17
         version: 22.19.19
+      shx:
+        specifier: ^0.3.4
+        version: 0.3.4
       typescript:
         specifier: ^5.8.2
         version: 5.9.3

@@ -39,15 +39,19 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             : path.resolve(process.cwd(), expandedPath);
         const normalizedRequested = normalizePath(absolute);
 
-        const isAllowed = isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories);
-        if (!isAllowed) {
-            throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${_allowedDirectories.join(', ')}`);
+        // When no allowed directories are configured, operate in open mode.
+        // The sandbox is opt-in — if no boundary is defined, don't enforce one.
+        if (_allowedDirectories.length > 0) {
+            const isAllowed = isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories);
+            if (!isAllowed) {
+                throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${_allowedDirectories.join(', ')}`);
+            }
         }
 
         try {
             const realPath = await fs.realpath(absolute);
             const normalizedReal = normalizePath(realPath);
-            if (!isPathWithinAllowedDirectories(normalizedReal, _allowedDirectories)) {
+            if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedReal, _allowedDirectories)) {
                 throw new Error(`Access denied - symlink target outside allowed directories: ${realPath} not in ${_allowedDirectories.join(', ')}`);
             }
             return realPath;
@@ -57,7 +61,7 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
                 try {
                     const realParentPath = await fs.realpath(parentDir);
                     const normalizedParent = normalizePath(realParentPath);
-                    if (!isPathWithinAllowedDirectories(normalizedParent, _allowedDirectories)) {
+                    if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedParent, _allowedDirectories)) {
                         throw new Error(`Access denied - parent directory outside allowed directories: ${realParentPath} not in ${_allowedDirectories.join(', ')}`);
                     }
                     return absolute;
@@ -96,12 +100,12 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             ? path.resolve(expandedPath)
             : path.resolve(process.cwd(), expandedPath);
         const normalizedRequested = normalizePath(absolute);
-        if (!isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
+        if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
             throw new Error('Access denied — path is outside allowed directories.');
         }
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
         const normalizedAncestor = normalizePath(realAncestor);
-        if (!isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
+        if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
             throw new Error('Access denied — resolved path is outside allowed directories.');
         }
         return missingSegments.reduce(

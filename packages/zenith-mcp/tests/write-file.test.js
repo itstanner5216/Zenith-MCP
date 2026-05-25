@@ -151,7 +151,8 @@ describe('write_file registration', () => {
         mod.register(server, mkTmpGitRepo() && mkCtx('/tmp'));
         expect(calls[0].name).toBe('write_file');
         const schema = calls[0].schema;
-        expect(schema.inputSchema.path).toBeDefined();
-        expect(schema.inputSchema.content).toBeDefined();
+        const props = schema.inputSchema.toJSONSchema().properties;
+        expect(props.path).toBeDefined();
+        expect(props.content).toBeDefined();
     });
 });

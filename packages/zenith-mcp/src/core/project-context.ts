@@ -4,6 +4,7 @@ import os from 'os';
 import { getDb } from './symbol-index.js';
 import { ProjectRegistry } from './project-registry.js';
 import { resolveProjectRoot, clearProjectScopeCache } from '../utils/project-scope.js';
+import { getProcessTreeCwdsResolved } from '../utils/process-tree.js';
 import {
     DbConnection,
     openDb,
@@ -128,15 +129,20 @@ export class ProjectContext {
 
     /**
      * Force re-resolution. Called when MCP roots change.
+     * Explicit bindings (set via initProject) are preserved — they are sticky.
      */
     refresh(): void {
-        this._boundRoot = null;
-        this._isGlobal = false;
-        this._resolved = false;
-        this._explicit = false;
+        // Don't reset explicit bindings — initProject() is sticky
+        if (!this._explicit) {
+            this._boundRoot = null;
+            this._isGlobal = false;
+            this._resolved = false;
+        }
         clearProjectScopeCache();
         this._syncRegistry();
-        this._resolve();
+        if (!this._explicit) {
+            this._resolve();
+        }
     }
 
     /**
@@ -202,19 +208,40 @@ export class ProjectContext {
     _resolve(): void {
         this._resolved = true;
 
-        // Delegate to shared utility with this context's allowed directories and registry
-        const root = resolveProjectRoot(process.cwd(), {
-            allowedDirectories: this._ctx.getAllowedDirectories(),
-            registryEntries: this._registry.listProjects(),
-        });
+        const allowedDirs = this._ctx.getAllowedDirectories();
+        const registryEntries = this._registry.listProjects();
+        const resolveOpts = { allowedDirectories: allowedDirs, registryEntries };
 
-        if (root) {
-            this._boundRoot = root;
-            this._isGlobal = false;
-            return;
+        // Priority 1: Try each allowed directory (from MCP roots / CLI args).
+        // These are the ACTUAL project dirs the client told us about.
+        for (const dir of allowedDirs) {
+            const root = resolveProjectRoot(dir, resolveOpts);
+            if (root) {
+                this._boundRoot = root;
+                this._isGlobal = false;
+                return;
+            }
         }
 
-        // Global fallback
+        // Priority 2: Walk the process tree for candidate CWDs.
+        // The parent shell/IDE almost certainly has a CWD in the user's project.
+        try {
+            const treeCwds = getProcessTreeCwdsResolved();
+            for (const { cwd, source } of treeCwds) {
+                const root = resolveProjectRoot(cwd, resolveOpts);
+                if (root) {
+                    console.error(`Project detected via process tree: ${root} (source: ${source})`);
+                    this._boundRoot = root;
+                    this._isGlobal = false;
+                    return;
+                }
+            }
+        } catch {
+            // Process tree walk failed entirely — continue to global fallback
+        }
+
+        // Global fallback — the server operates without a bound project.
+        // Tools will resolve per-file when given file paths.
         this._boundRoot = null;
         this._isGlobal = true;
     }
@@ -252,19 +279,19 @@ export function getProjectContext(ctx: FsContext): ProjectContext {
 }
 
 /**
- * Hook into server.js — call this when roots change to refresh context.
- * Pass the FsContext to refresh only that session's ProjectContext.
+ * Refresh the ProjectContext for the given session when MCP roots change.
+ * ctx is REQUIRED — every roots change happens within a session context.
+ * If you're calling this without a ctx, you have a bug upstream.
  */
-export function onRootsChanged(ctx?: FsContext): void {
-    if (ctx) {
-        const instance = _instances.get(ctx);
-        if (instance) {
-            instance.refresh();
-        }
-        return;
+export function onRootsChanged(ctx: FsContext): void {
+    const instance = _instances.get(ctx);
+    if (instance) {
+        instance.refresh();
+    } else {
+        // No ProjectContext for this ctx yet — that's fine, it will be
+        // created on first tool call and will pick up the new dirs then.
+        console.error("onRootsChanged: no ProjectContext for this session yet (will be created on first use)");
     }
-    // Without a ctx we cannot iterate a WeakMap. Callers should pass their
-    // ctx for proper per-session refresh.
 }
 
 /** Reset the context — for test isolation only. */

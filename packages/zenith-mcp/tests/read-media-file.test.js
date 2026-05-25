@@ -113,7 +113,7 @@ describe('read_media_file', () => {
         const { server, calls } = captureHandler();
         const mod = await importModule();
         mod.register(server, mkCtx(tmpDir));
-        expect(calls[0].schema.inputSchema.path).toBeDefined();
+        expect(calls[0].schema.inputSchema.toJSONSchema().properties.path).toBeDefined();
     });
 
     it('registers with readOnlyHint annotation', async () => {

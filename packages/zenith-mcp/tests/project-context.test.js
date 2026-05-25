@@ -196,7 +196,7 @@ describe('ProjectContext — singleton', () => {
 });
 
 describe('ProjectContext — onRootsChanged', () => {
-    it('refreshes singleton instance when roots change', async () => {
+    it('refreshes singleton instance when roots change (preserves explicit binding)', async () => {
         vi.resetModules();
         const { getProjectContext, onRootsChanged } = await importProjectContext();
         const ctx = { getAllowedDirectories: () => [], validatePath: async (p) => p };
@@ -204,7 +204,9 @@ describe('ProjectContext — onRootsChanged', () => {
         pc._resolved = true;
         pc._explicit = true;
         onRootsChanged(ctx);
-        expect(pc._explicit).toBe(false);
+        // Issue 8: explicit bindings are sticky — onRootsChanged must NOT override
+        // a project that was explicitly registered via initProject().
+        expect(pc._explicit).toBe(true);
     });
 
     it('refactor-batch path: getProjectContext via ctx is refreshed by onRootsChanged(ctx)', async () => {
@@ -226,9 +228,10 @@ describe('ProjectContext — onRootsChanged', () => {
         // onRootsChanged is called by server.ts with the same ctx object
         onRootsChanged(ctx);
 
-        // The cached instance keyed by ctx must have been refreshed
-        expect(pc._explicit).toBe(false);
-        expect(pc._resolved).toBe(true); // refresh() calls _resolve() which sets resolved back to true
+        // Issue 8: The cached instance keyed by ctx must NOT have its explicit
+        // binding cleared — explicit bindings survive a roots-change.
+        expect(pc._explicit).toBe(true);
+        expect(pc._resolved).toBe(true); // refresh() skips re-resolve when explicit
     });
 
     it('wrapper object does NOT get refreshed by onRootsChanged(ctx)', async () => {

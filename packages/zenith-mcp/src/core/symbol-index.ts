@@ -36,17 +36,50 @@ import {
 // Repo root detection
 // ---------------------------------------------------------------------------
 
+/**
+ * Find the git repository root for a given file or directory path.
+ *
+ * Strategy:
+ * 1. Walk up from the path looking for a `.git` directory (pure filesystem, no CLI needed)
+ * 2. If found, optionally verify with `git rev-parse` for worktree/submodule accuracy
+ * 3. Falls back to the .git directory's parent if git CLI is unavailable
+ */
 export function findRepoRoot(filePath: string): string | null {
     try {
         const stat = statSync(filePath);
-        const cwd = stat.isDirectory() ? filePath : path.dirname(filePath);
-        const result = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-            cwd,
-            encoding: 'utf-8',
-            timeout: 5000,
-            stdio: ['ignore', 'pipe', 'ignore'],
-        });
-        return result.trim();
+        let dir = stat.isDirectory() ? filePath : path.dirname(filePath);
+
+        // Walk up looking for .git — this ALWAYS works, no external dependency
+        while (true) {
+            try {
+                const gitPath = path.join(dir, '.git');
+                const gitStat = statSync(gitPath);
+                if (gitStat.isDirectory() || gitStat.isFile()) {
+                    // Found .git — try git CLI for accuracy (handles worktrees,
+                    // submodules), but fall back to this dir if git isn't available
+                    try {
+                        const result = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+                            cwd: dir,
+                            encoding: 'utf-8',
+                            timeout: 5000,
+                            stdio: ['ignore', 'pipe', 'ignore'],
+                        });
+                        return result.trim();
+                    } catch {
+                        // git CLI unavailable or failed — the .git parent IS the root
+                        return dir;
+                    }
+                }
+            } catch {
+                // No .git here — continue walking up
+            }
+
+            const parent = path.dirname(dir);
+            if (parent === dir) break; // reached filesystem root
+            dir = parent;
+        }
+
+        return null;
     } catch {
         return null;
     }

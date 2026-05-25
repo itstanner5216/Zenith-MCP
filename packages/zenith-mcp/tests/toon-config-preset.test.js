@@ -33,8 +33,8 @@ describe('toonConfigPreset — known presets', () => {
         expect(Array.isArray(config.encode_rules)).toBe(true);
     });
 
-    it('returns a config for "codex_logs"', () => {
-        const config = toonConfigPreset('codex_logs', PRESETS);
+    it('returns a config for "logs"', () => {
+        const config = toonConfigPreset('logs', PRESETS);
         expect(config).toBeDefined();
         expect(config.preserve_rules.length).toBeGreaterThan(0);
     });

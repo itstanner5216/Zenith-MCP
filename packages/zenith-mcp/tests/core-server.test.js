@@ -62,7 +62,7 @@ function mockAllDeps(customMocks = {}) {
         patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
+    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
     }
@@ -91,7 +91,7 @@ async function getToolMocks(customMocks = {}) {
         patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
+    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
     }
@@ -141,7 +141,7 @@ describe('registerEnabledTools', () => {
             expandTilde: vi.fn((p) => p),
         }));
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
-        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
+        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
         const mod = await import(SERVER_MOD);
         mod.registerEnabledTools(makeMockToolServer(), makeMockCtx());
         expect(configureRegistry).toHaveBeenCalledWith('/backup');
@@ -162,7 +162,7 @@ describe('registerEnabledTools', () => {
             patchToolsInConfig: vi.fn(),
         }));
         vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry }));
-        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn() }));
+        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
         const mod = await import(SERVER_MOD);
         mod.registerEnabledTools(makeMockToolServer(), makeMockCtx());
         expect(configureRegistry).not.toHaveBeenCalled();
@@ -278,7 +278,7 @@ describe('updateAllowedDirectoriesFromRoots', () => {
             roots.map(r => r.uri.replace('file://', ''))
         );
         const result = await getToolMocks({
-            [PROJECT_CONTEXT]: () => ({ onRootsChanged }),
+            [PROJECT_CONTEXT]: () => ({ onRootsChanged, getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }),
             [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
         });
         mod = result.mod;
@@ -291,7 +291,10 @@ describe('updateAllowedDirectoriesFromRoots', () => {
             [{ uri: 'file:///project/a' }, { uri: 'file:///project/b' }],
             ctx,
         );
-        expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(['/project/a', '/project/b']);
+        // With the merge behavior (Issue 5): existing dirs + new roots
+        const existing = ctx.getAllowedDirectories();
+        const expectedMerged = [...new Set([...existing, '/project/a', '/project/b'])];
+        expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(expectedMerged);
     });
 
     it('calls onRootsChanged with context after updating roots', async () => {

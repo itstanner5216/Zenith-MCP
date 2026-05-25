@@ -135,24 +135,34 @@ export function resolveProjectRoot(filePath: string, options?: ResolveOptions): 
         if (cached !== undefined) return cached;
     }
 
-    // If allowed directories are set and the path is outside all of them, short-circuit
-    if (options?.allowedDirectories?.length) {
-        const allowedRoot = getMostSpecificAllowedRoot(absPath, options.allowedDirectories);
-        if (!allowedRoot) return setCached(cacheKey, null);
-    }
+    // Check if the path is within any allowed directory.
+    // Steps 1-2 only run when the path is inside allowed directories
+    // (or when no allowed directories are configured).
+    // Steps 3-4 ALWAYS run — the whole point of Step 3 is to handle the
+    // case where the file path itself isn't inside a known project.
+    const pathInsideAllowed = !options?.allowedDirectories?.length ||
+        !!getMostSpecificAllowedRoot(absPath, options.allowedDirectories);
 
-    // Step 1: Git root from the file path
+    // Step 1: Git root from the file path (only when path is inside allowed dirs)
+    let rawGitRoot: string | null = null;
     let gitRoot: string | null = null;
-    try {
-        gitRoot = clampToAllowed(findRepoRoot(absPath), absPath, options?.allowedDirectories);
-    } catch (_err) {
-        // findRepoRoot may throw for non-git paths
+    if (pathInsideAllowed) {
+        try {
+            rawGitRoot = findRepoRoot(absPath);
+            gitRoot = clampToAllowed(rawGitRoot, absPath, options?.allowedDirectories);
+        } catch (_err) {
+            // findRepoRoot may throw for non-git paths
+        }
     }
 
     // Step 2: Marker-based detection — finds the deepest marker root.
+    // Pass the pre-detected raw git root to avoid a redundant findRepoRoot call.
     // Within a git repo this finds the deepest package root (e.g. monorepo package).
     // Without git this finds the nearest marker walking up.
-    const markerRoot = clampToAllowed(_resolveFromMarkers(absPath), absPath, options?.allowedDirectories);
+    let markerRoot: string | null = null;
+    if (pathInsideAllowed) {
+        markerRoot = clampToAllowed(_resolveFromMarkers(absPath, rawGitRoot), absPath, options?.allowedDirectories);
+    }
 
     // Prefer the deepest (most specific) root between git and markers.
     // In a monorepo, markerRoot (e.g. /repo/packages/app) is deeper than gitRoot (/repo).
@@ -163,11 +173,12 @@ export function resolveProjectRoot(filePath: string, options?: ResolveOptions): 
     if (markerRoot) return setCached(cacheKey, markerRoot);
     if (gitRoot) return setCached(cacheKey, gitRoot);
 
-    // Step 3: MCP roots / allowed directories (broad fallback)
+    // Step 3: MCP roots / allowed directories (ALWAYS runs — this is the
+    // fallback for when the file path itself isn't inside a known project)
     const allowedRoot = _resolveFromAllowedDirectories(absPath, options?.allowedDirectories);
     if (allowedRoot) return setCached(cacheKey, allowedRoot);
 
-    // Step 4: Registry matching
+    // Step 4: Registry matching (ALWAYS runs)
     const registryRoot = _resolveFromRegistry(absPath, options?.registryEntries);
     if (registryRoot) return setCached(cacheKey, registryRoot);
 
@@ -268,15 +279,13 @@ function _resolveFromAllowedDirectories(
  *
  * Uses targeted existsSync per marker (~15 checks) rather than reading the
  * full directory listing, which is more efficient for large directories.
+ *
+ * @param gitRoot — pre-detected git root, passed from Step 1 to avoid redundant CLI calls
  */
-function _resolveFromMarkers(absPath: string): string | null {
-    let ceiling: string;
-    try {
-        const gitRoot = findRepoRoot(absPath);
-        ceiling = gitRoot ?? path.parse(absPath).root;
-    } catch (_err) {
-        ceiling = path.parse(absPath).root;
-    }
+function _resolveFromMarkers(absPath: string, gitRoot?: string | null): string | null {
+    // Use the pre-detected git root as the ceiling instead of re-running findRepoRoot.
+    // Fallback to filesystem root when git root is unknown.
+    const ceiling = gitRoot ?? path.parse(absPath).root;
 
     const candidates: string[] = [];
     let dir = path.dirname(absPath);

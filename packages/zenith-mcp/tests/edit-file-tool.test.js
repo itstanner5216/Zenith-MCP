@@ -41,9 +41,10 @@ describe('edit_file tool handler — registration', () => {
         mod.register(server, mkCtx('/tmp'));
         expect(calls[0].name).toBe('edit_file');
         const schema = calls[0].schema;
-        expect(schema.inputSchema.path).toBeDefined();
-        expect(schema.inputSchema.edits).toBeDefined();
-        expect(schema.inputSchema.dryRun).toBeDefined();
+        const props = schema.inputSchema.toJSONSchema().properties;
+        expect(props.path).toBeDefined();
+        expect(props.edits).toBeDefined();
+        expect(props.dryRun).toBeDefined();
     });
 });
 

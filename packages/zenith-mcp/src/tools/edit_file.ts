@@ -5,7 +5,8 @@ import { randomBytes } from 'crypto';
 import { normalizeLineEndings, createMinimalDiff } from '../core/lib.js';
 import { stashEdits } from '../core/stash.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
-import { findRepoRoot, getDb, snapshotSymbol, getSessionId } from '../core/symbol-index.js';
+import { getDb, snapshotSymbol, getSessionId } from '../core/symbol-index.js';
+import { getProjectContext } from '../core/project-context.js';
 import type { ToolContext, ToolServer } from './types.js';
 
 type EditOperation = {
@@ -79,7 +80,8 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         }
         if (pendingSnapshots.length > 0) {
             try {
-                const repoRoot = findRepoRoot(validPath) || path.dirname(validPath);
+                const pc = getProjectContext(ctx);
+                const repoRoot = pc.getRoot(validPath) || path.dirname(validPath);
                 const db = getDb(repoRoot);
                 const sessionId = ctx.sessionId || getSessionId();
                 const relPath = path.relative(repoRoot, validPath);

@@ -192,7 +192,7 @@ function createSessionPair() {
         if (clientCapabilities?.roots) {
             try {
                 const response = await server.server.listRoots();
-                if (response && 'roots' in response) {
+                if (response && 'roots' in response && response.roots.length > 0) {
                     await updateAllowedDirectoriesFromRoots(
                         response.roots.map(r =>
                             r.name !== undefined
@@ -202,24 +202,33 @@ function createSessionPair() {
                         ctx,
                     );
                 } else {
-                    console.error('Client returned no roots set, keeping current settings');
+                    console.error('Client returned empty roots, keeping current settings');
                 }
             } catch (error) {
                 console.error('Failed to request initial roots from client:', error instanceof Error ? error.message : String(error));
             }
-        } else {
-            const currentDirs = ctx.getAllowedDirectories();
-            if (currentDirs.length > 0) {
-                console.error('Client does not support MCP Roots, using allowed directories set from server args:', currentDirs);
-            } else {
-                throw new Error(
-                    'Server cannot operate: No allowed directories available. ' +
-                    'Server was started without command-line directories and client either ' +
-                    'does not support MCP roots protocol or provided empty roots. ' +
-                    'Please either: 1) Start server with directory arguments, or ' +
-                    '2) Use a client that supports MCP roots protocol and provides valid root directories.'
-                );
+        }
+
+        // After all roots attempts: if we still have no dirs, operate in global-only mode.
+        // NEVER throw here — an unhandled rejection in oninitialized kills the process.
+        const currentDirs = ctx.getAllowedDirectories();
+        if (currentDirs.length === 0) {
+            console.error(
+                'No allowed directories configured. Operating in global-only mode. ' +
+                'Tools will use process.cwd() or file paths directly.'
+            );
+            try {
+                await server.sendLoggingMessage({
+                    level: 'warning',
+                    logger: 'zenith-mcp',
+                    data: 'No project directories configured. Operating in global fallback mode. ' +
+                          'Provide directories via CLI args or MCP roots for project-scoped features.',
+                });
+            } catch {
+                // sendLoggingMessage may fail if transport isn't ready — ignore
             }
+        } else {
+            console.error('Client does not support MCP Roots, using allowed directories set from server args:', currentDirs);
         }
     };
 

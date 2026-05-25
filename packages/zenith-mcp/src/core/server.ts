@@ -21,7 +21,8 @@
 import fs from "fs/promises";
 import path from "path";
 import { normalizePath, expandHome } from './path-utils.js';
-import { getValidRootDirectories } from './roots-utils.js';
+import { onRootsChanged, getProjectContext } from './project-context.js';
+import { getValidRootDirectories, parseRootUriPath } from './roots-utils.js';
 import { type ToolServer, type ToolContext } from '../tools/types.js';
 import { type FilesystemContext } from './lib.js';
 
@@ -39,19 +40,19 @@ import { register as registerRefactorBatch } from '../tools/refactor_batch.js';
 import { configureRegistry } from '../adapters/index.js';
 import { loadConfig, syncToolsWithConfig, patchToolsInConfig, expandTilde } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
-import { onRootsChanged } from './project-context.js';
 
 export async function resolveInitialAllowedDirectories(args: string[]): Promise<string[]> {
-  return Promise.all(args.map(async (dir: string) => {
+  const resolved = await Promise.all(args.map(async (dir: string) => {
     const expanded = expandHome(dir);
     const absolute = path.resolve(expanded);
     try {
-      const resolved = await fs.realpath(absolute);
-      return normalizePath(resolved);
+      const result = await fs.realpath(absolute);
+      return normalizePath(result);
     } catch {
       return normalizePath(absolute);
     }
   }));
+  return [...new Set(resolved)]; // deduplicate
 }
 
 export async function validateDirectories(directories: string[]): Promise<void> {
@@ -156,6 +157,9 @@ export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): 
  * Applies a fresh roots list to the FilesystemContext. Called by each
  * entrypoint from inside its SDK-specific `setNotificationHandler` /
  * `oninitialized` blocks. Returns nothing; logs to stderr on the human path.
+ *
+ * Merges client roots with existing dirs (from CLI args) instead of replacing.
+ * CLI-provided dirs are the baseline — roots ADD to them.
  */
 export async function updateAllowedDirectoriesFromRoots(
   requestedRoots: Array<{ uri: string; name?: string }>,
@@ -163,9 +167,29 @@ export async function updateAllowedDirectoriesFromRoots(
 ): Promise<void> {
   const validatedRootDirs = await getValidRootDirectories(requestedRoots);
   if (validatedRootDirs.length > 0) {
-    ctx.setAllowedDirectories(validatedRootDirs);
+    // Merge with existing dirs instead of replacing.
+    // CLI-provided dirs are the baseline — roots ADD to them.
+    const existingDirs = ctx.getAllowedDirectories();
+    const merged = [...new Set([...existingDirs, ...validatedRootDirs])];
+    ctx.setAllowedDirectories(merged);
+
+    // Seed ProjectRegistry with root names from MCP roots for better detection
+    const pc = getProjectContext(ctx);
+    for (const root of requestedRoots) {
+      if (root.name) {
+        const resolvedPath = await parseRootUriPath(root.uri);
+        if (resolvedPath && validatedRootDirs.includes(resolvedPath)) {
+          try {
+            pc.initProject(resolvedPath, root.name);
+          } catch {
+            // initProject may fail if path isn't a directory — ignore
+          }
+        }
+      }
+    }
+
     onRootsChanged(ctx);
-    console.error(`Updated allowed directories from MCP roots: ${validatedRootDirs.length} valid directories`);
+    console.error(`Updated allowed directories from MCP roots: ${merged.length} total directories (${validatedRootDirs.length} from roots)`);
   } else {
     console.error("No valid root directories provided by client");
   }
