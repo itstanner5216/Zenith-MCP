@@ -206,9 +206,6 @@ export class ProjectContext {
         // Replace entirely — old registry is GC'd, no _syncRegistry
         this._registry = new ProjectRegistry(manifests);
 
-        // Stamp mtime so lazy reload doesn't re-read immediately
-        try { this._lastConfigMtimeMs = fs.statSync(CONFIG_PATH).mtimeMs; } catch { /* noop */ }
-
         // Re-evaluate current binding against new registry
         if (this._boundRoot && !this._explicit) {
             const match = this._registry.findProject(this._boundRoot);
