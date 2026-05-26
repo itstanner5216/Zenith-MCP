@@ -9,11 +9,7 @@ import { clearProjectScopeCache } from '../utils/project-scope.js';
 import {
     DbConnection,
     openDb,
-    initGlobalSchema,
     initStashSchema,
-    upsertProjectRoot,
-    listProjectRoots,
-    getAllProjectRootPaths
 } from './db-adapter.js';
 import type { ProjectEntry } from '../config/schema.js';
 import { expandTilde, CONFIG_PATH } from '../config/schema.js';
@@ -42,7 +38,6 @@ function getGlobalDb(): DbConnection {
     if (_globalDb) return _globalDb;
     fs.mkdirSync(ZENITH_HOME, { recursive: true });
     _globalDb = openDb(GLOBAL_DB_PATH);
-    initGlobalSchema(_globalDb);
     return _globalDb;
 }
 
@@ -74,7 +69,6 @@ export class ProjectContext {
         this._resolved = false;
         this._explicit = false;
         this._registry = new ProjectRegistry();
-        this._syncRegistry();
     }
 
     // --- Public API ---
@@ -138,21 +132,15 @@ export class ProjectContext {
 
     /**
      * Manually register a project root (stashInit).
-     * Persists to global DB so it survives reconnects.
+     * In-memory only — config file is the persistent source of truth.
      */
     initProject(rootPath: string, name?: string): string {
         const abs = path.resolve(rootPath);
         if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
             throw new Error(`Not a directory: ${abs}`);
         }
-        const conn = getGlobalDb();
-        upsertProjectRoot(conn, {
-            rootPath: abs,
-            name: name || path.basename(abs),
-            createdAt: Date.now()
-        });
 
-        // Also register in-memory for immediate use
+        // Register in-memory for immediate use
         this._registry.register({
             project_id: path.basename(abs),
             project_name: name || path.basename(abs),
@@ -241,14 +229,6 @@ export class ProjectContext {
      */
     setNotifyFn(fn: (message: string) => void): void {
         this._notifyFn = fn;
-    }
-
-    /**
-     * List all manually registered project roots.
-     */
-    listRegisteredProjects(): { root_path: string; name: string; created_at: number }[] {
-        const conn = getGlobalDb();
-        return listProjectRoots(conn);
     }
 
     // --- Private resolution ---
@@ -414,25 +394,6 @@ export class ProjectContext {
         }
     }
 
-    /**
-     * Sync the in-memory ProjectRegistry from the persisted SQLite registry.
-     * Only called at construction time for legacy compat.
-     */
-    private _syncRegistry(): void {
-        try {
-            const conn = getGlobalDb();
-            const rows = getAllProjectRootPaths(conn);
-            for (const row of rows) {
-                this._registry.register({
-                    project_id: row.name || path.basename(row.root_path),
-                    project_name: row.name,
-                    project_root: row.root_path,
-                });
-            }
-        } catch {
-            // Registry might be empty or DB not ready yet
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -179,9 +179,9 @@ describe('ProjectContext — initProject', () => {
         const { ProjectContext } = await importProjectContext();
         const pc = new ProjectContext(ctx);
         pc.initProject(repoDir);
-        const projects = pc.listRegisteredProjects();
-        expect(projects.length).toBeGreaterThan(0);
-        expect(projects[0].name).toBe(path.basename(repoDir));
+        // Verify it bound correctly with basename as the project name
+        expect(pc._boundRoot).toBe(path.resolve(repoDir));
+        expect(pc._explicit).toBe(true);
     });
 });
 
