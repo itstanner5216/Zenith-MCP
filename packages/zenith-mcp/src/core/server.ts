@@ -173,17 +173,14 @@ export async function updateAllowedDirectoriesFromRoots(
     const merged = [...new Set([...existingDirs, ...validatedRootDirs])];
     ctx.setAllowedDirectories(merged);
 
-    // Seed ProjectRegistry with root names from MCP roots for better detection
+    // Seed ProjectRegistry with root names from MCP roots for better detection.
+    // Uses registerSessionRoot (non-sticky, non-persisting) — does NOT block auto-switching.
     const pc = getProjectContext(ctx);
     for (const root of requestedRoots) {
       if (root.name) {
         const resolvedPath = await parseRootUriPath(root.uri);
         if (resolvedPath && validatedRootDirs.includes(resolvedPath)) {
-          try {
-            pc.initProject(resolvedPath, root.name);
-          } catch {
-            // initProject may fail if path isn't a directory — ignore
-          }
+          pc.registerSessionRoot(resolvedPath, root.name);
         }
       }
     }
@@ -193,4 +190,27 @@ export async function updateAllowedDirectoriesFromRoots(
   } else {
     console.error("No valid root directories provided by client");
   }
+}
+
+// ---------------------------------------------------------------------------
+// setupProjectDetection — config-based project registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire project detection for a session: load config projects, set notify fn.
+ * Called once per session/entrypoint after server + ctx are ready.
+ * Registry auto-refreshes lazily on mismatch (no file watcher needed).
+ */
+export function setupProjectDetection(
+  ctx: FilesystemContext,
+  notifyFn: (message: string) => void,
+): void {
+  const pc = getProjectContext(ctx);
+
+  // Load initial projects from config (always call, even if empty, to clear legacy state)
+  const config = loadConfig();
+  pc.reloadRegistry(config.projects);
+
+  // Set notification function (fires sendLoggingMessage)
+  pc.setNotifyFn(notifyFn);
 }

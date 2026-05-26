@@ -3,8 +3,9 @@ import fs from 'fs';
 import os from 'os';
 import { getDb } from './symbol-index.js';
 import { ProjectRegistry } from './project-registry.js';
-import { resolveProjectRoot, clearProjectScopeCache } from '../utils/project-scope.js';
-import { getProcessTreeCwdsResolved } from '../utils/process-tree.js';
+import type { ProjectManifest } from './project-registry.js';
+import { normalizePath } from './path-utils.js';
+import { clearProjectScopeCache } from '../utils/project-scope.js';
 import {
     DbConnection,
     openDb,
@@ -14,6 +15,9 @@ import {
     listProjectRoots,
     getAllProjectRootPaths
 } from './db-adapter.js';
+import type { ProjectEntry } from '../config/schema.js';
+import { expandTilde, CONFIG_PATH } from '../config/schema.js';
+import { loadConfig } from '../config/loader.js';
 
 const ZENITH_HOME = path.join(os.homedir(), '.zenith-mcp');
 const GLOBAL_DB_PATH = path.join(ZENITH_HOME, 'global-stash.db');
@@ -59,6 +63,9 @@ export class ProjectContext {
     private _resolved: boolean;
     private _explicit: boolean;
     private _registry: ProjectRegistry;
+    private _notifiedRoots: Set<string> = new Set();
+    private _notifyFn: ((message: string) => void) | null = null;
+    private _lastConfigMtimeMs: number = 0;
 
     constructor(ctx: FsContext) {
         this._ctx = ctx;
@@ -73,35 +80,20 @@ export class ProjectContext {
     // --- Public API ---
 
     /**
-     * Get the project root. This is the main entry point.
-     * Pass an optional filePath to scope resolution to that file's location.
+     * Get the project root. Registry is the SOLE authority for DB routing.
+     * Pass an optional filePath to trigger registry-based auto-switch.
      */
     getRoot(filePath?: string): string | null {
-        // If a specific file is given, try its repo first
         if (filePath) {
-            const fileRoot = this._resolveFromPath(filePath);
-            if (fileRoot) {
-                // Auto-promote the first-touched repo as the bound root, but only
-                // when nothing has been explicitly bound via initProject. This lets
-                // session-wide tools (e.g. refactor_batch query with no fileScope)
-                // inherit the project the agent has been working in.
-                if (!this._explicit && (!this._resolved || !this._boundRoot)) {
-                    this._boundRoot = fileRoot;
-                    this._isGlobal = false;
-                    this._resolved = true;
-                }
-                return fileRoot;
-            }
+            // Registry-first auto-switch — the registry IS the answer
+            this._handlePathAccess(filePath);
+            return this._boundRoot;
         }
 
-        // Return cached bound root if already resolved
-        if (this._resolved) {
-            return this._boundRoot; // null means global
-        }
-
-        // Run the full ladder
-        this._resolve();
-        return this._boundRoot; // null means global
+        // No file path — return current binding (may be null/global)
+        if (this._resolved) return this._boundRoot;
+        this._resolveNoFile();
+        return this._boundRoot;
     }
 
     /**
@@ -123,7 +115,7 @@ export class ProjectContext {
      * Is the current context using the global fallback?
      */
     get isGlobal(): boolean {
-        if (!this._resolved) this._resolve();
+        if (!this._resolved) this._resolveNoFile();
         return this._isGlobal;
     }
 
@@ -132,16 +124,15 @@ export class ProjectContext {
      * Explicit bindings (set via initProject) are preserved — they are sticky.
      */
     refresh(): void {
-        // Don't reset explicit bindings — initProject() is sticky
         if (!this._explicit) {
             this._boundRoot = null;
             this._isGlobal = false;
             this._resolved = false;
         }
         clearProjectScopeCache();
-        this._syncRegistry();
+        // Don't re-sync from SQLite on refresh — config registry is authoritative
         if (!this._explicit) {
-            this._resolve();
+            this._resolveNoFile();
         }
     }
 
@@ -177,6 +168,82 @@ export class ProjectContext {
     }
 
     /**
+     * Register an MCP root as a session hint. Does NOT set _explicit,
+     * does NOT persist to SQLite, does NOT block auto-switching.
+     * Only binds if it matches a registered project.
+     */
+    registerSessionRoot(rootPath: string, _name?: string): void {
+        const normalizedRoot = normalizePath(path.resolve(rootPath));
+
+        // Only bind if it matches a registered project
+        const manifest = this._registry.findProject(normalizedRoot);
+        if (manifest && !this._explicit) {
+            this._boundRoot = normalizePath(path.resolve(manifest.project_root));
+            this._isGlobal = false;
+            this._resolved = true;
+            console.error(
+                `[ProjectContext] Session root matched project: ${manifest.project_id}`
+            );
+        }
+    }
+
+    /**
+     * Reload the registry from config entries. Atomic replacement.
+     * Config file is authoritative — SQLite-persisted entries are NOT merged.
+     */
+    reloadRegistry(entries: ProjectEntry[]): void {
+        const manifests: ProjectManifest[] = [];
+        for (const e of entries) {
+            if (!e.project_id || !e.project_root) continue;
+
+            let resolvedRoot = normalizePath(path.resolve(expandTilde(e.project_root)));
+            // Canonicalize symlinks so registry matches realpath'd tool paths
+            try { resolvedRoot = fs.realpathSync(resolvedRoot); } catch { /* dir may not exist yet */ }
+
+            const m: ProjectManifest = {
+                project_id: e.project_id,
+                project_name: e.project_name,
+                project_root: resolvedRoot,
+            };
+            if (e.description != null) m.description = e.description;
+            if (e.language != null) m.language = e.language;
+            if (e.tags !== undefined) m.tags = e.tags;
+            if (e.include !== undefined) m.include = e.include;
+            if (e.exclude !== undefined) m.exclude = e.exclude;
+            if (e.entry_point != null) m.entry_point = e.entry_point;
+
+            manifests.push(m);
+        }
+
+        // Replace entirely — old registry is GC'd, no _syncRegistry
+        this._registry = new ProjectRegistry(manifests);
+
+        // Stamp mtime so lazy reload doesn't re-read immediately
+        try { this._lastConfigMtimeMs = fs.statSync(CONFIG_PATH).mtimeMs; } catch { /* noop */ }
+
+        // Re-evaluate current binding against new registry
+        if (this._boundRoot && !this._explicit) {
+            const match = this._registry.findProject(this._boundRoot);
+            if (!match) {
+                this._boundRoot = null;
+                this._isGlobal = true;
+            }
+        }
+
+        // Clear notification dedup so new paths can be notified fresh
+        this._notifiedRoots.clear();
+
+        console.error(`[ProjectContext] Registry reloaded: ${manifests.length} projects`);
+    }
+
+    /**
+     * Set the notification function (fires sendLoggingMessage).
+     */
+    setNotifyFn(fn: (message: string) => void): void {
+        this._notifyFn = fn;
+    }
+
+    /**
      * List all manually registered project roots.
      */
     listRegisteredProjects(): { root_path: string; name: string; created_at: number }[] {
@@ -184,10 +251,172 @@ export class ProjectContext {
         return listProjectRoots(conn);
     }
 
-    // --- Private resolution ladder ---
+    // --- Private resolution ---
+
+    /**
+     * Registry-based auto-switch. Called from getRoot() on every file access.
+     * Fast-path: if path is inside current bound root, no-op (one string check).
+     * Only hits the registry when path is OUTSIDE current root.
+     * Lazy reload: on miss, re-reads config if file changed since last load.
+     */
+    private _handlePathAccess(resolvedPath: string): void {
+        // Fast path — same project, free string comparison
+        if (this._boundRoot !== null) {
+            if (this._isPathInside(resolvedPath, this._boundRoot)) {
+                return;
+            }
+        }
+
+        // Path is outside current root — check registry
+        let manifest = this._registry.findProject(resolvedPath);
+
+        // Lazy reload: if miss, check if config file changed and retry once
+        if (!manifest) {
+            if (this._tryLazyReload()) {
+                manifest = this._registry.findProject(resolvedPath);
+            }
+        }
+
+        if (manifest) {
+            // Matched a registered project — switch
+            const newRoot = normalizePath(path.resolve(manifest.project_root));
+            if (newRoot !== this._boundRoot) {
+                this._boundRoot = newRoot;
+                this._isGlobal = false;
+                this._resolved = true;
+                console.error(
+                    `[ProjectContext] Switched to project: ${manifest.project_id} (${newRoot})`
+                );
+            }
+        } else if (!this._explicit) {
+            // No match — switch to global if not explicitly bound
+            if (!this._isGlobal) {
+                this._boundRoot = null;
+                this._isGlobal = true;
+                this._resolved = true;
+            }
+            // Notify once per unique unrecognized root (gated on allowed dirs)
+            this._notifyGlobalFallback(resolvedPath);
+        }
+        // If _explicit, ignore — explicit bindings are sticky
+    }
+
+    /**
+     * No-file resolution. Only uses registry + allowed dirs that match registry.
+     * Never promotes unregistered paths to projects via git/markers.
+     */
+    private _resolveNoFile(): void {
+        this._resolved = true;
+
+        // Check if any allowed directory matches a registered project
+        const allowedDirs = this._ctx.getAllowedDirectories();
+        for (const dir of allowedDirs) {
+            const manifest = this._registry.findProject(dir);
+            if (manifest) {
+                this._boundRoot = normalizePath(path.resolve(manifest.project_root));
+                this._isGlobal = false;
+                return;
+            }
+        }
+
+        // No registry match — global mode
+        this._boundRoot = null;
+        this._isGlobal = true;
+    }
+
+    /**
+     * Only notify for paths under allowed directories — suppress system/temp paths.
+     * Deduplicate by finding the nearest project-ish root.
+     */
+    private _notifyGlobalFallback(resolvedPath: string): void {
+        if (!this._notifyFn) return;
+
+        // Only notify for paths under allowed directories
+        const allowedDirs = this._ctx.getAllowedDirectories();
+        if (allowedDirs.length > 0) {
+            const isUnderAllowed = allowedDirs.some(
+                dir => resolvedPath === dir || resolvedPath.startsWith(dir + path.sep)
+            );
+            if (!isUnderAllowed) return;
+        }
+
+        // Deduplicate by the probable project root of this unregistered path
+        const rootGuess = this._findNearestProjectishRoot(resolvedPath);
+        if (this._notifiedRoots.has(rootGuess)) return;
+        this._notifiedRoots.add(rootGuess);
+
+        this._notifyFn(
+            `Path "${rootGuess}" is not a registered project. Using global DB. ` +
+            `Add it to ~/.zenith-mcp/config under ### Projects to enable project-scoped features.`
+        );
+    }
+
+    /**
+     * Walk up from resolvedPath looking for .git or common markers.
+     * Capped at allowed-directory boundaries to avoid unbounded filesystem traversal.
+     * Used ONLY for notification dedup keys — NOT for project resolution.
+     */
+    private _findNearestProjectishRoot(resolvedPath: string): string {
+        const markers = ['.git', 'package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml'];
+        const allowedDirs = this._ctx.getAllowedDirectories();
+        let dir = path.dirname(resolvedPath);
+        const root = path.parse(dir).root;
+
+        while (dir !== root) {
+            for (const marker of markers) {
+                try {
+                    fs.statSync(path.join(dir, marker));
+                    return dir;
+                } catch { /* not found, keep walking */ }
+            }
+            // Stop at the allowed-dir boundary — don't walk above it
+            if (allowedDirs.some(ad => dir === ad)) break;
+            dir = path.dirname(dir);
+        }
+
+        return path.dirname(resolvedPath);
+    }
+
+    /**
+     * Check if a path is inside (or equal to) a root directory.
+     * Uses case-insensitive comparison on Windows/macOS where filesystems are
+     * typically case-insensitive.
+     */
+    private _isPathInside(filePath: string, root: string): boolean {
+        if (process.platform === 'win32' || process.platform === 'darwin') {
+            const fp = filePath.toLowerCase();
+            const rt = root.toLowerCase();
+            return fp === rt || fp.startsWith(rt + path.sep);
+        }
+        return filePath === root || filePath.startsWith(root + path.sep);
+    }
+
+    /**
+     * Lazy reload: re-read config file only if its mtime changed since last load.
+     * Returns true if the registry was actually refreshed (caller should retry lookup).
+     */
+    private _tryLazyReload(): boolean {
+        try {
+            const stat = fs.statSync(CONFIG_PATH);
+            if (stat.mtimeMs === this._lastConfigMtimeMs) return false;
+            this._lastConfigMtimeMs = stat.mtimeMs;
+        } catch {
+            // Config file doesn't exist — nothing to reload
+            return false;
+        }
+
+        try {
+            const config = loadConfig();
+            this.reloadRegistry(config.projects);
+            return true;
+        } catch {
+            return false;
+        }
+    }
 
     /**
      * Sync the in-memory ProjectRegistry from the persisted SQLite registry.
+     * Only called at construction time for legacy compat.
      */
     private _syncRegistry(): void {
         try {
@@ -203,55 +432,6 @@ export class ProjectContext {
         } catch {
             // Registry might be empty or DB not ready yet
         }
-    }
-
-    _resolve(): void {
-        this._resolved = true;
-
-        const allowedDirs = this._ctx.getAllowedDirectories();
-        const registryEntries = this._registry.listProjects();
-        const resolveOpts = { allowedDirectories: allowedDirs, registryEntries };
-
-        // Priority 1: Try each allowed directory (from MCP roots / CLI args).
-        // These are the ACTUAL project dirs the client told us about.
-        for (const dir of allowedDirs) {
-            const root = resolveProjectRoot(dir, resolveOpts);
-            if (root) {
-                this._boundRoot = root;
-                this._isGlobal = false;
-                return;
-            }
-        }
-
-        // Priority 2: Walk the process tree for candidate CWDs.
-        // The parent shell/IDE almost certainly has a CWD in the user's project.
-        try {
-            const treeCwds = getProcessTreeCwdsResolved();
-            for (const { cwd, source } of treeCwds) {
-                const root = resolveProjectRoot(cwd, resolveOpts);
-                if (root) {
-                    console.error(`Project detected via process tree: ${root} (source: ${source})`);
-                    this._boundRoot = root;
-                    this._isGlobal = false;
-                    return;
-                }
-            }
-        } catch {
-            // Process tree walk failed entirely — continue to global fallback
-        }
-
-        // Global fallback — the server operates without a bound project.
-        // Tools will resolve per-file when given file paths.
-        this._boundRoot = null;
-        this._isGlobal = true;
-    }
-
-    // Step 1+2: Resolve from a specific file path (git → markers → registry)
-    _resolveFromPath(filePath: string): string | null {
-        return resolveProjectRoot(filePath, {
-            allowedDirectories: this._ctx.getAllowedDirectories(),
-            registryEntries: this._registry.listProjects(),
-        });
     }
 }
 

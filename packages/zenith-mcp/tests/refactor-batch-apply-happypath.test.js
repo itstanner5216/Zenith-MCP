@@ -6,7 +6,7 @@ import path from 'path';
 import os from 'os';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
-import { resetProjectContext } from '../dist/core/project-context.js';
+import { resetProjectContext, getProjectContext } from '../dist/core/project-context.js';
 
 function makeServer() {
     let captured = null;
@@ -60,6 +60,9 @@ describe('refactor_batch full happy path', () => {
         const sessionId = 'hp-full-' + Math.random();
         const s = makeServer();
         const ctx = makeCtx(tmpRepo, sessionId);
+        // Register temp repo as a project for isolated DB
+        const pc = getProjectContext(ctx);
+        pc.reloadRegistry([{ project_id: 'refactor-hp-test', project_name: 'Test', project_root: tmpRepo }]);
         register(s, ctx);
         const handler = s.tool.handler;
 

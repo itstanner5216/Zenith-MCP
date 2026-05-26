@@ -37,6 +37,7 @@ import {
     updateAllowedDirectoriesFromRoots,
     validateDirectories,
     SERVER_INSTRUCTIONS,
+    setupProjectDetection,
 } from '../core/server.js';
 import { ripgrepAvailable } from '../core/shared.js';
 import { configExists, loadConfig } from '../config/index.js';
@@ -167,6 +168,19 @@ function createSessionPair() {
         { instructions: SERVER_INSTRUCTIONS },
     );
     registerEnabledTools(server as unknown as ToolServer, ctx);
+
+    // Project detection — initial load + notify fn (watcher is process-level)
+    setupProjectDetection(ctx, (message) => {
+        try {
+            server.sendLoggingMessage({
+                level: 'info',
+                logger: 'zenith-mcp',
+                data: message,
+            });
+        } catch {
+            // Transport might not be ready — ignore
+        }
+    });
 
     // v1 roots wiring: setNotificationHandler takes a Zod schema as first arg.
     server.server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {

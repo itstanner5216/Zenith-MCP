@@ -257,3 +257,4 @@ export function patchToolsInConfig(tools: Record<string, boolean>): void {
   writeFileSync(CONFIG_PATH, lines.join("\n"), "utf-8");
 }
 
+

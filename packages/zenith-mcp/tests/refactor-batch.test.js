@@ -5,7 +5,7 @@ import os from 'os';
 import { execFileSync } from 'child_process';
 import { register } from '../dist/tools/refactor_batch.js';
 import { getDb } from '../dist/core/symbol-index.js';
-import { resetProjectContext } from '../dist/core/project-context.js';
+import { resetProjectContext, getProjectContext } from '../dist/core/project-context.js';
 import { deleteAllFiles, deleteAllSymbols, deleteAllEdges, getFileCount } from '../dist/core/db-adapter.js';
 
 // -----------------------------------------------------------------------------
@@ -23,7 +23,7 @@ function makeServer() {
 }
 
 function makeCtx(repoRoot) {
-    return {
+    const newCtx = {
         sessionId: 'test-session-1',
         validatePath: async (p) => {
             const abs = path.isAbsolute(p) ? p : path.join(repoRoot, p);
@@ -36,6 +36,14 @@ function makeCtx(repoRoot) {
         getAllowedDirectories: () => [repoRoot],
         _roots: [{ uri: 'file://' + repoRoot }],
     };
+    // Auto-register as project so getRoot() returns non-null
+    registerProject(newCtx, repoRoot);
+    return newCtx;
+}
+
+function registerProject(aCtx, repoRoot) {
+    const pc = getProjectContext(aCtx);
+    pc.reloadRegistry([{ project_id: 'refactor-test', project_name: 'Test', project_root: repoRoot }]);
 }
 
 // -----------------------------------------------------------------------------
@@ -92,6 +100,7 @@ function callerC() {
 
     server = makeServer();
     ctx = makeCtx(tmpRepo);
+    registerProject(ctx, tmpRepo);
     register(server, ctx);
 });
 
@@ -183,6 +192,7 @@ describe('refactor_batch loadDiff mode', () => {
             ...ctx,
             sessionId: 'isolated-session-' + Math.random(),
         };
+        registerProject(freshCtx, tmpRepo);
         // Re-register under a fresh ctx to get a handler bound to that ctx
         const s = makeServer();
         register(s, freshCtx);
@@ -198,6 +208,7 @@ describe('refactor_batch loadDiff mode', () => {
     it('loads explicit {symbol, file} pairs without needing a prior query', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'explicit-session-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
 
         const res = await s.tool.handler({
@@ -241,6 +252,7 @@ describe('refactor_batch loadDiff mode', () => {
         }
 
         const bigCtx = { ...ctx, sessionId: 'big-session-' + Math.random() };
+        registerProject(bigCtx, tmpRepo);
         const s = makeServer();
         register(s, bigCtx);
 
@@ -302,6 +314,7 @@ describe('refactor_batch loadDiff mode', () => {
     it('loadMore returns "Nothing to continue." when nothing remains', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'done-session-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({
             mode: 'loadDiff',
@@ -314,6 +327,7 @@ describe('refactor_batch loadDiff mode', () => {
     it('context lines are prefixed with │ while body lines are not', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'ctx-prefix-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
 
         const res = await s.tool.handler({
@@ -340,6 +354,7 @@ describe('refactor_batch history mode', () => {
     it('returns empty when no versions exist', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'hist-empty-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({
             mode: 'history',
@@ -352,6 +367,7 @@ describe('refactor_batch history mode', () => {
     it('requires symbol param', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'hist-nosym-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({
             mode: 'history',
@@ -364,6 +380,7 @@ describe('refactor_batch restore mode', () => {
     it('requires symbol param', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'restore-nosym-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({ mode: 'restore' });
         expect(res.content[0].text).toBe('symbol required for restore.');
@@ -372,6 +389,7 @@ describe('refactor_batch restore mode', () => {
     it('requires file param', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'restore-nofile-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({ mode: 'restore', symbol: 'validateCard' });
         expect(res.content[0].text).toBe('file required for restore.');
@@ -380,6 +398,7 @@ describe('refactor_batch restore mode', () => {
     it('lists versions when version is omitted', async () => {
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId: 'restore-list-' + Math.random() };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const res = await s.tool.handler({
             mode: 'restore',
@@ -395,6 +414,7 @@ describe('refactor_batch restore mode', () => {
         const sessionId = 'restore-rt-' + Math.random();
         const s = makeServer();
         const freshCtx = { ...ctx, sessionId };
+        registerProject(freshCtx, tmpRepo);
         register(s, freshCtx);
         const handler = s.tool.handler;
 

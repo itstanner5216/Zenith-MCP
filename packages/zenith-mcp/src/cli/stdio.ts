@@ -28,6 +28,7 @@ import {
   updateAllowedDirectoriesFromRoots,
   validateDirectories,
   SERVER_INSTRUCTIONS,
+  setupProjectDetection,
 } from '../core/server.js';
 import { configExists, runFirstRunWizard } from '../config/index.js';
 import type { WizardIO } from '../config/wizard.js';
@@ -70,6 +71,19 @@ async function runStdio() {
   );
 
   registerEnabledTools(server as unknown as ToolServer, ctx);
+
+  // ── Project detection wiring ────────────────────────────────────────────
+  setupProjectDetection(ctx, (message) => {
+    try {
+      server.server.sendLoggingMessage({
+        level: "info",
+        logger: "zenith-mcp",
+        data: message,
+      });
+    } catch {
+      // Transport might not be ready — ignore
+    }
+  });
 
   // ── v2 roots wiring ───────────────────────────────────────────────────
   // v2: setNotificationHandler takes a method-name string, not a Zod schema.

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { register } from '../dist/tools/stash_restore.js';
-import { resetProjectContext } from '../dist/core/project-context.js';
+import { resetProjectContext, getProjectContext } from '../dist/core/project-context.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -46,6 +46,9 @@ describe('stash_restore — stash entry management (symbol versioning moved to r
         dir = mkTmpDir();
         sessionId = `test-session-${Math.random().toString(36).slice(2)}`;
         ctx = mkCtx(dir, sessionId);
+        // Register temp dir as a project so tests get isolated DB
+        const pc = getProjectContext(ctx);
+        pc.reloadRegistry([{ project_id: 'stash-test', project_name: 'Test', project_root: dir }]);
         const h = captureHandler();
         register(h.server, ctx);
         handler = h.get();

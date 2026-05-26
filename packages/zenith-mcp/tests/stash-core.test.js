@@ -36,6 +36,9 @@ describe('stash core — CRUD operations', () => {
         repoDir = mkTmpGitRepo();
         ctx = mkCtx(repoDir);
         modules = await importStashModules();
+        // Register temp dir as a project so it gets an isolated DB
+        const pc = modules.getProjectContext(ctx);
+        pc.reloadRegistry([{ project_id: 'stash-test', project_name: 'Test', project_root: repoDir }]);
     });
 
     afterEach(() => {
@@ -125,6 +128,8 @@ describe('stash core — convenience wrappers', () => {
         repoDir = mkTmpGitRepo();
         ctx = mkCtx(repoDir);
         modules = await importStashModules();
+        const pc = modules.getProjectContext(ctx);
+        pc.reloadRegistry([{ project_id: 'stash-test', project_name: 'Test', project_root: repoDir }]);
     });
 
     afterEach(() => {

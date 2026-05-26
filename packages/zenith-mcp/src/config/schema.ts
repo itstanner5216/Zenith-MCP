@@ -3,12 +3,29 @@ import { join } from "node:path";
 import type { RawConfig } from "./parser.js";
 
 // ---------------------------------------------------------------------------
+// ProjectEntry — user-declared project in config
+// ---------------------------------------------------------------------------
+
+export interface ProjectEntry {
+  project_id: string;
+  project_name: string | null;
+  project_root: string;
+  description?: string | null;
+  language?: string | null;
+  tags?: string[];
+  include?: string[];
+  exclude?: string[];
+  entry_point?: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // ZenithConfig — typed representation of the Zenith-MCP config file
 // ---------------------------------------------------------------------------
 
 export interface ZenithConfig {
   port: number;
   tools: Record<string, boolean>;
+  projects: ProjectEntry[];
   auto_write: {
     status: boolean;
     backup_dir: string;
@@ -46,6 +63,7 @@ const DEFAULT_SENSITIVE_STR =
 export const DEFAULT_CONFIG: ZenithConfig = {
   port: 7000,
   tools: {},
+  projects: [],
   auto_write: {
     status: false,
     backup_dir: "",
@@ -87,6 +105,7 @@ export const CONFIG_PATH: string = join(homedir(), ".zenith-mcp", "config");
  * before passing it to the filesystem.
  */
 export function expandTilde(p: string): string {
+  if (p.includes('\0')) throw new Error('Path contains null byte');
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));
   return p;
@@ -162,6 +181,41 @@ export function configToRaw(config: ZenithConfig): RawConfig {
   }
   entries.push(blank());
 
+  // ### Projects
+  entries.push(subsection("Projects"));
+  if (config.projects.length === 0) {
+    entries.push(comment("# (no projects configured)"));
+  } else {
+    for (const proj of config.projects) {
+      entries.push(comment(`== ${proj.project_name ?? proj.project_id} ==`));
+      entries.push(kv("Project_ID", proj.project_id, proj.project_id));
+      entries.push(kv("Project_Root", proj.project_root, proj.project_root));
+      if (proj.project_name != null) {
+        entries.push(kv("Project_Name", proj.project_name, proj.project_name));
+      }
+      if (proj.description != null) {
+        entries.push(kv("Description", proj.description, proj.description));
+      }
+      if (proj.language != null) {
+        entries.push(kv("Language", proj.language, proj.language));
+      }
+      if (proj.tags !== undefined && proj.tags.length > 0) {
+        entries.push(kv("Tags", proj.tags.join(","), proj.tags.join(",")));
+      }
+      if (proj.include !== undefined && proj.include.length > 0) {
+        entries.push(kv("Include", proj.include.join(","), proj.include.join(",")));
+      }
+      if (proj.exclude !== undefined && proj.exclude.length > 0) {
+        entries.push(kv("Exclude", proj.exclude.join(","), proj.exclude.join(",")));
+      }
+      if (proj.entry_point != null) {
+        entries.push(kv("Entry_Point", proj.entry_point, proj.entry_point));
+      }
+      entries.push(blank());
+    }
+  }
+  entries.push(blank());
+
   // ### Auto Write
   entries.push(subsection("Auto Write"));
   entries.push(kv("status", config.auto_write.status, statusToStr(config.auto_write.status)));
@@ -203,18 +257,45 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
   // Track which subsection we're inside so we route keys correctly.
   let currentSection: string | null = null;
 
+  // Project parsing state
+  let currentProject: Partial<ProjectEntry> | null = null;
+
+  function flushProject(): void {
+    if (currentProject && currentProject.project_id && currentProject.project_root) {
+      config.projects.push({
+        project_id: currentProject.project_id,
+        project_name: currentProject.project_name ?? null,
+        project_root: currentProject.project_root,
+        ...(currentProject.description != null ? { description: currentProject.description } : {}),
+        ...(currentProject.language != null ? { language: currentProject.language } : {}),
+        ...(currentProject.tags !== undefined ? { tags: currentProject.tags } : {}),
+        ...(currentProject.include !== undefined ? { include: currentProject.include } : {}),
+        ...(currentProject.exclude !== undefined ? { exclude: currentProject.exclude } : {}),
+        ...(currentProject.entry_point != null ? { entry_point: currentProject.entry_point } : {}),
+      });
+    }
+    currentProject = null;
+  }
+
   for (const entry of raw as RawEntry[]) {
     // Only ### subsection headers set the routing context.
-    // ## section headers are preserved in RawConfig for round-tripping but
-    // do NOT affect key routing.  configToRaw only emits ### headers, so
-    // a ## header in a hand-edited config is either a user note or a typo.
-    // Letting it reset currentSection would cause it to shadow subsequent
-    // ### headers and misroute keys.
     if (entry.type === "subsection") {
+      // Flush any pending project when leaving the projects section
+      if (currentSection === "projects") flushProject();
       currentSection = entry.name.toLowerCase();
       continue;
     }
     if (entry.type === "section") {
+      continue;
+    }
+
+    // Inside ### Projects: detect `== Title ==` boundaries from comment entries
+    if (currentSection === "projects" && entry.type === "comment") {
+      const titleMatch = entry.text.match(/^==\s*(.+?)\s*==$/);
+      if (titleMatch) {
+        flushProject();
+        currentProject = { project_name: titleMatch[1] ?? null };
+      }
       continue;
     }
 
@@ -232,13 +313,51 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
       continue;
     }
 
-    // ## Tools — every key is a dynamic tool name
+    // ### Projects — route keys to current project entry
+    if (currentSection === "projects") {
+      if (!currentProject) {
+        // Keys before the first == Title == — treat as implicit entry
+        currentProject = {};
+      }
+      switch (key) {
+        case "Project_ID":
+          currentProject.project_id = raw_val;
+          break;
+        case "Project_Root":
+          currentProject.project_root = raw_val;
+          break;
+        case "Project_Name":
+          currentProject.project_name = raw_val;
+          break;
+        case "Description":
+          currentProject.description = raw_val;
+          break;
+        case "Language":
+          currentProject.language = raw_val;
+          break;
+        case "Tags":
+          currentProject.tags = raw_val ? raw_val.split(",").map(s => s.trim()).filter(Boolean) : [];
+          break;
+        case "Include":
+          currentProject.include = raw_val ? raw_val.split(",").map(s => s.trim()).filter(Boolean) : [];
+          break;
+        case "Exclude":
+          currentProject.exclude = raw_val ? raw_val.split(",").map(s => s.trim()).filter(Boolean) : [];
+          break;
+        case "Entry_Point":
+          currentProject.entry_point = raw_val;
+          break;
+      }
+      continue;
+    }
+
+    // ### Tools — every key is a dynamic tool name
     if (currentSection === "tools") {
       config.tools[key] = strToStatus(raw_val);
       continue;
     }
 
-    // ## Auto Write
+    // ### Auto Write
     if (currentSection === "auto write") {
       switch (key) {
         case "status":
@@ -262,7 +381,7 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
       continue;
     }
 
-    // ## Zenith-Rag
+    // ### Zenith-Rag
     if (currentSection === "zenith-rag") {
       switch (key) {
         case "status":
@@ -281,7 +400,7 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
       continue;
     }
 
-    // ## Advanced
+    // ### Advanced
     if (currentSection === "advanced") {
       switch (key) {
         case "char_budget": {
@@ -326,6 +445,9 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
 
     // Any other section — ignore keys (they stay in RawConfig for round-trip).
   }
+
+  // Flush the last project if file ends inside ### Projects
+  if (currentSection === "projects") flushProject();
 
   return config;
 }

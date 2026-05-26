@@ -35,12 +35,22 @@ function text(result) {
     return result.content[0].text;
 }
 
+async function importProjectContext() {
+    return await import('../dist/core/project-context.js');
+}
+
 async function importStashRestore() {
     return await import('../dist/tools/stash_restore.js');
 }
 
 async function importStashCore() {
     return await import('../dist/core/stash.js');
+}
+
+async function registerTempProject(ctx, dir) {
+    const { getProjectContext } = await importProjectContext();
+    const pc = getProjectContext(ctx);
+    pc.reloadRegistry([{ project_id: 'stash-test', project_name: 'Test', project_root: dir }]);
 }
 
 describe('stashRestore — registration', () => {
@@ -66,6 +76,7 @@ describe('stashRestore — list mode', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);
@@ -152,6 +163,7 @@ describe('stashRestore — read mode', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);
@@ -253,6 +265,7 @@ describe('stashRestore — restore mode (clear)', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);
@@ -303,6 +316,7 @@ describe('stashRestore — apply mode: edit', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);
@@ -451,6 +465,7 @@ describe('stashRestore — apply mode: write', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);
@@ -577,6 +592,7 @@ describe('stashRestore — error cases', () => {
         vi.resetModules();
         dir = mkTmpGitRepo();
         ctx = mkCtx(dir);
+        await registerTempProject(ctx, dir);
         const h = captureHandler();
         const mod = await importStashRestore();
         mod.register(h.server, ctx);

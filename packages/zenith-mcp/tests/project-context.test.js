@@ -24,7 +24,7 @@ function mkCtx(repoDir) {
     };
 }
 
-describe('ProjectContext — resolution ladder', () => {
+describe('ProjectContext — registry-first resolution', () => {
     let repoDir;
     let ctx;
     let ProjectContext;
@@ -41,38 +41,66 @@ describe('ProjectContext — resolution ladder', () => {
         try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
     });
 
-    it('resolves from MCP roots (allowed directories)', () => {
+    it('unregistered git repo path returns global (no heuristic promotion)', () => {
         const pc = new ProjectContext(ctx);
         const root = pc.getRoot(path.join(repoDir, 'file.js'));
-        expect(root).toBeTruthy();
+        // Not registered in registry → global
+        expect(root).toBeNull();
+        expect(pc.isGlobal).toBe(true);
     });
 
-    it('resolves from filePath when given', () => {
+    it('registered project path resolves to project root', () => {
         const pc = new ProjectContext(ctx);
-        const root = pc.getRoot(path.join(repoDir, 'subdir', 'file.js'));
-        expect(root).toBeTruthy();
+        pc.reloadRegistry([{
+            project_id: 'test-project',
+            project_name: 'Test Project',
+            project_root: repoDir,
+        }]);
+        const root = pc.getRoot(path.join(repoDir, 'file.js'));
+        expect(root).toBe(repoDir);
+        expect(pc.isGlobal).toBe(false);
     });
 
-    it('falls back to global when no roots match and cwd is not a git repo', async () => {
+    it('auto-switches when path moves to a different registered project', () => {
+        const repoDir2 = mkTmpGitRepo();
+        try {
+            const pc = new ProjectContext(ctx);
+            pc.reloadRegistry([
+                { project_id: 'proj-a', project_name: 'A', project_root: repoDir },
+                { project_id: 'proj-b', project_name: 'B', project_root: repoDir2 },
+            ]);
+
+            pc.getRoot(path.join(repoDir, 'file.js'));
+            expect(pc.isGlobal).toBe(false);
+
+            // Switch to project B
+            const rootB = pc.getRoot(path.join(repoDir2, 'other.js'));
+            expect(rootB).toBe(repoDir2);
+        } finally {
+            fs.rmSync(repoDir2, { recursive: true, force: true });
+        }
+    });
+
+    it('falls back to global when no roots match', async () => {
         const { ProjectContext } = await importProjectContext();
         const emptyCtx = {
             getAllowedDirectories: () => [],
             validatePath: async (p) => p,
         };
         const pc = new ProjectContext(emptyCtx);
-        // Step 1 (MCP roots) returns null, Step 4 (cwd) likely finds the Zenith-MCP git repo.
-        // The singleton from previous tests may have cached state, but refresh clears it.
-        // On CI/clean run, if cwd is not a git repo, isGlobal would be true.
-        // Here, since the cwd IS a git repo, _resolve finds it and isGlobal=false.
-        pc._resolve();
-        // Document actual behavior: cwd is the Zenith-MCP repo, so it resolves non-global
-        expect(pc._resolved).toBe(true);
+        expect(pc.isGlobal).toBe(true);
     });
 
-    it('resolves from cwd when MCP roots empty but cwd is a git repo', () => {
+    it('fast-path: same-project files skip registry lookup', () => {
         const pc = new ProjectContext(ctx);
-        pc.getRoot(path.join(repoDir, 'file.js'));
-        expect(pc.isGlobal).toBe(false);
+        pc.reloadRegistry([{
+            project_id: 'test-project',
+            project_name: 'Test Project',
+            project_root: repoDir,
+        }]);
+        const root1 = pc.getRoot(path.join(repoDir, 'a.js'));
+        const root2 = pc.getRoot(path.join(repoDir, 'sub', 'b.js'));
+        expect(root1).toBe(root2);
     });
 });
 
@@ -90,28 +118,30 @@ describe('ProjectContext — getStashDb', () => {
         try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
     });
 
-    it('returns a project-scoped DB for git repo root', async () => {
+    it('returns a project-scoped DB for registered project path', async () => {
         const { ProjectContext } = await importProjectContext();
         const pc = new ProjectContext(ctx);
+        pc.reloadRegistry([{
+            project_id: 'test-project',
+            project_name: 'Test Project',
+            project_root: repoDir,
+        }]);
         const result = pc.getStashDb(path.join(repoDir, 'test.js'));
         expect(result.db).toBeTruthy();
         expect(result.isGlobal).toBe(false);
         expect(result.root).toBeTruthy();
     });
 
-    it('returns global DB only when cwd has no git repo and no MCP roots', async () => {
+    it('returns global DB for unregistered path', async () => {
         const { ProjectContext } = await importProjectContext();
         const emptyCtx = {
             getAllowedDirectories: () => [],
             validatePath: async (p) => p,
         };
         const pc = new ProjectContext(emptyCtx);
-        // Because process.cwd() is the Zenith-MCP git repo, the resolver finds it.
-        // In production, if cwd were not a git repo, this would be global.
         const result = pc.getStashDb();
         expect(result.db).toBeTruthy();
-        // Document: cwd is a git repo here, so isGlobal is false (not global fallback)
-        expect(result.isGlobal).toBe(false);
+        expect(result.isGlobal).toBe(true);
     });
 });
 
@@ -172,10 +202,16 @@ describe('ProjectContext — refresh', () => {
     it('reset resolves state so next getRoot re-resolves', async () => {
         const { ProjectContext } = await importProjectContext();
         const pc = new ProjectContext(ctx);
+        pc.reloadRegistry([{
+            project_id: 'test-project',
+            project_name: 'Test',
+            project_root: repoDir,
+        }]);
         const root1 = pc.getRoot(path.join(repoDir, 'file.js'));
         expect(root1).toBeTruthy();
 
         pc.refresh();
+        // After refresh, _resolveNoFile re-runs and finds the registry match
         expect(pc._resolved).toBe(true);
         expect(pc._explicit).toBe(false);
     });

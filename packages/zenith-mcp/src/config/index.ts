@@ -12,7 +12,7 @@ export type {
 
 // Schema — typed config shape, defaults, and conversion helpers
 export { DEFAULT_CONFIG, CONFIG_PATH, expandTilde, configToRaw, rawToConfig } from "./schema.js";
-export type { ZenithConfig } from "./schema.js";
+export type { ZenithConfig, ProjectEntry } from "./schema.js";
 
 // Backup — file and SQLite backup/restore
 export { backupFile, restoreBackup, cleanupExpiredBackups } from "./backup.js";
