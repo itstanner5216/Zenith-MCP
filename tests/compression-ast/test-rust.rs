@@ -1,42 +1,54 @@
-// Copyright 2026 Muvon Un Limited
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-// Import terminal output prelude to shadow std macros globally
-// This automatically suspends the spinner before printing to prevent interference
-
-use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
-
-use octomind::config::Config;
-
-mod commands;  # L24
+mod commands;
 
 #[derive(Parser)]
 #[command(name = "octomind")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Octomind is a smart AI developer assistant with configurable MCP support")]
+struct CliArgs {
 	#[command(subcommand)]
 	command: Commands,
 }
 
 #[derive(Subcommand)]
-enum Commands {  # L36
-    # ... [30 lines omitted]
+enum Commands {
+	Config(commands::ConfigArgs),
+
+	Run(commands::RunArgs),
+
+	/// Start WebSocket server for remote AI sessions
+	Server(commands::ServerArgs),
+
+	/// Run as an ACP (Agent Client Protocol) agent over stdio
+	Acp(commands::AcpArgs),
+
+	/// Add a registry tap (agent source URL).
+	/// Omit URL to list all active taps.
+	Tap(commands::TapArgs),
+
+	/// Remove a previously added registry tap.
+	Untap(commands::UntapArgs),
+
+	/// Show all available placeholder variables and their values
+	Vars(commands::VarsArgs),
+
+	/// Send a message to a running session by name.
+	Send(commands::SendArgs),
+
+	/// Generate shell completion scripts
+	Completion {
+		/// The shell to generate completion for
+		#[arg(value_enum)]
+		shell: Shell,
+	},
+
+	/// Print completion candidates for a subcommand (used by shell completion scripts).
+	/// Outputs one candidate per line to stdout.
+	#[command(hide = true)]
+	Complete(commands::CompleteArgs),
+}
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {  # L78
+async fn main() -> Result<(), anyhow::Error> {
 	// Initialize environment tracker before loading .env
 	let _tracker = octomind::config::get_env_tracker();
 
@@ -49,12 +61,7 @@ async fn main() -> Result<(), anyhow::Error> {  # L78
 	{
 		octomind::log_debug!("Failed to load .env file: {}", e);
 	}
-
-	// Seed the thread-local working directory with the real launch cwd immediately,
-	// so get_thread_working_directory() never falls back to a wrong std::env::current_dir().
-	let launch_cwd = std::env::current_dir().unwrap_or_default();
-	octomind::mcp::set_session_working_directory(launch_cwd);
-
+ # ... [lines 91-96 omitted]
 	let args = CliArgs::parse();
 
 	// Set process/terminal title for long-running subcommands so they're
@@ -68,9 +75,22 @@ async fn main() -> Result<(), anyhow::Error> {  # L78
 		}
 		_ => {}
 	}
-     # ... [10 lines omitted]
 
-async fn run_with_cleanup(args: CliArgs, config: Config) -> Result<(), anyhow::Error> {  # L125
+	// Load configuration
+	let config = Config::load()?;
+
+	// Setup cleanup for MCP server processes when the program exits
+	let result = run_with_cleanup(args, config).await;
+
+	// Make sure to clean up any started server processes
+	if let Err(e) = octomind::mcp::server::cleanup_servers() {
+		octomind::log_error!("Warning: Error cleaning up MCP servers: {}", e);
+	}
+
+	result
+}
+
+async fn run_with_cleanup(args: CliArgs, config: Config) -> Result<(), anyhow::Error> {
 	let log_level = config.log_level.as_str();
 	if let Commands::Run(_) = &args.command {
 		if let Err(e) = octomind::logging::tracing_setup::init_tracing(
@@ -118,6 +138,7 @@ async fn run_with_cleanup(args: CliArgs, config: Config) -> Result<(), anyhow::E
 
 /// Patch the clap-generated completion script to add dynamic TAG completions
 /// for `octomind run` by calling `octomind complete run` at runtime.
+fn patch_completion_script(script: &str, shell: Shell) -> String {
 	match shell {
 		Shell::Bash => patch_bash(script),
 		Shell::Zsh => patch_zsh(script),
@@ -125,33 +146,40 @@ async fn run_with_cleanup(args: CliArgs, config: Config) -> Result<(), anyhow::E
 		// PowerShell and Elvish: emit as-is (no dynamic patching needed for now)
 		_ => script.to_string(),
 	}
+# ... [lines 181-192 omitted]
+///    as a completion candidate when typing flags.
+fn patch_bash(script: &str) -> String {
+	// The case label uses 8 spaces of indentation in the clap output.
+	let marker = "        octomind__run)\n";
+	let Some(run_pos) = script.find(marker) else {
+		return script.to_string();
+	};
+	let block_start = run_pos + marker.len();
+
+	// Find the end of this block: next case label at the same indent level.
+	let end_marker = "\n        octomind__";
+	let block_len = script[block_start..]
+		.find(end_marker)
+		.unwrap_or(script.len() - block_start);
+	let block_end = block_start + block_len;
+
+	let block = &script[block_start..block_end];
+
+  # ... [lines 211-222 omitted]
+		"                    COMPREPLY=($(compgen -W \"$(octomind complete run 2>/dev/null)\" -- \"${cur}\"))\n                    return 0\n                    ;;\n",
+	);
+
+	format!(
+		"{}{}{}{}",
+		&script[..run_pos],
+		marker,
+		block,
+		&script[block_end..]
+	)
 }
 
-/// Bash: patch the `octomind__run)` block so that the TAG positional gets
-/// dynamic completions from `octomind complete run` instead of falling back
-/// to file/directory completion.
-///
-/// Three problems in the clap-generated script that we fix here:
-/// 1. Early-return fires at `COMP_CWORD -eq 2`, returning the literal
-///    `[TAG]` placeholder before the dynamic path is ever reached.
-/// 2. The `*)` fallback branch has no `return 0`, so the result it sets is
-///    immediately overwritten by the unconditional `COMPREPLY=…` after `esac`.
-/// 3. The opts string contains the literal `[TAG]` token which would appear
-///    as a completion candidate when typing flags.
-    # ... [34 lines omitted]
-
-/// Zsh: inject a helper function and replace the `_default` completer on the
-/// `tag` positional argument inside the `(run)` block.
-fn patch_zsh(script: &str) -> String {  # L237
-	// The helper must live in the file, but `#compdef octomind` MUST be the
-	// very first line — zsh's compinit only reads line 1 to decide whether to
-	// register the file as a completion. If anything appears before #compdef,
-	// the file is silently ignored and completion falls back to files/dirs.
-	//
-	// Strategy: keep #compdef on line 1, then inject the helper right after it.
-	//
-	// Use compadd instead of _describe: _describe treats ':' as the
-	// completion:description separator, which breaks tags like 'developer:general'.
+fn patch_zsh(script: &str) -> String {
+ # ... [lines 238-246 omitted]
 	let helper = "\n_octomind_complete_run() {\n  local -a tags\n  tags=(${(f)\"$(octomind complete run 2>/dev/null)\"})\n  compadd -a tags\n}\n";
 
 	// Find the end of the first line (#compdef octomind).
@@ -193,14 +221,9 @@ fn patch_zsh(script: &str) -> String {  # L237
 }
 
 /// Fish: append a dynamic completion line for `octomind run`'s TAG positional.
-fn patch_fish(script: &str) -> String {  # L288
+fn patch_fish(script: &str) -> String {
 	// Fish doesn't have a positional-arg slot in the generated output for TAG,
 	// so we append a line that calls `octomind complete run` as the candidates.
 	let dynamic_line = concat!(
 		"\n# Dynamic TAG completions for `octomind run`\n",
 		"complete -c octomind -n '__fish_octomind_using_subcommand run' ",
-		"-f -a '(octomind complete run 2>/dev/null)' ",
-		"-d 'Agent tag or role name'\n"
-	);
-	format!("{script}{dynamic_line}")
-}
