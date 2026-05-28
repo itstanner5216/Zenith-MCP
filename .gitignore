@@ -20,3 +20,4 @@ yarn.lock
 # TypeScript project-reference build state
 *.tsbuildinfo
 .nyc_output/
+.env.local

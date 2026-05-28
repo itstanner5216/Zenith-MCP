@@ -33,8 +33,13 @@
     "start:http": "node dist/server/http.js"
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
     "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0-alpha.2",
     "@repomix/tree-sitter-wasms": "^0.1.17",
+    "@workos-inc/node": "^9.3.1",
+    "ajv": "^8.17.1",
     "diff": "^5.1.0",
     "express": "^5.2.1",
     "glob": "^10.5.0",
@@ -46,11 +51,7 @@
     "web-tree-sitter": "^0.26.8",
     "zenith-toon": "workspace:*",
     "zod": "^4.3.6",
-    "zod-to-json-schema": "^3.23.5",
-    "@modelcontextprotocol/server": "2.0.0-alpha.2",
-    "ajv": "^8.17.1",
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "@cfworker/json-schema": "^4.1.1"
+    "zod-to-json-schema": "^3.23.5"
   },
   "devDependencies": {
     "@types/diff": "^5.0.9",

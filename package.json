@@ -26,5 +26,8 @@
   "devDependencies": {
     "turbo": "^2.9.14",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@workos-inc/node": "^9.3.1"
   }
 }

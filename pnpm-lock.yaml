@@ -10,6 +10,10 @@ patchedDependencies:
 importers:
 
   .:
+    dependencies:
+      '@workos-inc/node':
+        specifier: ^9.3.1
+        version: 9.3.1
     devDependencies:
       turbo:
         specifier: ^2.9.14
@@ -17,6 +21,19 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+
+  apps/auth-demo:
+    dependencies:
+      '@workos-inc/authkit-js':
+        specifier: ^0.20.0
+        version: 0.20.0
+    devDependencies:
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.12
+        version: 8.0.13
 
   packages/zenith-mcp:
     dependencies:
@@ -35,6 +52,9 @@ importers:
       '@repomix/tree-sitter-wasms':
         specifier: ^0.1.17
         version: 0.1.17
+      '@workos-inc/node':
+        specifier: ^9.3.1
+        version: 9.3.1
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
@@ -437,6 +457,13 @@ packages:
   '@vitest/utils@4.1.7':
     resolution: {integrity: sha512-T532WBu791cBxJlCl6SO+J14l81DQx6uQHm1bQbmCDY7nqlEIgkza/UFnSBNaUtSf41unldDFjdOBYEQC4b5Hw==}
 
+  '@workos-inc/authkit-js@0.20.0':
+    resolution: {integrity: sha512-8+sw8eH1+XCt3NDoIB2bKKbHvq1N7CVFJeyq1uVrUWG83GCIbNNrFwWrocVNfeQJyhKsVVuDpRcp03iSVsK5Gg==}
+
+  '@workos-inc/node@9.3.1':
+    resolution: {integrity: sha512-z6+V5lPAdEtJ2IklAsOUJWv5guihkMbtC8WHmLCKOJYLa/H0j9bRj/OmxTs7T+bzL2dhItxPRarhxlAAq/0jgQ==}
+    engines: {node: '>=22.11.0'}
+
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
@@ -621,6 +648,9 @@ packages:
   etag@1.8.1:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
+
+  eventemitter3@5.0.4:
+    resolution: {integrity: sha512-mlsTRyGaPBjPedk6Bvw+aqbsXDtoAyAzm5MO7JgU+yVRyMQ5O8bD4Kcci7BS85f93veegeCPkL8R4GLClnjLFw==}
 
   eventsource-parser@3.0.8:
     resolution: {integrity: sha512-70QWGkr4snxr0OXLRWsFLeRBIRPuQOvt4s8QYjmUlmlkyTZkRqS7EDVRZtzU3TiyDbXSzaOeF0XUKy8PchzukQ==}
@@ -1180,6 +1210,11 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
@@ -1599,6 +1634,12 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
+  '@workos-inc/authkit-js@0.20.0': {}
+
+  '@workos-inc/node@9.3.1':
+    dependencies:
+      eventemitter3: 5.0.4
+
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
@@ -1754,6 +1795,8 @@ snapshots:
       '@types/estree': 1.0.9
 
   etag@1.8.1: {}
+
+  eventemitter3@5.0.4: {}
 
   eventsource-parser@3.0.8: {}
 
@@ -2311,11 +2354,23 @@ snapshots:
 
   typescript@5.9.3: {}
 
+  typescript@6.0.3: {}
+
   undici-types@6.21.0: {}
 
   unpipe@1.0.0: {}
 
   vary@1.1.2: {}
+
+  vite@8.0.13:
+    dependencies:
+      lightningcss: 1.32.0
+      picomatch: 4.0.4
+      postcss: 8.5.15
+      rolldown: 1.0.1
+      tinyglobby: 0.2.16
+    optionalDependencies:
+      fsevents: 2.3.3
 
   vite@8.0.13(@types/node@22.19.19):
     dependencies:
