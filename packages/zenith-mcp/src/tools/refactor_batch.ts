@@ -5,7 +5,7 @@ import { randomBytes, createHash } from 'crypto';
 import type { ToolServer, ToolContext } from './types.js';
 import { getProjectContext } from '../core/project-context.js';
 import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, findRepoRoot, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
-import { getLangForFile, findSymbol, getSymbolStructure, checkSyntaxErrors, } from '../core/tree-sitter.js';
+import { getLangForFile, findSymbol, checkSyntaxErrors, } from '../core/tree-sitter.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
@@ -471,14 +471,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const structs: (SymbolStructure | null)[] = [];
                 for (const occ of group) {
                     let s: SymbolStructure | null = null;
-                    try {
-                        const langName = getLangForFile(occ.absPath);
-                        if (langName)
-                            s = await getSymbolStructure(occ.source, langName, occ.line, occ.endLine) as SymbolStructure | null;
-                    }
-                    catch {
-                        s = null;
-                    }
+                    s = null;
                     structs.push(s);
                 }
                 const modal = findModal(structs);
@@ -985,14 +978,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const structs: (SymbolStructure | null)[] = [];
             for (const t of targets) {
                 let s: SymbolStructure | null = null;
-                try {
-                    const langName = getLangForFile(t.absPath);
-                    if (langName)
-                        s = await getSymbolStructure(t.source, langName, t.line, t.endLine) as SymbolStructure | null;
-                }
-                catch {
-                    s = null;
-                }
+                s = null;
                 structs.push(s);
             }
             {

@@ -30,16 +30,3 @@ export {
     checkSyntaxErrors,
 } from './tree-sitter/symbols.js';
 
-export type { BlockEntry } from './tree-sitter/compression-structure.js';
-
-export {
-    getCompressionStructure,
-} from './tree-sitter/compression-structure.js';
-
-export type { SymbolStructure } from './tree-sitter/structural-similarity.js';
-
-export {
-    getStructuralFingerprint,
-    computeStructuralSimilarity,
-    getSymbolStructure,
-} from './tree-sitter/structural-similarity.js';

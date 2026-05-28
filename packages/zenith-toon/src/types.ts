@@ -52,7 +52,28 @@ export interface ASTEdgeResult {
 }
 
 // ---------------------------------------------------------------------------
-// config.py shapes
+// Compression context — structural data passed from caller to toon
+// ---------------------------------------------------------------------------
+
+/**
+ * Enriched context for structured source compression.
+ *
+ * Toon owns the type — MCP fills it from its own stores.
+ * All fields optional; toon degrades gracefully when absent.
+ */
+export interface CompressionContext {
+  /** Pre-built AST edges between blocks in this file */
+  astEdges?: ASTEdge[];
+  /** Symbols this file exports (used to boost block priority) */
+  exportedSymbols?: string[];
+  /** Files this file imports from (used for cross-file relevance) */
+  importedFiles?: string[];
+  /** Caller → callee pairs with call counts (supplementary graph signal) */
+  callGraph?: Array<{ caller: string; callee: string; weight: number }>;
+}
+
+// ---------------------------------------------------------------------------
+// config shapes
 // ---------------------------------------------------------------------------
 
 export interface BudgetTier {
@@ -120,7 +141,7 @@ export interface ToonConfig {
 }
 
 // ---------------------------------------------------------------------------
-// dedup.py shapes
+// dedup shapes
 // ---------------------------------------------------------------------------
 
 export interface DedupStats {
@@ -141,7 +162,7 @@ export interface TemplateInfo {
 }
 
 /**
- * Full TemplateInfo as used by dedup.py internally —
+ * Full TemplateInfo as used internally —
  * tracks first/last content for template collapsing.
  */
 export interface TemplateInfoFull {
@@ -171,7 +192,7 @@ export interface DedupResult {
 }
 
 // ---------------------------------------------------------------------------
-// pipeline.py shapes
+// pipeline shapes
 // ---------------------------------------------------------------------------
 
 export interface CompressConfig {
@@ -206,7 +227,7 @@ export interface CompressedOutput {
 }
 
 // ---------------------------------------------------------------------------
-// encoder.py shapes
+// encoder shapes
 // ---------------------------------------------------------------------------
 
 /**

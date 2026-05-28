@@ -29,7 +29,7 @@ import {
     pruneOldVersions,
     pruneOtherSessions,
     runTransaction,
-    findSymbolFiles
+    findSymbolFiles,
 } from './db-adapter.js';
 
 // ---------------------------------------------------------------------------

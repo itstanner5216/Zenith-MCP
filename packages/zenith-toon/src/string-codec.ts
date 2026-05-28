@@ -5,12 +5,11 @@
 //   - compressSourceStructured(text, budget, structure) — language-aware compression using tree-sitter block/anchor metadata provided by the consumer
 //
 // Language awareness: The `structure` parameter in compressSourceStructured is
-// produced by tree-sitter in the consuming package. In Zenith-MCP this is:
-//   zenith-mcp/src/core/tree-sitter/compression-structure.ts → getCompressionStructure() which extracts function blocks, class definitions, and control-flow anchors
+// produced by consumers that have their own parser/structure extractor.
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
 import { SageRank } from './sagerank.js';
-import type { StructureBlock, ASTEdge } from './types.js';
+import type { StructureBlock, ASTEdge, CompressionContext } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Detection patterns
@@ -952,7 +951,7 @@ function _compressSourceStructured(
   text: string,
   budget: number,
   structure: StructureBlock[],
-  astEdges?: ASTEdge[],
+  context?: CompressionContext,
 ): string {
   const lines = text.split('\n');
   const n = lines.length;
@@ -964,6 +963,11 @@ function _compressSourceStructured(
   if (budget >= text.length) {
     return text;
   }
+
+  // Pre-compute export set from context for O(1) lookups
+  const exportedSet = context?.exportedSymbols
+    ? new Set(context.exportedSymbols)
+    : null;
 
   // Score each block — mutate a local copy to avoid affecting caller
   const workingStructure: Array<StructureBlock & { priority: number }> = structure.map((block) => {
@@ -977,6 +981,9 @@ function _compressSourceStructured(
       priority = 300;
     } else if (name.startsWith('_')) {
       priority = 100;
+    } else if (exportedSet?.has(name)) {
+      // Context-provided export signal boosts non-trivially
+      priority = 280;
     } else {
       priority = 200;
     }
@@ -1051,6 +1058,21 @@ function _compressSourceStructured(
   }
   let used = topLevelLines.reduce((sum, i) => sum + lineAt(i).length + 1, 0);
 
+  // Resolve edges: context-provided edges take priority, fall back to callGraph
+  let finalEdges: ASTEdge[] | undefined = context?.astEdges;
+  if ((!finalEdges || finalEdges.length === 0) && context?.callGraph && context.callGraph.length > 0) {
+    const nameToIndex = new Map(workingStructure.map((b, idx) => [b.name, idx]));
+    const edges: ASTEdge[] = [];
+    for (const entry of context.callGraph) {
+      const fromIdx = nameToIndex.get(entry.caller);
+      const toIdx = nameToIndex.get(entry.callee);
+      if (fromIdx !== undefined && toIdx !== undefined) {
+        edges.push({ from: fromIdx, to: toIdx, weight: entry.weight, kind: 'call' });
+      }
+    }
+    if (edges.length > 0) finalEdges = edges;
+  }
+
   // Rank blocks using SageRank with AST edges (if available) or priority-only
   let sortedBlocks: Array<StructureBlock & { priority: number }>;
 
@@ -1072,8 +1094,8 @@ function _compressSourceStructured(
       1.5, 0.75, 0.85, 50, 1e-6, 0.35, 20, true
     );
 
-    const result = astEdges && astEdges.length > 0
-      ? sagerank.rankWithAST(blockTexts, workingStructure.length, astEdges, null)
+    const result = finalEdges && finalEdges.length > 0
+      ? sagerank.rankWithAST(blockTexts, workingStructure.length, finalEdges, null)
       : sagerank.rankSentences(blockTexts, workingStructure.length, null);
 
     const combinedScores = result.scores.map((score, idx) => {
@@ -1303,11 +1325,11 @@ export function compressSourceStructured(
   text: string,
   budget: number,
   structure: StructureBlock[],
-  astEdges?: ASTEdge[],
+  context?: CompressionContext,
 ): string {
   // Enforce 70% retention floor — never compress below 70% of original
   const minBudget = Math.max(1, Math.floor(text.length * 0.70));
   budget = Math.max(budget, minBudget);
   if (text.length <= budget) return text;
-  return _compressSourceStructured(text, budget, structure, astEdges);
+  return _compressSourceStructured(text, budget, structure, context);
 }
