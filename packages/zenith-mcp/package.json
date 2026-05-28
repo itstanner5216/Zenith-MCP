@@ -27,7 +27,8 @@
     "build": "tsc --build && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "rebuild": "tsc --build --force && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "watch": "tsc --watch",
-    "test": "vitest run --coverage",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
     "start:http": "node dist/server/http.js"
   },

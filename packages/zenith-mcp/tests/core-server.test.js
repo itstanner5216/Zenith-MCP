@@ -62,7 +62,9 @@ function mockAllDeps(customMocks = {}) {
         patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
+    if (!customMocks[PROJECT_CONTEXT]) {
+        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
+    }
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
     }
@@ -91,7 +93,9 @@ async function getToolMocks(customMocks = {}) {
         patchToolsInConfig: vi.fn(),
     }));
     vi.doMock(ADAPTERS_INDEX, () => ({ configureRegistry: vi.fn() }));
-    vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
+    if (!customMocks[PROJECT_CONTEXT]) {
+        vi.doMock(PROJECT_CONTEXT, () => ({ onRootsChanged: vi.fn(), getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }));
+    }
     for (const [modPath, factory] of Object.entries(customMocks)) {
         vi.doMock(modPath, factory);
     }
