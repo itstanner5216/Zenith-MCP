@@ -38,6 +38,7 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@modelcontextprotocol/server": "2.0.0-alpha.2",
     "@repomix/tree-sitter-wasms": "^0.1.17",
+    "@workos-inc/authkit-js": "^0.20.0",
     "@workos-inc/node": "^9.3.1",
     "ajv": "^8.17.1",
     "diff": "^5.1.0",
@@ -49,6 +50,7 @@
     "jsonc-parser": "^3.3.1",
     "minimatch": "^10.0.1",
     "web-tree-sitter": "^0.26.8",
+    "workos": "^0.15.2",
     "zenith-toon": "workspace:*",
     "zod": "^4.3.6",
     "zod-to-json-schema": "^3.23.5"
