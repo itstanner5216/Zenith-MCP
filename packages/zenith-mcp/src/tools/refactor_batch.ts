@@ -469,9 +469,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (group.length < 2)
                     continue;
                 const structs: (SymbolStructure | null)[] = [];
-                for (const occ of group) {
-                    let s: SymbolStructure | null = null;
-                    s = null;
+                for (const _occ of group) {
+                    const s: SymbolStructure | null = null;
                     structs.push(s);
                 }
                 const modal = findModal(structs);
@@ -976,9 +975,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
             const structs: (SymbolStructure | null)[] = [];
-            for (const t of targets) {
-                let s: SymbolStructure | null = null;
-                s = null;
+            for (const _t of targets) {
+                const s: SymbolStructure | null = null;
                 structs.push(s);
             }
             {
