@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "demo/*"
 
 allowBuilds:
   tree-sitter-cli: true

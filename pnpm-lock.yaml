@@ -22,6 +22,19 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  demo/workos-vanilla:
+    dependencies:
+      '@workos-inc/authkit-js':
+        specifier: ^0.20.0
+        version: 0.20.0
+    devDependencies:
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.3
+      vite:
+        specifier: ^8.0.12
+        version: 8.0.13(@types/node@22.19.19)(yaml@2.9.0)
+
   packages/zenith-mcp:
     dependencies:
       '@cfworker/json-schema':
@@ -1839,6 +1852,11 @@ packages:
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -3732,6 +3750,8 @@ snapshots:
       mime-types: 3.0.2
 
   typescript@5.9.3: {}
+
+  typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
 
