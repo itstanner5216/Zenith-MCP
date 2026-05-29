@@ -355,7 +355,9 @@ app.get(AUTHORIZATION_SERVER_METADATA_PATH, async (_req, res) => {
     }
 
     try {
-        const response = await fetch(`${AUTHKIT_ISSUER}${AUTHORIZATION_SERVER_METADATA_PATH}`);
+        const response = await fetch(`${AUTHKIT_ISSUER}${AUTHORIZATION_SERVER_METADATA_PATH}`, {
+            signal: AbortSignal.timeout(5000),
+        });
         const body = await response.text();
         res
             .status(response.status)
