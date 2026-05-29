@@ -226,7 +226,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             if (rawResults.length === 0) {
             const nameRegex = args.namePattern
-                ? new RegExp(args.namePattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
+                    ? new RegExp(args.namePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*').replace(/\\\?/g, '.'), 'i')
                 : null;
                 async function walk(dir: string) {
                     if (rawResults.length >= userMaxResults * 5)
