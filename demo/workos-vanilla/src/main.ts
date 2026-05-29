@@ -26,7 +26,7 @@ async function main(): Promise<void> {
     app.innerHTML = `
       <section id="center">
         <h1>Authentication Error</h1>
-        <p>${error instanceof Error ? error.message : 'Unknown error'}</p>
+        <p>${error instanceof Error ? error.message.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]!)) : 'Unknown error'}</p>
       </section>
     `;
   }
