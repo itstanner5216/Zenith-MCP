@@ -340,10 +340,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: "text" as const, text: 'No matches.' }] };
             }
             const outputLines: string[] = [];
-            for (const { filePath, matches } of symbolMatches.slice(0, userMaxResults)) {
+            for (const { filePath, matches } of symbolMatches) {
                 for (const sym of matches) {
+                    if (outputLines.length >= userMaxResults)
+                        break;
                     outputLines.push(`${filePath}:${sym.line}  [${sym.type}] ${sym.name} (lines ${sym.line}-${sym.endLine})`);
                 }
+                if (outputLines.length >= userMaxResults)
+                    break;
             }
             const budgetLines: string[] = [];
             let charCount = 0;
