@@ -24,7 +24,10 @@
     "lint": "turbo run lint"
   },
   "devDependencies": {
-    "turbo": "^2.9.14",
+    "turbo": "^2.9.15",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "pnpm": "^11.4.0"
   }
 }
