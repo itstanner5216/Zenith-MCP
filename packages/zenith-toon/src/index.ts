@@ -15,9 +15,8 @@
 //     Rule-based field routing for dict-shaped entries in the pipeline.
 //
 // Language awareness is provided by the consumer via the `structure` parameter
-// to compressSourceStructured(). In Zenith-MCP, this comes from:
-//   src/core/tree-sitter/compression-structure.ts (17 languages with anchor rules)
-//   src/core/tree-sitter/languages.ts (43 grammar mappings)
+// to compressSourceStructured(). Zenith-MCP currently uses plain compressString()
+// and does not provide tree-sitter structure to this package.
 
 // ---------------------------------------------------------------------------
 // Legacy API (backward-compatible)
@@ -95,6 +94,7 @@ export type {
   Anchor,
   ASTEdge,
   ASTEdgeResult,
+  CompressionContext,
   EntryMeta,
   TemplateInfoFull,
   CompressConfig as CompressConfigShape,

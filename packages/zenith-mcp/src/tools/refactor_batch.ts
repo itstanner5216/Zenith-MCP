@@ -5,7 +5,7 @@ import { randomBytes, createHash } from 'crypto';
 import type { ToolServer, ToolContext } from './types.js';
 import { getProjectContext } from '../core/project-context.js';
 import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, findRepoRoot, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
-import { getLangForFile, findSymbol, getSymbolStructure, checkSyntaxErrors, } from '../core/tree-sitter.js';
+import { getLangForFile, findSymbol, checkSyntaxErrors, } from '../core/tree-sitter.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
@@ -469,18 +469,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (group.length < 2)
                     continue;
                 const structs: (SymbolStructure | null)[] = [];
-                for (const occ of group) {
-                    let s: SymbolStructure | null = null;
-                    try {
-                        const langName = getLangForFile(occ.absPath);
-                        if (langName)
-                            s = await getSymbolStructure(occ.source, langName, occ.line, occ.endLine) as SymbolStructure | null;
-                    }
-                    catch {
-                        s = null;
-                    }
-                    structs.push(s);
-                }
+                // TODO: Populate actual SymbolStructure from AST for each occurrence in group
                 const modal = findModal(structs);
                 if (!modal)
                     continue;
@@ -983,18 +972,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
             const structs: (SymbolStructure | null)[] = [];
-            for (const t of targets) {
-                let s: SymbolStructure | null = null;
-                try {
-                    const langName = getLangForFile(t.absPath);
-                    if (langName)
-                        s = await getSymbolStructure(t.source, langName, t.line, t.endLine) as SymbolStructure | null;
-                }
-                catch {
-                    s = null;
-                }
-                structs.push(s);
-            }
+            // TODO: Populate actual SymbolStructure from AST for each target
             {
                 const baseline = cachedPayload.modalStructure;
                 const modal = baseline || (targets.length >= 2 ? findModal(structs) : null);

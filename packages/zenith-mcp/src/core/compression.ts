@@ -1,10 +1,21 @@
-import { spawn } from 'child_process';
-import { fileURLToPath } from 'url';
+// ---------------------------------------------------------------------------
+// compression.ts — Bridge between zenith-mcp file reading and zenith-toon
+//
+// MCP owns: file reading, tree-sitter parsing, symbol-index queries, path resolution
+// TOON owns: compression intelligence (what to keep, what to drop)
+//
+// This module is the seam: it collects structural data from MCP's stores and
+// passes it to toon as a plain CompressionContext object.
+// ---------------------------------------------------------------------------
+
 import path from 'path';
+import { compressString, compressSourceStructured } from 'zenith-toon';
+import { getLangForFile, getSymbols } from './tree-sitter.js';
+import { findRepoRoot, getDb } from './symbol-index.js';
+import { getFileBlockEdges } from './db-adapter.js';
+import type { StructureBlock, CompressionContext } from 'zenith-toon';
 
 export const DEFAULT_COMPRESSION_KEEP_RATIO = 0.70;
-
-const _BRIDGE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'toon_bridge_cli.js');
 
 export function computeCompressionBudget(rawLength: number, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): number {
     if (!Number.isFinite(rawLength) || rawLength <= 0) return 0;
@@ -14,18 +25,14 @@ export function computeCompressionBudget(rawLength: number, maxChars: number, ke
 }
 
 export function isCompressionUseful(rawText: string, compressedText: string | null, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): compressedText is string {
-    if (typeof rawText !== 'string' || typeof compressedText !== 'string') return false;
-    if (compressedText.length === 0 || rawText.length === 0) return false;
+    if (compressedText === null || compressedText.length === 0 || rawText.length === 0) return false;
 
-    // If raw text length exactly equals maxChars, it already fits the budget — no compression needed
     const boundedMaxChars = Math.max(0, Math.floor(maxChars));
     if (rawText.length === boundedMaxChars) return false;
 
     const targetBudget = computeCompressionBudget(rawText.length, maxChars, keepRatio);
     if (targetBudget <= 0 || targetBudget >= rawText.length) return false;
 
-    // compressed must (a) actually be smaller than the raw, (b) fit within the ratio budget,
-    // and (c) leave headroom under maxChars (filling the entire output budget is just truncation).
     return compressedText.length < rawText.length
         && compressedText.length <= targetBudget
         && compressedText.length < boundedMaxChars;
@@ -37,7 +44,6 @@ export function truncateToBudget(text: unknown, budget: number): { text: string;
     }
 
     if (text.length <= budget) {
-        // If the text contains no non-newline content, it is considered truncated
         const hasContent = text.replace(/\n/g, '').length > 0;
         return { text, truncated: !hasContent };
     }
@@ -51,39 +57,76 @@ export function truncateToBudget(text: unknown, budget: number): { text: string;
     };
 }
 
-export async function runToonBridge(validPath: string, budget: number): Promise<string | null> {
-    return new Promise((resolve) => {
-        const child = spawn(process.execPath, [_BRIDGE, validPath, String(budget)], {
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        let out = '';
-        child.stdout.on('data', d => out += d);
-
-        const timer = setTimeout(() => {
-            child.kill();
-            resolve(null);
-        }, 30_000);
-
-        child.on('close', code => {
-            clearTimeout(timer);
-            resolve(code === 0 && out.length > 0 ? out : null);
-        });
-
-        child.on('error', () => {
-            clearTimeout(timer);
-            resolve(null);
-        });
-    });
-}
-
-export async function compressTextFile(validPath: string, rawText: string, maxChars: number, keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO): Promise<{ text: string; targetBudget: number; rawLength: number; compressedLength: number } | null> {
+/**
+ * Compress a source file using tree-sitter structure + symbol-index graph data.
+ *
+ * Flow:
+ *   1. Detect language via tree-sitter
+ *   2. Parse symbols → map to StructureBlock[]
+ *   3. If repo root found, query symbol-index for call-graph edges
+ *   4. Assemble CompressionContext and hand to zenith-toon
+ *   5. Fall back to unstructured compression if AST route fails
+ */
+export async function compressTextFile(
+    validPath: string,
+    rawText: string,
+    maxChars: number,
+    keepRatio = DEFAULT_COMPRESSION_KEEP_RATIO
+): Promise<{ text: string; targetBudget: number; rawLength: number; compressedLength: number } | null> {
     const targetBudget = computeCompressionBudget(rawText.length, maxChars, keepRatio);
     if (targetBudget <= 0 || targetBudget >= rawText.length) {
         return null;
     }
 
-    const compressed = await runToonBridge(validPath, targetBudget);
+    let compressed: string | null = null;
+    const langName = getLangForFile(validPath);
+
+    if (langName) {
+        try {
+            const rawSymbols = await getSymbols(rawText, langName);
+            if (rawSymbols) {
+                const defs = rawSymbols.filter(s => s.kind === 'def');
+
+                const structure: StructureBlock[] = defs.map(s => ({
+                    name: s.name,
+                    kind: s.kind,
+                    type: s.type,
+                    startLine: s.line - 1,
+                    endLine: s.endLine - 1,
+                    exported: false,
+                    anchors: [],
+                }));
+
+                const context: CompressionContext = {};
+
+                // Enrich with call-graph data from symbol index
+                const repoRoot = findRepoRoot(validPath);
+                if (repoRoot && defs.length > 0) {
+                    try {
+                        const db = getDb(repoRoot);
+                        const relPath = path.relative(repoRoot, validPath);
+                        const blockNames = defs.map(d => d.name);
+                        const graphData = getFileBlockEdges(db, relPath, blockNames);
+                        if (graphData.edges.length > 0) {
+                            context.astEdges = graphData.edges;
+                        }
+                    } catch {
+                        // DB unavailable or not indexed — compress without graph context
+                    }
+                }
+
+                compressed = compressSourceStructured(rawText, targetBudget, structure, context);
+            }
+        } catch {
+            // tree-sitter unavailable or parse failed — fall through to unstructured
+        }
+    }
+
+    // Fallback: unstructured compression for unsupported file types or parse failures
+    if (!compressed) {
+        compressed = compressString(rawText, targetBudget);
+    }
+
     if (!isCompressionUseful(rawText, compressed, maxChars, keepRatio)) {
         return null;
     }

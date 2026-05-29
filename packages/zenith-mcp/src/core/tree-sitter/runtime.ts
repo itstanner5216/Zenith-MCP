@@ -7,7 +7,6 @@
 //   - loadLanguage()       — grammar WASM loader with PIC side-module guard
 //   - getCompiledQuery()   — compiled Query cache
 //   - treeSitterAvailable() — health check
-//   - DEF_TYPES            — ReadonlySet of definition node types
 //   - Symbol cache shared state (_symbolCache, SYMBOL_CACHE_MAX, SymbolCacheEntry)
 //
 // No imports from sibling submodules — this is a leaf module.
@@ -39,77 +38,7 @@ const _languageCache: Map<string, Promise<Language | null>> = new Map();
 const _queryStringCache: Map<string, string | null> = new Map();
 const _compiledQueryCache: Map<string, Query | null> = new Map();
 
-// ---------------------------------------------------------------------------
-// DEF_TYPES — node types treated as "the definition node" in getSymbolStructure
-// ---------------------------------------------------------------------------
 
-/**
- * AST node type names that getSymbolStructure treats as "the definition node"
- * when locating a symbol by line range. Hoisted to module scope so the Set is
- * allocated once at load time instead of on every getSymbolStructure call
- * (hot path during symbol-aware edits and batch operations).
- *
- * Each node type appears EXACTLY ONCE. The comment for each entry lists every
- * language that produces that node type — so the registry is the single
- * source of truth without misleading duplicate entries. The line-range guard
- * inside getSymbolStructure (`node.startPosition.row === startRow &&
- * node.endPosition.row === endRow`) prevents false positives if a type
- * happens to match a non-definition role in some grammar.
- */
-export const DEF_TYPES: ReadonlySet<string> = new Set([
-    // JS / TS
-    'function_declaration', 'function_definition', 'method_definition',
-    'arrow_function', 'function', 'method',
-    'class_declaration', 'class_definition',
-    'function_signature', 'method_signature',
-    'lexical_declaration', 'variable_declaration',
-    // Go
-    'short_var_declaration', 'type_spec',
-    // Rust
-    'function_item', 'struct_item', 'enum_item', 'trait_item',
-    'impl_item', 'const_item', 'static_item', 'mod_item', 'type_item',
-    // Java + C# + Kotlin + PHP
-    'method_declaration',
-    // Java + C# + Kotlin + PHP
-    'interface_declaration',
-    // Java + C#
-    'enum_declaration',
-    // Java
-    'annotation_type_declaration',
-    // C / C++
-    'struct_specifier', 'union_specifier', 'enum_specifier',
-    'template_declaration',
-    // C / C++ + PHP
-    'namespace_definition',
-    // C# + Kotlin
-    'property_declaration',
-    // C#
-    'constructor_declaration', 'event_declaration', 'namespace_declaration',
-    // Kotlin
-    'object_declaration', 'type_alias',
-    // PHP
-    'trait_declaration',
-    // Ruby
-    'singleton_method', 'class', 'module',
-    // Swift
-    'struct_declaration', 'protocol_declaration', 'extension_declaration',
-    'typealias_declaration',
-    // Lua (grammar variants — both names appear across forks)
-    'local_function_declaration', 'function_statement',
-    // GraphQL
-    'object_type_definition', 'input_object_type_definition',
-    'interface_type_definition', 'union_type_definition',
-    'enum_type_definition', 'directive_definition',
-    // HCL (resource/data/variable/output blocks)
-    'block',
-    // Prisma
-    'model_declaration', 'type_declaration',
-    'datasource_declaration', 'generator_declaration',
-    // Protocol Buffers
-    'message', 'enum', 'service', 'rpc',
-    // Dockerfile
-    'arg_instruction', 'env_instruction', 'from_instruction',
-]);
 
 // ---------------------------------------------------------------------------
 // Symbol cache — shared state exported so symbols.ts can use it

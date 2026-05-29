@@ -1,8 +1,9 @@
 packages:
   - "packages/*"
-
+  - "demo/*"
+  - "apps/*"
 allowBuilds:
   tree-sitter-cli: true
 
 patchedDependencies:
-  "@modelcontextprotocol/sdk@1.29.0": patches/@modelcontextprotocol__sdk@1.29.0.patch
+  "@modelcontextprotocol/sdk@1.29.0": packages/zenith-mcp/patches/@modelcontextprotocol__sdk@1.29.0.patch

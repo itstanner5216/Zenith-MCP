@@ -14,9 +14,11 @@
 //   GET  /health       — Simple health check
 // ---------------------------------------------------------------------------
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 // Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
 //         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
 //         The stdio entrypoint uses v2 (see src/cli/stdio.ts), while the tool
@@ -67,13 +69,6 @@ const args = process.argv.slice(2);
 let cliPort: number | undefined;
 let host = '0.0.0.0';
 const dirArgs: string[] = [];
-const API_KEY = process.env.ZENITH_MCP_API_KEY || process.env.MCP_BRIDGE_API_KEY || process.env.COMMANDER_API_KEY;
-
-if (!API_KEY) {
-    console.error('FATAL: ZENITH_MCP_API_KEY, MCP_BRIDGE_API_KEY, or COMMANDER_API_KEY must be set');
-    process.exit(1);
-}
-
 for (const arg of args) {
     if (arg.startsWith('--port=')) {
         const portStr = arg.slice('--port='.length);
@@ -88,6 +83,32 @@ for (const arg of args) {
 // Load config and resolve port: CLI --port flag overrides config value
 const config = loadConfig();
 const port = cliPort ?? config.port;
+
+// ---------------------------------------------------------------------------
+// OAuth configuration — WorkOS/AuthKit authorization server + MCP resource URL
+// ---------------------------------------------------------------------------
+const AUTHKIT_ISSUER = (process.env.WORKOS_AUTHKIT_ISSUER || process.env.AUTHKIT_ISSUER || '').replace(/\/$/, '');
+const PUBLIC_ORIGIN = (process.env.ZENITH_MCP_PUBLIC_ORIGIN || 'https://zenith-mcp.duckdns.org').replace(/\/$/, '');
+const OAUTH_MCP_PATH = '/oauth/mcp';
+const MCP_RESOURCE = process.env.ZENITH_MCP_RESOURCE || `${PUBLIC_ORIGIN}${OAUTH_MCP_PATH}`;
+const RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource';
+const AUTHORIZATION_SERVER_METADATA_PATH = '/.well-known/oauth-authorization-server';
+const RESOURCE_METADATA_URL = `${PUBLIC_ORIGIN}${RESOURCE_METADATA_PATH}`;
+
+const JWKS = AUTHKIT_ISSUER
+    ? createRemoteJWKSet(new URL(`${AUTHKIT_ISSUER}/oauth2/jwks`))
+    : null;
+
+const authRateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 3_000,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests' },
+    handler: (_req, res, _next, options) => {
+        res.status(options.statusCode).json(options.message);
+    },
+});
 
 // Resolve and validate the baseline allowed directories from CLI args.
 // Each HTTP session gets its OWN copy of these as the starting point;
@@ -107,6 +128,7 @@ interface StreamableSession {
     server: McpServer;
     ctx: FilesystemContext;
     lastSeenAt: number;
+    owner: string;
 }
 interface SSESession {
     type: 'sse';
@@ -114,6 +136,7 @@ interface SSESession {
     server: McpServer;
     ctx: FilesystemContext;
     lastSeenAt: number;
+    owner: string;
 }
 type SessionEntry = StreamableSession | SSESession;
 const sessions = new Map<string, SessionEntry>();
@@ -273,43 +296,273 @@ function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
-function unauthorized(res: Response) {
-    return res.status(401).json({ error: 'Unauthorized' });
+function oauthChallenge(): string {
+    return [
+        'Bearer error="unauthorized"',
+        'error_description="Authorization needed"',
+        `resource_metadata="${RESOURCE_METADATA_URL}"`,
+    ].join(', ');
 }
 
-app.use((req: Request, res: Response, next: NextFunction) => {
-    const auth = req.headers.authorization;
-    if (!auth?.startsWith('Bearer ')) {
-        return unauthorized(res);
+function unauthorized(res: Response, message = 'Unauthorized'): void {
+    res
+        .set('WWW-Authenticate', oauthChallenge())
+        .status(401)
+        .json({ error: message });
+}
+
+async function requireOAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const match = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
+    const token = match?.[1];
+    if (!token) {
+        unauthorized(res, 'No bearer token provided.');
+        return;
     }
-    const token = auth.slice(7);
-    const tokenBuf = Buffer.from(token);
-    const keyBuf = Buffer.from(API_KEY);
-    if (tokenBuf.length !== keyBuf.length || !timingSafeEqual(tokenBuf, keyBuf)) {
-        return unauthorized(res);
+
+    if (!AUTHKIT_ISSUER || !JWKS) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
     }
-    next();
+
+    try {
+        const { payload } = await jwtVerify(token, JWKS, {
+            issuer: AUTHKIT_ISSUER,
+        });
+        // Store the verified principal (sub claim) for session owner verification
+        (req as any).principal = payload.sub;
+        next();
+    } catch (error) {
+        console.error('OAuth token verification failed:', error instanceof Error ? error.message : String(error));
+        unauthorized(res, 'Invalid bearer token.');
+    }
+}
+
+app.get('/', (_req, res) => {
+    res.json({
+        name: 'zenith-mcp',
+        status: 'ok',
+        mcp: `${PUBLIC_ORIGIN}/mcp`,
+        resource: MCP_RESOURCE,
+        oauthConfigured: Boolean(AUTHKIT_ISSUER),
+        authorizationServer: AUTHKIT_ISSUER || null,
+        resourceMetadata: RESOURCE_METADATA_URL,
+    });
+});
+
+app.get(RESOURCE_METADATA_PATH, (_req, res) => {
+    if (!AUTHKIT_ISSUER) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
+    }
+
+    res.json({
+        resource: MCP_RESOURCE,
+        authorization_servers: [AUTHKIT_ISSUER],
+        bearer_methods_supported: ['header'],
+        scopes_supported: ['openid', 'profile', 'email'],
+    });
+});
+
+app.get(AUTHORIZATION_SERVER_METADATA_PATH, async (_req, res) => {
+    if (!AUTHKIT_ISSUER) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
+    }
+
+    try {
+        const response = await fetch(`${AUTHKIT_ISSUER}${AUTHORIZATION_SERVER_METADATA_PATH}`, {
+            signal: AbortSignal.timeout(5000),
+        });
+        const body = await response.text();
+        res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body);
+    } catch (error) {
+        writeErrorLog('Failed to proxy OAuth authorization server metadata:', error);
+        res.status(502).json({ error: 'Failed to fetch authorization server metadata' });
+    }
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
     res.json({
         status: 'ok',
+        auth: AUTHKIT_ISSUER ? 'workos-authkit-oauth-additive' : 'oauth-not-configured',
+        issuer: AUTHKIT_ISSUER || null,
+        resource: MCP_RESOURCE,
         sessions: sessions.size,
         baselineDirs: baselineAllowedDirs.length,
         sessionTtlSeconds: SESSION_TTL_MS / 1000,
     });
 });
 
-// ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
-app.post('/mcp', async (req, res) => {
+// OAuth is additive, not global. Existing /mcp, /sse, and /messages routes stay
+// available for local/non-OAuth clients. Claude/WorkOS OAuth clients use /oauth/mcp.
+
+// ── OAuth Streamable HTTP: POST /oauth/mcp ────────────────────────────────────
+app.post(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
 
     // ── Existing session: forward the message ──
     if (sessionId) {
         const entry = sessions.get(sessionId as string);
         if (!entry || entry.type !== 'streamable') {
             res.status(400).json({ error: 'Unknown or mismatched session' });
+            return;
+        }
+        // Verify session owner matches current principal
+        if (entry.owner !== principal) {
+            res.status(403).json({ error: 'Session belongs to different user' });
+            return;
+        }
+        try {
+            entry.lastSeenAt = Date.now();
+            await entry.transport.handleRequest(req, res, req.body);
+        } catch (err) {
+            writeErrorLog(`[session:${(sessionId as string).slice(0, 8)}] OAuth POST error:`, err);
+            if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+        }
+        return;
+    }
+
+    // ── New session: must be an initialize request ──
+    if (!isInitializeRequest(req.body)) {
+        res.status(400).json({ error: 'First request must be an initialize request (no Mcp-Session-Id header)' });
+        return;
+    }
+
+    const { ctx, server } = createSessionPair();
+    const sid = randomUUID();
+    const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => sid,
+    });
+
+    transport.onclose = () => {
+        removeSession(sid);
+    };
+
+    await server.connect(transport);
+
+    sessions.set(sid, {
+        type: 'streamable',
+        transport,
+        server,
+        ctx,
+        lastSeenAt: Date.now(),
+        owner: principal,
+    });
+    console.error(`[session:${sid.slice(0, 8)}] opened (oauth streamable) owner=${principal}`);
+
+    try {
+        await transport.handleRequest(req, res, req.body);
+        if (transport.sessionId !== sid) {
+            removeSession(sid);
+            try { await transport.close(); } catch { /* already dead */ }
+        }
+    } catch (err) {
+        removeSession(sid);
+        try { await transport.close(); } catch { /* best effort — already closed */ }
+        writeErrorLog(`[session:${sid.slice(0, 8)}] OAuth initialize error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// ── OAuth Streamable HTTP: GET /oauth/mcp ─────────────────────────────────────
+app.get(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
+    if (!sessionId) {
+        res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
+        return;
+    }
+    const entry = sessions.get(sessionId as string);
+    if (!entry || entry.type !== 'streamable') {
+        res.status(400).json({ error: 'Unknown or mismatched session' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
+        return;
+    }
+    try {
+        entry.lastSeenAt = Date.now();
+        await entry.transport.handleRequest(req, res);
+    } catch (err) {
+        const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
+        writeErrorLog(`[session:${safeId}] OAuth GET error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// ── OAuth Streamable HTTP: DELETE /oauth/mcp ──────────────────────────────────
+app.delete(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
+    if (!sessionId) {
+        res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
+        return;
+    }
+    const entry = sessions.get(sessionId as string);
+    if (!entry || entry.type !== 'streamable') {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
+        return;
+    }
+    try {
+        await entry.transport.close();
+    } catch { /* already closed */ }
+    removeSession(sessionId as string);
+    res.status(200).json({ status: 'session closed' });
+});
+
+app.all(OAUTH_MCP_PATH, (_req, res) => {
+    res.status(405).set('Allow', 'GET, POST, DELETE').json({ error: 'Method not allowed' });
+});
+
+// ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
+app.post('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
+    // ── Existing session: forward the message ──
+    if (sessionId) {
+        const entry = sessions.get(sessionId as string);
+        if (!entry || entry.type !== 'streamable') {
+            res.status(400).json({ error: 'Unknown or mismatched session' });
+            return;
+        }
+        // Verify session owner matches current principal
+        if (entry.owner !== principal) {
+            res.status(403).json({ error: 'Session belongs to different user' });
             return;
         }
         try {
@@ -353,8 +606,9 @@ app.post('/mcp', async (req, res) => {
         server,
         ctx,
         lastSeenAt: Date.now(),
+        owner: principal,
     });
-    console.error(`[session:${sid.slice(0, 8)}] opened (streamable)`);
+    console.error(`[session:${sid.slice(0, 8)}] opened (streamable) owner=${principal}`);
 
     try {
         await transport.handleRequest(req, res, req.body);
@@ -375,8 +629,15 @@ app.post('/mcp', async (req, res) => {
 });
 
 // ── Streamable HTTP: GET /mcp (SSE notification stream) ───────────────────────
-app.get('/mcp', async (req, res) => {
+app.get('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -384,6 +645,11 @@ app.get('/mcp', async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(400).json({ error: 'Unknown or mismatched session' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -397,8 +663,15 @@ app.get('/mcp', async (req, res) => {
 });
 
 // ── Streamable HTTP: DELETE /mcp (session teardown) ───────────────────────────
-app.delete('/mcp', async (req, res) => {
+app.delete('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -406,6 +679,11 @@ app.delete('/mcp', async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -416,7 +694,14 @@ app.delete('/mcp', async (req, res) => {
 });
 
 // ── Legacy SSE: GET /sse ──────────────────────────────────────────────────────
-app.get('/sse', async (req, res) => {
+app.get('/sse', authRateLimiter, requireOAuth, async (req, res) => {
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     const { ctx, server } = createSessionPair();
     const prefix = sanitizeForwardedPrefix(req.headers['x-forwarded-prefix']);
     const messageEndpoint = prefix ? `${prefix}/messages` : '/messages';
@@ -424,8 +709,8 @@ app.get('/sse', async (req, res) => {
     const sid = transport.sessionId;
 
 
-    sessions.set(sid, { type: 'sse', transport, server, ctx, lastSeenAt: Date.now() });
-    console.error(`[session:${sid.slice(0, 8)}] opened (sse)`);
+    sessions.set(sid, { type: 'sse', transport, server, ctx, lastSeenAt: Date.now(), owner: principal });
+    console.error(`[session:${sid.slice(0, 8)}] opened (sse) owner=${principal}`);
 
     res.on('close', () => {
         try { transport.close(); } catch { /* best effort */ }
@@ -436,8 +721,15 @@ app.get('/sse', async (req, res) => {
 });
 
 // ── Legacy SSE: POST /messages ────────────────────────────────────────────────
-app.post('/messages', async (req, res) => {
+app.post('/messages', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.query['sessionId'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId || typeof sessionId !== 'string') {
         res.status(400).json({ error: 'Missing sessionId query parameter' });
         return;
@@ -449,6 +741,11 @@ app.post('/messages', async (req, res) => {
     }
     if (entry.type !== 'sse') {
         res.status(400).json({ error: 'Session is not an SSE session — do not mix transport types' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -472,6 +769,7 @@ app.all('/mcp', (_req, res) => {
 app.listen(port, host, () => {
     console.error(`Zenith-MCP HTTP Server listening on http://${host}:${port}`);
     console.error(`  Streamable HTTP: POST/GET/DELETE /mcp`);
+    console.error(`  OAuth HTTP:      POST/GET/DELETE ${OAUTH_MCP_PATH}`);
     console.error(`  Legacy SSE:      GET /sse  +  POST /messages`);
     console.error(`  Health:          GET /health`);
     if (baselineAllowedDirs.length > 0) {

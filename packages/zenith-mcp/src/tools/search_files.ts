@@ -3,16 +3,13 @@ import fs from "fs/promises";
 import path from "path";
 import { minimatch } from "minimatch";
 import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
-import { RipgrepResult } from '../core/shared.js';
-import { isSupported, getLangForFile, getDefinitions, getStructuralFingerprint, computeStructuralSimilarity, } from '../core/tree-sitter.js';
+import type { RipgrepResult } from '../core/shared.js';
+import { isSupported, getLangForFile, getDefinitions } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
-import { getDb, indexDirectory } from '../core/symbol-index.js';
-import { resolveProjectRoot } from '../utils/project-scope.js';
 import { ToolServer, ToolContext } from './types.js';
-import { findSymbolDetails, findSymbolDetailsScoped, findStructuralCandidates } from '../core/db-adapter.js';
 
 interface SearchFilesArgs {
-    mode: "content" | "files" | "symbol" | "structural" | "definition";
+    mode: "content" | "files" | "symbol" | "definition";
     path: string;
     maxResults?: number;
     contentQuery?: string;
@@ -27,7 +24,6 @@ interface SearchFilesArgs {
     includeMetadata?: boolean;
     symbolQuery?: string;
     symbolKind?: 'function' | 'class' | 'method' | 'interface' | 'type' | 'enum' | 'module' | 'any';
-    structuralQuery?: string;
     definesSymbol?: string;
 }
 
@@ -36,7 +32,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         title: "Search Files",
         description: "Search file contents, find files, or search symbols.",
         inputSchema: z.object({
-            mode: z.enum(["content", "files", "symbol", "structural", "definition"]).describe("Search mode."),
+            mode: z.enum(["content", "files", "symbol", "definition"]).describe("Search mode."),
             path: z.string().describe("Directory to search."),
             maxResults: z.number().optional().describe("Max results."),
             contentQuery: z.string().optional().describe("Text or regex."),
@@ -51,7 +47,6 @@ export function register(server: ToolServer, ctx: ToolContext) {
             includeMetadata: z.boolean().optional().describe("Include size and modified date."),
             symbolQuery: z.string().optional().describe("Substring to match symbol names."),
             symbolKind: z.enum(['function', 'class', 'method', 'interface', 'type', 'enum', 'module', 'any']).optional().describe("Filter by symbol kind."),
-            structuralQuery: z.string().optional().describe("Symbol name for structural similarity."),
             definesSymbol: z.string().optional().describe("Symbol to find."),
         }),
         annotations: { readOnlyHint: true }
@@ -209,101 +204,6 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: "text" as const, text }] };
             }
         }
-        // ---- STRUCTURAL SIMILARITY MODE ----
-        if (args.mode === "structural") {
-            const repoRoot = resolveProjectRoot(rootPath, {
-                allowedDirectories: ctx.getAllowedDirectories(),
-                noCache: true,
-            }) ?? rootPath;
-            const db = getDb(repoRoot);
-            await indexDirectory(db, repoRoot, rootPath, { maxFiles: 2000 });
-            const scopePrefix = path.relative(repoRoot, rootPath);
-            const qRows = scopePrefix
-                ? findSymbolDetailsScoped(db, args.structuralQuery!, 'def', `${scopePrefix}%`)
-                : findSymbolDetails(db, args.structuralQuery!, 'def');
-            if (qRows.length === 0) {
-                return { content: [{ type: 'text' as const, text: `Symbol "${args.structuralQuery}" not found in index.` }] };
-            }
-            if (qRows.length > 1) {
-                const candidates = qRows.map((r: { file_path: string; line: number }, i: number) => `${String.fromCharCode(97 + i)}) ${r.file_path}:${r.line}`);
-                return { content: [{ type: 'text' as const, text: `Multiple definitions for "${args.structuralQuery}":\n${candidates.join('\n')}\nNarrow with path.` }] };
-            }
-            const qRow = qRows[0];
-            if (qRow === undefined) {
-                return { content: [{ type: 'text' as const, text: `Symbol "${args.structuralQuery}" not found in index.` }] };
-            }
-            const qAbsPath = path.resolve(repoRoot, qRow.file_path);
-            const qLang = getLangForFile(qAbsPath);
-            if (!qLang) {
-                return { content: [{ type: 'text' as const, text: 'Unsupported language.' }] };
-            }
-            let qSource;
-            try {
-                qSource = await fs.readFile(qAbsPath, 'utf-8');
-            }
-            catch { 
-                return { content: [{ type: 'text' as const, text: 'Could not read source file.' }] };
-            }
-            const queryFp = await getStructuralFingerprint(qSource, qLang, qRow.line, qRow.end_line);
-            if (!queryFp || queryFp.length === 0) {
-                return { content: [{ type: 'text' as const, text: 'Could not compute fingerprint.' }] };
-            }
-            const candType = (args.symbolKind && args.symbolKind !== 'any') ? args.symbolKind : (qRow.type || null);
-            const candOpts: { type?: string; filePrefix?: string } = {};
-            if (candType) {
-                candOpts.type = candType;
-            }
-            if (scopePrefix) {
-                candOpts.filePrefix = `${scopePrefix}%`;
-            }
-            const candidates = findStructuralCandidates(db, candOpts);
-            const userMax = Math.min(50, args.maxResults ?? 20);
-            const matches: Array<{ name: string; filePath: string; line: number; score: number }> = [];
-            const fileCache = new Map<string, string | null>();
-            let charCount = 0;
-            for (const cand of candidates) {
-                if (cand.name === args.structuralQuery && cand.file_path === qRow.file_path)
-                    continue;
-                const absPath = path.resolve(repoRoot, cand.file_path); 
-                const lang = getLangForFile(absPath);
-                if (!lang)
-                    continue;
-                let src = fileCache.get(absPath);
-                if (src === undefined) {
-                    try {
-                        src = await fs.readFile(absPath, 'utf-8');
-                    }
-                    catch {
-                        src = null;
-                    } 
-                    fileCache.set(absPath, src);
-                }
-                if (!src)
-                    continue;
-                const fp = await getStructuralFingerprint(src, lang, cand.line, cand.end_line);
-                if (!fp || fp.length === 0)
-                    continue;
-                const score = computeStructuralSimilarity(queryFp, fp);
-                if (score >= 0.5) {
-                    matches.push({ name: cand.name, filePath: cand.file_path, line: cand.line, score });
-                }
-            }
-            matches.sort((a, b) => b.score - a.score);
-            const top = matches.slice(0, userMax);
-            if (top.length === 0) {
-                return { content: [{ type: 'text' as const, text: 'No structurally similar symbols found.' }] };
-            }
-            const outLines: string[] = [];
-            charCount = 0;
-            for (const r of top) {
-                const line = `${r.filePath}:${r.line}  [${(r.score * 100).toFixed(0)}%] ${r.name}`;
-                if (charCount + line.length + 1 > getCharBudget())
-                    break;
-                outLines.push(line);
-                charCount += line.length + 1;
-            }
-            return { content: [{ type: 'text' as const, text: outLines.join('\n') }] };
-        }
         // ---- DEFINITION MODE (find files defining a symbol) ----
         if (args.mode === "definition") {
             const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 100));
@@ -325,9 +225,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     rawResults = results;
             }
             if (rawResults.length === 0) {
-                const nameRegex = args.namePattern
-                    ? new RegExp(args.namePattern.replace(/\\/g, '\\\\').replace(/\./g, '\\.').replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
-                    : null;
+            const nameRegex = args.namePattern
+                    ? new RegExp(args.namePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*').replace(/\\\?/g, '.'), 'i')
+                : null;
                 async function walk(dir: string) {
                     if (rawResults.length >= userMaxResults * 5)
                         return;
@@ -355,7 +255,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             }
                             await walk(fullPath);
                         }
-                        else {
+                        else if (entry.isFile()) {
                             const nameMatch = !nameRegex || nameRegex.test(entry.name);
                             const pathMatch = !args.pathContains || fullPath.toLowerCase().includes(args.pathContains.toLowerCase());
                             if (nameMatch && pathMatch)
@@ -440,12 +340,24 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: "text" as const, text: 'No matches.' }] };
             }
             const outputLines: string[] = [];
-            for (const { filePath, matches } of symbolMatches.slice(0, userMaxResults)) {
+            for (const { filePath, matches } of symbolMatches) {
                 for (const sym of matches) {
+                    if (outputLines.length >= userMaxResults)
+                        break;
                     outputLines.push(`${filePath}:${sym.line}  [${sym.type}] ${sym.name} (lines ${sym.line}-${sym.endLine})`);
                 }
+                if (outputLines.length >= userMaxResults)
+                    break;
             }
-            return { content: [{ type: "text" as const, text: outputLines.join('\n') }] };
+            const budgetLines: string[] = [];
+            let charCount = 0;
+            for (const line of outputLines) {
+                if (charCount + line.length + 1 > getCharBudget())
+                    break;
+                budgetLines.push(line);
+                charCount += line.length + 1;
+            }
+            return { content: [{ type: "text" as const, text: budgetLines.join('\n') }] };
         }
         // ---- FILES MODE ----
         if (args.mode === "files") {
@@ -469,9 +381,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     rawResults = results;
             }
             if (rawResults.length === 0) {
-                const nameRegex = args.namePattern
-                    ? new RegExp(args.namePattern.replace(/\\/g, '\\\\').replace(/\./g, '\\.').replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
-                    : null;
+            const nameRegex = args.namePattern
+                ? new RegExp(args.namePattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
+                : null;
                 async function walk(dir: string) {
                     if (rawResults.length >= userMaxResults)
                         return;
@@ -521,7 +433,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (args.includeMetadata && rawResults.length > 0) {
                 outputLines = await Promise.all(rawResults.map(async (filePath) => {
                     try {
-                        const stat = await fs.stat(filePath); 
+                        const validPath = await ctx.validatePath(filePath);
+                        const stat = await fs.stat(validPath); 
                         const sizeKB = (stat.size / 1024).toFixed(1);
                         const modified = stat.mtime.toISOString().slice(0, 10);
                         return `${filePath}  (${sizeKB}KB, ${modified})`;
