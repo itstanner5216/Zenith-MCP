@@ -16,6 +16,8 @@
 
 import { randomUUID } from 'node:crypto';
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 // Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
 //         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
 //         The stdio entrypoint uses v2 (see src/cli/stdio.ts), while the tool
@@ -80,6 +82,21 @@ for (const arg of args) {
 // Load config and resolve port: CLI --port flag overrides config value
 const config = loadConfig();
 const port = cliPort ?? config.port;
+
+// ---------------------------------------------------------------------------
+// OAuth configuration — WorkOS/AuthKit authorization server + MCP resource URL
+// ---------------------------------------------------------------------------
+const AUTHKIT_ISSUER = (process.env.WORKOS_AUTHKIT_ISSUER || process.env.AUTHKIT_ISSUER || '').replace(/\/$/, '');
+const PUBLIC_ORIGIN = (process.env.ZENITH_MCP_PUBLIC_ORIGIN || 'https://zenith-mcp.duckdns.org').replace(/\/$/, '');
+const OAUTH_MCP_PATH = '/oauth/mcp';
+const MCP_RESOURCE = process.env.ZENITH_MCP_RESOURCE || `${PUBLIC_ORIGIN}${OAUTH_MCP_PATH}`;
+const RESOURCE_METADATA_PATH = '/.well-known/oauth-protected-resource';
+const AUTHORIZATION_SERVER_METADATA_PATH = '/.well-known/oauth-authorization-server';
+const RESOURCE_METADATA_URL = `${PUBLIC_ORIGIN}${RESOURCE_METADATA_PATH}`;
+
+const JWKS = AUTHKIT_ISSUER
+    ? createRemoteJWKSet(new URL(`${AUTHKIT_ISSUER}/oauth2/jwks`))
+    : null;
 
 // Resolve and validate the baseline allowed directories from CLI args.
 // Each HTTP session gets its OWN copy of these as the starting point;
@@ -265,19 +282,212 @@ function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
-console.error(
-    'WARNING: HTTP auth is currently disabled. ' +
-    'Only expose this server on trusted localhost/private networks until WorkOS OAuth is enabled.',
-);
+function oauthChallenge(): string {
+    return [
+        'Bearer error="unauthorized"',
+        'error_description="Authorization needed"',
+        `resource_metadata="${RESOURCE_METADATA_URL}"`,
+    ].join(', ');
+}
+
+function unauthorized(res: Response, message = 'Unauthorized'): void {
+    res
+        .set('WWW-Authenticate', oauthChallenge())
+        .status(401)
+        .json({ error: message });
+}
+
+async function requireOAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const match = req.headers.authorization?.match(/^Bearer\s+(.+)$/i);
+    const token = match?.[1];
+    if (!token) {
+        unauthorized(res, 'No bearer token provided.');
+        return;
+    }
+
+    if (!AUTHKIT_ISSUER || !JWKS) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
+    }
+
+    try {
+        await jwtVerify(token, JWKS, {
+            issuer: AUTHKIT_ISSUER,
+            audience: MCP_RESOURCE,
+        });
+        next();
+    } catch (error) {
+        console.error('OAuth token verification failed:', error instanceof Error ? error.message : String(error));
+        unauthorized(res, 'Invalid bearer token.');
+    }
+}
+
+app.get('/', (_req, res) => {
+    res.json({
+        name: 'zenith-mcp',
+        status: 'ok',
+        mcp: `${PUBLIC_ORIGIN}/mcp`,
+        resource: MCP_RESOURCE,
+        oauthConfigured: Boolean(AUTHKIT_ISSUER),
+        authorizationServer: AUTHKIT_ISSUER || null,
+        resourceMetadata: RESOURCE_METADATA_URL,
+    });
+});
+
+app.get(RESOURCE_METADATA_PATH, (_req, res) => {
+    if (!AUTHKIT_ISSUER) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
+    }
+
+    res.json({
+        resource: MCP_RESOURCE,
+        authorization_servers: [AUTHKIT_ISSUER],
+        bearer_methods_supported: ['header'],
+        scopes_supported: ['openid', 'profile', 'email'],
+    });
+});
+
+app.get(AUTHORIZATION_SERVER_METADATA_PATH, async (_req, res) => {
+    if (!AUTHKIT_ISSUER) {
+        res.status(503).json({ error: 'OAuth is not configured. Set WORKOS_AUTHKIT_ISSUER.' });
+        return;
+    }
+
+    try {
+        const response = await fetch(`${AUTHKIT_ISSUER}${AUTHORIZATION_SERVER_METADATA_PATH}`);
+        const body = await response.text();
+        res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body);
+    } catch (error) {
+        writeErrorLog('Failed to proxy OAuth authorization server metadata:', error);
+        res.status(502).json({ error: 'Failed to fetch authorization server metadata' });
+    }
+});
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
     res.json({
         status: 'ok',
+        auth: AUTHKIT_ISSUER ? 'workos-authkit-oauth-additive' : 'oauth-not-configured',
+        issuer: AUTHKIT_ISSUER || null,
+        resource: MCP_RESOURCE,
         sessions: sessions.size,
         baselineDirs: baselineAllowedDirs.length,
         sessionTtlSeconds: SESSION_TTL_MS / 1000,
     });
+});
+
+// OAuth is additive, not global. Existing /mcp, /sse, and /messages routes stay
+// available for local/non-OAuth clients. Claude/WorkOS OAuth clients use /oauth/mcp.
+
+// ── OAuth Streamable HTTP: POST /oauth/mcp ────────────────────────────────────
+app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+
+    // ── Existing session: forward the message ──
+    if (sessionId) {
+        const entry = sessions.get(sessionId as string);
+        if (!entry || entry.type !== 'streamable') {
+            res.status(400).json({ error: 'Unknown or mismatched session' });
+            return;
+        }
+        try {
+            entry.lastSeenAt = Date.now();
+            await entry.transport.handleRequest(req, res, req.body);
+        } catch (err) {
+            writeErrorLog(`[session:${(sessionId as string).slice(0, 8)}] OAuth POST error:`, err);
+            if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+        }
+        return;
+    }
+
+    // ── New session: must be an initialize request ──
+    if (!isInitializeRequest(req.body)) {
+        res.status(400).json({ error: 'First request must be an initialize request (no Mcp-Session-Id header)' });
+        return;
+    }
+
+    const { ctx, server } = createSessionPair();
+    const sid = randomUUID();
+    const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => sid,
+    });
+
+    transport.onclose = () => {
+        removeSession(sid);
+    };
+
+    await server.connect(transport);
+
+    sessions.set(sid, {
+        type: 'streamable',
+        transport,
+        server,
+        ctx,
+        lastSeenAt: Date.now(),
+    });
+    console.error(`[session:${sid.slice(0, 8)}] opened (oauth streamable)`);
+
+    try {
+        await transport.handleRequest(req, res, req.body);
+        if (transport.sessionId !== sid) {
+            removeSession(sid);
+            try { await transport.close(); } catch { /* already dead */ }
+        }
+    } catch (err) {
+        removeSession(sid);
+        try { await transport.close(); } catch { /* best effort — already closed */ }
+        writeErrorLog(`[session:${sid.slice(0, 8)}] OAuth initialize error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// ── OAuth Streamable HTTP: GET /oauth/mcp ─────────────────────────────────────
+app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId) {
+        res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
+        return;
+    }
+    const entry = sessions.get(sessionId as string);
+    if (!entry || entry.type !== 'streamable') {
+        res.status(400).json({ error: 'Unknown or mismatched session' });
+        return;
+    }
+    try {
+        entry.lastSeenAt = Date.now();
+        await entry.transport.handleRequest(req, res);
+    } catch (err) {
+        const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
+        writeErrorLog(`[session:${safeId}] OAuth GET error:`, err);
+        if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// ── OAuth Streamable HTTP: DELETE /oauth/mcp ──────────────────────────────────
+app.delete(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId) {
+        res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
+        return;
+    }
+    const entry = sessions.get(sessionId as string);
+    if (!entry || entry.type !== 'streamable') {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    try {
+        await entry.transport.close();
+    } catch { /* already closed */ }
+    removeSession(sessionId as string);
+    res.status(200).json({ status: 'session closed' });
+});
+
+app.all(OAUTH_MCP_PATH, (_req, res) => {
+    res.status(405).set('Allow', 'GET, POST, DELETE').json({ error: 'Method not allowed' });
 });
 
 // ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
@@ -451,6 +661,7 @@ app.all('/mcp', (_req, res) => {
 app.listen(port, host, () => {
     console.error(`Zenith-MCP HTTP Server listening on http://${host}:${port}`);
     console.error(`  Streamable HTTP: POST/GET/DELETE /mcp`);
+    console.error(`  OAuth HTTP:      POST/GET/DELETE ${OAUTH_MCP_PATH}`);
     console.error(`  Legacy SSE:      GET /sse  +  POST /messages`);
     console.error(`  Health:          GET /health`);
     if (baselineAllowedDirs.length > 0) {

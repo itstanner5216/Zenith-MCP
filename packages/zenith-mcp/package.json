@@ -48,6 +48,7 @@
     "json-schema-typed": "^8.0.2",
     "json5": "^2.2.3",
     "jsonc-parser": "^3.3.1",
+    "jose": "^6.1.3",
     "minimatch": "^10.0.1",
     "web-tree-sitter": "^0.26.8",
     "workos": "^0.15.2",

@@ -6,7 +6,6 @@ import { createInterface } from 'readline';
 import { createTwoFilesPatch } from 'diff';
 import { minimatch } from 'minimatch';
 import { normalizePath, expandHome } from './path-utils.js';
-import { isPathWithinAllowedDirectories } from './path-validation.js';
 
 function hasCode(e: unknown): e is { code: string } {
     return typeof e === 'object' && e !== null && 'code' in e && typeof (e as Record<string, unknown>).code === 'string';
@@ -37,33 +36,20 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         const absolute = path.isAbsolute(expandedPath)
             ? path.resolve(expandedPath)
             : path.resolve(process.cwd(), expandedPath);
-        const normalizedRequested = normalizePath(absolute);
+        normalizePath(absolute);
 
-        // When no allowed directories are configured, operate in open mode.
-        // The sandbox is opt-in — if no boundary is defined, don't enforce one.
-        if (_allowedDirectories.length > 0) {
-            const isAllowed = isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories);
-            if (!isAllowed) {
-                throw new Error(`Access denied - path outside allowed directories: ${absolute} not in ${_allowedDirectories.join(', ')}`);
-            }
-        }
-
+        // Zenith is intentionally not a sandbox. MCP roots / CLI directories are kept
+        // as project-context hints only; they must never block filesystem access.
         try {
             const realPath = await fs.realpath(absolute);
-            const normalizedReal = normalizePath(realPath);
-            if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedReal, _allowedDirectories)) {
-                throw new Error(`Access denied - symlink target outside allowed directories: ${realPath} not in ${_allowedDirectories.join(', ')}`);
-            }
+            normalizePath(realPath);
             return realPath;
         } catch (error: unknown) {
             if (hasCode(error) && error.code === 'ENOENT') {
                 const parentDir = path.dirname(absolute);
                 try {
                     const realParentPath = await fs.realpath(parentDir);
-                    const normalizedParent = normalizePath(realParentPath);
-                    if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedParent, _allowedDirectories)) {
-                        throw new Error(`Access denied - parent directory outside allowed directories: ${realParentPath} not in ${_allowedDirectories.join(', ')}`);
-                    }
+                    normalizePath(realParentPath);
                     return absolute;
                 } catch (parentError) {
                     // Re-throw access-denied and other non-filesystem errors unchanged.
@@ -99,15 +85,9 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         const absolute = path.isAbsolute(expandedPath)
             ? path.resolve(expandedPath)
             : path.resolve(process.cwd(), expandedPath);
-        const normalizedRequested = normalizePath(absolute);
-        if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedRequested, _allowedDirectories)) {
-            throw new Error('Access denied — path is outside allowed directories.');
-        }
+        normalizePath(absolute);
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
-        const normalizedAncestor = normalizePath(realAncestor);
-        if (_allowedDirectories.length > 0 && !isPathWithinAllowedDirectories(normalizedAncestor, _allowedDirectories)) {
-            throw new Error('Access denied — resolved path is outside allowed directories.');
-        }
+        normalizePath(realAncestor);
         return missingSegments.reduce(
             (currentPath, segment) => path.join(currentPath, segment),
             realAncestor,
@@ -427,16 +407,13 @@ export async function offsetReadFile(filePath: string, offset: number, length: n
 }
 
 export async function searchFilesWithValidation(rootPath: string, pattern: string, allowedDirectories: string[], options: { excludePatterns?: string[] } = {}) {
+    void allowedDirectories;
     const { excludePatterns = [] } = options;
     const results: string[] = [];
     async function search(currentPath: string) {
         const entries = await fs.readdir(currentPath, { withFileTypes: true });
         for (const entry of entries) {
             const fullPath = path.join(currentPath, entry.name);
-            const normalizedFull = normalizePath(path.resolve(fullPath));
-            if (!isPathWithinAllowedDirectories(normalizedFull, allowedDirectories)) {
-                continue;
-            }
             const relativePath = path.relative(rootPath, fullPath);
             const shouldExclude = excludePatterns.some(excludePattern => minimatch(relativePath, excludePattern, { dot: true }));
             if (shouldExclude) continue;
