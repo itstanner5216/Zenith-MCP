@@ -3,11 +3,9 @@ import fs from "fs/promises";
 import path from "path";
 import { minimatch } from "minimatch";
 import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
-import { RipgrepResult } from '../core/shared.js';
+import type { RipgrepResult } from '../core/shared.js';
 import { isSupported, getLangForFile, getDefinitions } from '../core/tree-sitter.js';
 import type { SymbolFilterOptions } from '../core/tree-sitter.js';
-import { getDb, indexDirectory } from '../core/symbol-index.js';
-import { resolveProjectRoot } from '../utils/project-scope.js';
 import { ToolServer, ToolContext } from './types.js';
 
 interface SearchFilesArgs {
@@ -206,6 +204,267 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: "text" as const, text }] };
             }
         }
+        // ---- DEFINITION MODE (find files defining a symbol) ----
+        if (args.mode === "definition") {
+            const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 100));
+            const hasRg = await ripgrepAvailable();
+            let rawResults: string[] = [];
+            if (hasRg) {
+                const extGlobs = args.extensions?.length ? args.extensions.map((e: string) => `*${e}`) : null;
+                const singleExtGlob = (extGlobs?.length === 1 && !args.namePattern) ? extGlobs[0] : undefined;
+                const effectivePattern: string | null = singleExtGlob !== undefined
+                    ? singleExtGlob
+                    : (args.namePattern || null);
+                const results = await ripgrepFindFiles(rootPath, {
+                    namePattern: effectivePattern,
+                    pathContains: args.pathContains || null,
+                    maxResults: Math.min(userMaxResults * 5, 2000),
+                    excludePatterns: defaultExcludeGlobs,
+                });
+                if (results !== null)
+                    rawResults = results;
+            }
+            if (rawResults.length === 0) {
+            const nameRegex = args.namePattern
+                    ? new RegExp(args.namePattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.*').replace(/\\\?/g, '.'), 'i')
+                : null;
+                async function walk(dir: string) {
+                    if (rawResults.length >= userMaxResults * 5)
+                        return;
+                    let entries;
+                    try {
+                        entries = await fs.readdir(dir, { withFileTypes: true });
+                    }
+                    catch {
+                        return;
+                    } 
+                    for (const entry of entries) {
+                        if (rawResults.length >= userMaxResults * 5)
+                            return;
+                        const fullPath = path.join(dir, entry.name); 
+                        if (getDefaultExcludes().some(p => entry.name === p))
+                            continue;
+                        if (isSensitive(fullPath))
+                            continue;
+                        if (entry.isDirectory()) {
+                            try {
+                                await ctx.validatePath(fullPath);
+                            }
+                            catch {
+                                continue;
+                            }
+                            await walk(fullPath);
+                        }
+                        else if (entry.isFile()) {
+                            const nameMatch = !nameRegex || nameRegex.test(entry.name);
+                            const pathMatch = !args.pathContains || fullPath.toLowerCase().includes(args.pathContains.toLowerCase());
+                            if (nameMatch && pathMatch)
+                                rawResults.push(fullPath);
+                        }
+                    }
+                }
+                await walk(rootPath);
+            }
+            if (args.extensions?.length) {
+                const extSet = new Set(args.extensions.map((e: string) => e.toLowerCase()));
+                rawResults = rawResults.filter(f => extSet.has(path.extname(f).toLowerCase()));
+            }
+            const supportedFiles = rawResults.filter(f => isSupported(f));
+            if (supportedFiles.length === 0) {
+                return { content: [{ type: "text" as const, text: 'No supported files found for symbol search.' }] };
+            }
+            const BATCH_SIZE = 50;
+            const MAX_FILE_SIZE = 512 * 1024;
+            if (!args.definesSymbol) {
+                throw new Error('definesSymbol is required for definition mode.');
+            }
+            const symbolName = args.definesSymbol;
+            interface DefinitionSymbol {
+                name: string;
+                type: string;
+                line: number;
+                endLine: number;
+            }
+            const symbolMatches: Array<{ filePath: string; matches: DefinitionSymbol[] }> = [];
+            for (let i = 0; i < supportedFiles.length; i += BATCH_SIZE) {
+                const batch = supportedFiles.slice(i, i + BATCH_SIZE);
+                const results = await Promise.all(batch.map(async (filePath) => {
+                    try {
+                        const stat = await fs.stat(filePath); 
+                        if (stat.size > MAX_FILE_SIZE || stat.size === 0)
+                            return null;
+                        const langName = getLangForFile(filePath);
+                        if (!langName)
+                            return null;
+                        const source = await fs.readFile(filePath, 'utf-8'); 
+                        const defs = await getDefinitions(source, langName);
+                        if (!defs)
+                            return null;
+                        const parts = symbolName.split('.');
+                        const targetName = parts[parts.length - 1];
+                        const parentNames = parts.slice(0, -1);
+                        let matches = defs.filter(d => d.name === targetName);
+                        if (matches.length === 0)
+                            return null;
+                        if (parentNames.length > 0) {
+                            matches = matches.filter(sym => {
+                                let current = sym;
+                                for (let pi = parentNames.length - 1; pi >= 0; pi--) {
+                                    const parent = defs.find(d => d.name === parentNames[pi] &&
+                                        d.line <= current.line &&
+                                        d.endLine >= current.endLine &&
+                                        d !== current);
+                                    if (!parent)
+                                        return false;
+                                    current = parent;
+                                }
+                                return true;
+                            });
+                            if (matches.length === 0)
+                                return null;
+                        }
+                        return { filePath, matches };
+                    }
+                    catch {
+                        return null;
+                    }
+                }));
+                for (const result of results) {
+                    if (result)
+                        symbolMatches.push(result);
+                }
+                if (symbolMatches.length >= userMaxResults)
+                    break;
+            }
+            if (symbolMatches.length === 0) {
+                return { content: [{ type: "text" as const, text: 'No matches.' }] };
+            }
+            const outputLines: string[] = [];
+            for (const { filePath, matches } of symbolMatches) {
+                for (const sym of matches) {
+                    if (outputLines.length >= userMaxResults)
+                        break;
+                    outputLines.push(`${filePath}:${sym.line}  [${sym.type}] ${sym.name} (lines ${sym.line}-${sym.endLine})`);
+                }
+                if (outputLines.length >= userMaxResults)
+                    break;
+            }
+            const budgetLines: string[] = [];
+            let charCount = 0;
+            for (const line of outputLines) {
+                if (charCount + line.length + 1 > getCharBudget())
+                    break;
+                budgetLines.push(line);
+                charCount += line.length + 1;
+            }
+            return { content: [{ type: "text" as const, text: budgetLines.join('\n') }] };
+        }
+        // ---- FILES MODE ----
+        if (args.mode === "files") {
+            const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 100));
+            const hasRg = await ripgrepAvailable();
+            let rawResults: string[] = [];
+            if (hasRg) {
+                const extGlobs = args.extensions?.length ? args.extensions.map((e: string) => `*${e}`) : null;
+                const singleExtGlob = (extGlobs?.length === 1 && !args.namePattern) ? extGlobs[0] : undefined;
+                const fallbackPattern: string | null = singleExtGlob !== undefined
+                    ? singleExtGlob
+                    : (args.namePattern || null);
+                const effectivePattern: string | null = args.pattern || fallbackPattern;
+                const results = await ripgrepFindFiles(rootPath, {
+                    namePattern: effectivePattern,
+                    pathContains: args.pathContains || null,
+                    maxResults: Math.min(userMaxResults * 2, 2000),
+                    excludePatterns: defaultExcludeGlobs,
+                });
+                if (results !== null)
+                    rawResults = results;
+            }
+            if (rawResults.length === 0) {
+            const nameRegex = args.namePattern
+                ? new RegExp(args.namePattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.'), 'i')
+                : null;
+                async function walk(dir: string) {
+                    if (rawResults.length >= userMaxResults)
+                        return;
+                    let entries;
+                    try {
+                        entries = await fs.readdir(dir, { withFileTypes: true });
+                    }
+                    catch {
+                        return;
+                    } 
+                    for (const entry of entries) {
+                        if (rawResults.length >= userMaxResults)
+                            return;
+                        const fullPath = path.join(dir, entry.name); 
+                        const rel = path.relative(rootPath, fullPath);
+                        if (getDefaultExcludes().some(p => entry.name === p))
+                            continue;
+                        if (isSensitive(fullPath))
+                            continue;
+                        if (entry.isDirectory()) {
+                            try {
+                                await ctx.validatePath(fullPath);
+                            }
+                            catch {
+                                continue;
+                            }
+                            await walk(fullPath);
+                        }
+                        else if (entry.isFile()) {
+                            const nameMatch = !nameRegex || nameRegex.test(entry.name);
+                            const patternMatch = !args.pattern || minimatch(rel, args.pattern, { dot: true });
+                            const pathMatch = !args.pathContains || fullPath.toLowerCase().includes(args.pathContains.toLowerCase());
+                            if (nameMatch && patternMatch && pathMatch)
+                                rawResults.push(fullPath);
+                        }
+                    }
+                }
+                await walk(rootPath);
+            }
+            if (args.extensions?.length) {
+                const extSet = new Set(args.extensions.map((e: string) => e.toLowerCase()));
+                rawResults = rawResults.filter(f => extSet.has(path.extname(f).toLowerCase()));
+            }
+            rawResults = rawResults.slice(0, userMaxResults);
+            rawResults.sort();
+            let outputLines: string[];
+            if (args.includeMetadata && rawResults.length > 0) {
+                outputLines = await Promise.all(rawResults.map(async (filePath) => {
+                    try {
+                        const validPath = await ctx.validatePath(filePath);
+                        const stat = await fs.stat(validPath); 
+                        const sizeKB = (stat.size / 1024).toFixed(1);
+                        const modified = stat.mtime.toISOString().slice(0, 10);
+                        return `${filePath}  (${sizeKB}KB, ${modified})`;
+                    }
+                    catch {
+                        return filePath;
+                    }
+                }));
+            }
+            else {
+                outputLines = rawResults;
+            }
+            const budgetLines: string[] = [];
+            let charCount = 0;
+            for (const line of outputLines) {
+                if (charCount + line.length + 1 > getCharBudget())
+                    break;
+                budgetLines.push(line);
+                charCount += line.length + 1;
+            }
+            const text = budgetLines.length > 0 ? budgetLines.join('\n') : 'No files found.';
+            return { content: [{ type: "text" as const, text }] };
+        }
+        // ---- CONTENT SEARCH MODE ----
+        if (!args.contentQuery) {
+            throw new Error('contentQuery required for content mode.');
+        }
+        const userMaxResults = Math.min(500, Math.max(1, args.maxResults ?? 50));
+        const contextLines = Math.max(0, args.contextLines ?? 0);
+        const allExcludes = defaultExcludeGlobs;
 
         // JS fallback only supports literal search — untrusted regex compilation is a ReDoS risk
         const hasRg = await ripgrepAvailable();

@@ -469,11 +469,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (group.length < 2)
                     continue;
                 const structs: (SymbolStructure | null)[] = [];
-                for (const occ of group) {
-                    let s: SymbolStructure | null = null;
-                    s = null;
-                    structs.push(s);
-                }
+                // TODO: Populate actual SymbolStructure from AST for each occurrence in group
                 const modal = findModal(structs);
                 if (!modal)
                     continue;
@@ -976,11 +972,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
             const structs: (SymbolStructure | null)[] = [];
-            for (const t of targets) {
-                let s: SymbolStructure | null = null;
-                s = null;
-                structs.push(s);
-            }
+            // TODO: Populate actual SymbolStructure from AST for each target
             {
                 const baseline = cachedPayload.modalStructure;
                 const modal = baseline || (targets.length >= 2 ? findModal(structs) : null);
