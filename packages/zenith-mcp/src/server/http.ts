@@ -116,6 +116,7 @@ interface StreamableSession {
     server: McpServer;
     ctx: FilesystemContext;
     lastSeenAt: number;
+    owner: string;
 }
 interface SSESession {
     type: 'sse';
@@ -123,6 +124,7 @@ interface SSESession {
     server: McpServer;
     ctx: FilesystemContext;
     lastSeenAt: number;
+    owner: string;
 }
 type SessionEntry = StreamableSession | SSESession;
 const sessions = new Map<string, SessionEntry>();
@@ -311,9 +313,11 @@ async function requireOAuth(req: Request, res: Response, next: NextFunction): Pr
     }
 
     try {
-        await jwtVerify(token, JWKS, {
+        const { payload } = await jwtVerify(token, JWKS, {
             issuer: AUTHKIT_ISSUER,
         });
+        // Store the verified principal (sub claim) for session owner verification
+        (req as any).principal = payload.sub;
         next();
     } catch (error) {
         console.error('OAuth token verification failed:', error instanceof Error ? error.message : String(error));
@@ -387,12 +391,23 @@ app.get('/health', (_req, res) => {
 // ── OAuth Streamable HTTP: POST /oauth/mcp ────────────────────────────────────
 app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
 
     // ── Existing session: forward the message ──
     if (sessionId) {
         const entry = sessions.get(sessionId as string);
         if (!entry || entry.type !== 'streamable') {
             res.status(400).json({ error: 'Unknown or mismatched session' });
+            return;
+        }
+        // Verify session owner matches current principal
+        if (entry.owner !== principal) {
+            res.status(403).json({ error: 'Session belongs to different user' });
             return;
         }
         try {
@@ -429,8 +444,9 @@ app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
         server,
         ctx,
         lastSeenAt: Date.now(),
+        owner: principal,
     });
-    console.error(`[session:${sid.slice(0, 8)}] opened (oauth streamable)`);
+    console.error(`[session:${sid.slice(0, 8)}] opened (oauth streamable) owner=${principal}`);
 
     try {
         await transport.handleRequest(req, res, req.body);
@@ -449,6 +465,13 @@ app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
 // ── OAuth Streamable HTTP: GET /oauth/mcp ─────────────────────────────────────
 app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -456,6 +479,11 @@ app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(400).json({ error: 'Unknown or mismatched session' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -471,6 +499,13 @@ app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
 // ── OAuth Streamable HTTP: DELETE /oauth/mcp ──────────────────────────────────
 app.delete(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -478,6 +513,11 @@ app.delete(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -494,12 +534,23 @@ app.all(OAUTH_MCP_PATH, (_req, res) => {
 // ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
 app.post('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
 
     // ── Existing session: forward the message ──
     if (sessionId) {
         const entry = sessions.get(sessionId as string);
         if (!entry || entry.type !== 'streamable') {
             res.status(400).json({ error: 'Unknown or mismatched session' });
+            return;
+        }
+        // Verify session owner matches current principal
+        if (entry.owner !== principal) {
+            res.status(403).json({ error: 'Session belongs to different user' });
             return;
         }
         try {
@@ -543,8 +594,9 @@ app.post('/mcp', requireOAuth, async (req, res) => {
         server,
         ctx,
         lastSeenAt: Date.now(),
+        owner: principal,
     });
-    console.error(`[session:${sid.slice(0, 8)}] opened (streamable)`);
+    console.error(`[session:${sid.slice(0, 8)}] opened (streamable) owner=${principal}`);
 
     try {
         await transport.handleRequest(req, res, req.body);
@@ -567,6 +619,13 @@ app.post('/mcp', requireOAuth, async (req, res) => {
 // ── Streamable HTTP: GET /mcp (SSE notification stream) ───────────────────────
 app.get('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -574,6 +633,11 @@ app.get('/mcp', requireOAuth, async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(400).json({ error: 'Unknown or mismatched session' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -589,6 +653,13 @@ app.get('/mcp', requireOAuth, async (req, res) => {
 // ── Streamable HTTP: DELETE /mcp (session teardown) ───────────────────────────
 app.delete('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
         return;
@@ -596,6 +667,11 @@ app.delete('/mcp', requireOAuth, async (req, res) => {
     const entry = sessions.get(sessionId as string);
     if (!entry || entry.type !== 'streamable') {
         res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {
@@ -607,6 +683,13 @@ app.delete('/mcp', requireOAuth, async (req, res) => {
 
 // ── Legacy SSE: GET /sse ──────────────────────────────────────────────────────
 app.get('/sse', requireOAuth, async (req, res) => {
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     const { ctx, server } = createSessionPair();
     const prefix = sanitizeForwardedPrefix(req.headers['x-forwarded-prefix']);
     const messageEndpoint = prefix ? `${prefix}/messages` : '/messages';
@@ -614,8 +697,8 @@ app.get('/sse', requireOAuth, async (req, res) => {
     const sid = transport.sessionId;
 
 
-    sessions.set(sid, { type: 'sse', transport, server, ctx, lastSeenAt: Date.now() });
-    console.error(`[session:${sid.slice(0, 8)}] opened (sse)`);
+    sessions.set(sid, { type: 'sse', transport, server, ctx, lastSeenAt: Date.now(), owner: principal });
+    console.error(`[session:${sid.slice(0, 8)}] opened (sse) owner=${principal}`);
 
     res.on('close', () => {
         try { transport.close(); } catch { /* best effort */ }
@@ -628,6 +711,13 @@ app.get('/sse', requireOAuth, async (req, res) => {
 // ── Legacy SSE: POST /messages ────────────────────────────────────────────────
 app.post('/messages', requireOAuth, async (req, res) => {
     const sessionId = req.query['sessionId'];
+    const principal = (req as any).principal as string | undefined;
+
+    if (!principal) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+    }
+
     if (!sessionId || typeof sessionId !== 'string') {
         res.status(400).json({ error: 'Missing sessionId query parameter' });
         return;
@@ -639,6 +729,11 @@ app.post('/messages', requireOAuth, async (req, res) => {
     }
     if (entry.type !== 'sse') {
         res.status(400).json({ error: 'Session is not an SSE session — do not mix transport types' });
+        return;
+    }
+    // Verify session owner matches current principal
+    if (entry.owner !== principal) {
+        res.status(403).json({ error: 'Session belongs to different user' });
         return;
     }
     try {

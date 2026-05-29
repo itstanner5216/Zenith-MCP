@@ -255,7 +255,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             }
                             await walk(fullPath);
                         }
-                        else {
+                        else if (entry.isFile()) {
                             const nameMatch = !nameRegex || nameRegex.test(entry.name);
                             const pathMatch = !args.pathContains || fullPath.toLowerCase().includes(args.pathContains.toLowerCase());
                             if (nameMatch && pathMatch)
