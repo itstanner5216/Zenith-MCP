@@ -345,7 +345,15 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     outputLines.push(`${filePath}:${sym.line}  [${sym.type}] ${sym.name} (lines ${sym.line}-${sym.endLine})`);
                 }
             }
-            return { content: [{ type: "text" as const, text: outputLines.join('\n') }] };
+            const budgetLines: string[] = [];
+            let charCount = 0;
+            for (const line of outputLines) {
+                if (charCount + line.length + 1 > getCharBudget())
+                    break;
+                budgetLines.push(line);
+                charCount += line.length + 1;
+            }
+            return { content: [{ type: "text" as const, text: budgetLines.join('\n') }] };
         }
         // ---- FILES MODE ----
         if (args.mode === "files") {
