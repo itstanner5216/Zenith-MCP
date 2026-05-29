@@ -14,9 +14,8 @@
 //   GET  /health       — Simple health check
 // ---------------------------------------------------------------------------
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
 // Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
 //         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
 //         The stdio entrypoint uses v2 (see src/cli/stdio.ts), while the tool
@@ -67,13 +66,6 @@ const args = process.argv.slice(2);
 let cliPort: number | undefined;
 let host = '0.0.0.0';
 const dirArgs: string[] = [];
-const API_KEY = process.env.ZENITH_MCP_API_KEY || process.env.MCP_BRIDGE_API_KEY || process.env.COMMANDER_API_KEY;
-
-if (!API_KEY) {
-    console.error('FATAL: ZENITH_MCP_API_KEY, MCP_BRIDGE_API_KEY, or COMMANDER_API_KEY must be set');
-    process.exit(1);
-}
-
 for (const arg of args) {
     if (arg.startsWith('--port=')) {
         const portStr = arg.slice('--port='.length);
@@ -273,23 +265,10 @@ function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
-function unauthorized(res: Response) {
-    return res.status(401).json({ error: 'Unauthorized' });
-}
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-    const auth = req.headers.authorization;
-    if (!auth?.startsWith('Bearer ')) {
-        return unauthorized(res);
-    }
-    const token = auth.slice(7);
-    const tokenBuf = Buffer.from(token);
-    const keyBuf = Buffer.from(API_KEY);
-    if (tokenBuf.length !== keyBuf.length || !timingSafeEqual(tokenBuf, keyBuf)) {
-        return unauthorized(res);
-    }
-    next();
-});
+console.error(
+    'WARNING: HTTP auth is currently disabled. ' +
+    'Only expose this server on trusted localhost/private networks until WorkOS OAuth is enabled.',
+);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
