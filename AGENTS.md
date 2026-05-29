@@ -361,7 +361,6 @@ Modes:
 - `content`
 - `files`
 - `symbol`
-- `structural`
 - `definition`
 
 Keep modes distinct. Do not make `content` return file metadata beyond what is needed for search hits.
