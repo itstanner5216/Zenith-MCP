@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 // Hybrid: HTTP entrypoint stays on v1 SDK because v2 has no drop-in replacement
 //         for the (req, res)-style StreamableHTTPServerTransport / SSEServerTransport.
@@ -97,6 +98,17 @@ const RESOURCE_METADATA_URL = `${PUBLIC_ORIGIN}${RESOURCE_METADATA_PATH}`;
 const JWKS = AUTHKIT_ISSUER
     ? createRemoteJWKSet(new URL(`${AUTHKIT_ISSUER}/oauth2/jwks`))
     : null;
+
+const authRateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 3_000,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests' },
+    handler: (_req, res, _next, options) => {
+        res.status(options.statusCode).json(options.message);
+    },
+});
 
 // Resolve and validate the baseline allowed directories from CLI args.
 // Each HTTP session gets its OWN copy of these as the starting point;
@@ -389,7 +401,7 @@ app.get('/health', (_req, res) => {
 // available for local/non-OAuth clients. Claude/WorkOS OAuth clients use /oauth/mcp.
 
 // ── OAuth Streamable HTTP: POST /oauth/mcp ────────────────────────────────────
-app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+app.post(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -463,7 +475,7 @@ app.post(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
 });
 
 // ── OAuth Streamable HTTP: GET /oauth/mcp ─────────────────────────────────────
-app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+app.get(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -497,7 +509,7 @@ app.get(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
 });
 
 // ── OAuth Streamable HTTP: DELETE /oauth/mcp ──────────────────────────────────
-app.delete(OAUTH_MCP_PATH, requireOAuth, async (req, res) => {
+app.delete(OAUTH_MCP_PATH, authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -532,7 +544,7 @@ app.all(OAUTH_MCP_PATH, (_req, res) => {
 });
 
 // ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
-app.post('/mcp', requireOAuth, async (req, res) => {
+app.post('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -617,7 +629,7 @@ app.post('/mcp', requireOAuth, async (req, res) => {
 });
 
 // ── Streamable HTTP: GET /mcp (SSE notification stream) ───────────────────────
-app.get('/mcp', requireOAuth, async (req, res) => {
+app.get('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -651,7 +663,7 @@ app.get('/mcp', requireOAuth, async (req, res) => {
 });
 
 // ── Streamable HTTP: DELETE /mcp (session teardown) ───────────────────────────
-app.delete('/mcp', requireOAuth, async (req, res) => {
+app.delete('/mcp', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     const principal = (req as any).principal as string | undefined;
 
@@ -682,7 +694,7 @@ app.delete('/mcp', requireOAuth, async (req, res) => {
 });
 
 // ── Legacy SSE: GET /sse ──────────────────────────────────────────────────────
-app.get('/sse', requireOAuth, async (req, res) => {
+app.get('/sse', authRateLimiter, requireOAuth, async (req, res) => {
     const principal = (req as any).principal as string | undefined;
 
     if (!principal) {
@@ -709,7 +721,7 @@ app.get('/sse', requireOAuth, async (req, res) => {
 });
 
 // ── Legacy SSE: POST /messages ────────────────────────────────────────────────
-app.post('/messages', requireOAuth, async (req, res) => {
+app.post('/messages', authRateLimiter, requireOAuth, async (req, res) => {
     const sessionId = req.query['sessionId'];
     const principal = (req as any).principal as string | undefined;
 
