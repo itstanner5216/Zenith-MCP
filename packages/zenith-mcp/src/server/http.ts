@@ -298,7 +298,7 @@ function unauthorized(res: Response, message = 'Unauthorized'): void {
 }
 
 async function requireOAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
-    const match = req.headers.authorization?.match(/^Bearer\s+(.+)$/i);
+    const match = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
     const token = match?.[1];
     if (!token) {
         unauthorized(res, 'No bearer token provided.');
