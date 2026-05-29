@@ -470,8 +470,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     continue;
                 const structs: (SymbolStructure | null)[] = [];
                 for (const _occ of group) {
+                    // TODO: Populate actual SymbolStructure from AST
                     const s: SymbolStructure | null = null;
-                    structs.push(s);
                 }
                 const modal = findModal(structs);
                 if (!modal)
