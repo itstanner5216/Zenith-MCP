@@ -976,8 +976,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // (single-symbol apply), fall back to comparing targets to each other.
             const structs: (SymbolStructure | null)[] = [];
             for (const _t of targets) {
+                // TODO: Populate actual SymbolStructure from AST
                 const s: SymbolStructure | null = null;
-                structs.push(s);
             }
             {
                 const baseline = cachedPayload.modalStructure;
