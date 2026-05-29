@@ -313,7 +313,6 @@ async function requireOAuth(req: Request, res: Response, next: NextFunction): Pr
     try {
         await jwtVerify(token, JWKS, {
             issuer: AUTHKIT_ISSUER,
-            audience: MCP_RESOURCE,
         });
         next();
     } catch (error) {
@@ -493,7 +492,7 @@ app.all(OAUTH_MCP_PATH, (_req, res) => {
 });
 
 // ── Streamable HTTP: POST /mcp ────────────────────────────────────────────────
-app.post('/mcp', async (req, res) => {
+app.post('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
 
     // ── Existing session: forward the message ──
@@ -566,7 +565,7 @@ app.post('/mcp', async (req, res) => {
 });
 
 // ── Streamable HTTP: GET /mcp (SSE notification stream) ───────────────────────
-app.get('/mcp', async (req, res) => {
+app.get('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
@@ -588,7 +587,7 @@ app.get('/mcp', async (req, res) => {
 });
 
 // ── Streamable HTTP: DELETE /mcp (session teardown) ───────────────────────────
-app.delete('/mcp', async (req, res) => {
+app.delete('/mcp', requireOAuth, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
     if (!sessionId) {
         res.status(400).json({ error: 'Missing Mcp-Session-Id header' });
@@ -607,7 +606,7 @@ app.delete('/mcp', async (req, res) => {
 });
 
 // ── Legacy SSE: GET /sse ──────────────────────────────────────────────────────
-app.get('/sse', async (req, res) => {
+app.get('/sse', requireOAuth, async (req, res) => {
     const { ctx, server } = createSessionPair();
     const prefix = sanitizeForwardedPrefix(req.headers['x-forwarded-prefix']);
     const messageEndpoint = prefix ? `${prefix}/messages` : '/messages';
@@ -627,7 +626,7 @@ app.get('/sse', async (req, res) => {
 });
 
 // ── Legacy SSE: POST /messages ────────────────────────────────────────────────
-app.post('/messages', async (req, res) => {
+app.post('/messages', requireOAuth, async (req, res) => {
     const sessionId = req.query['sessionId'];
     if (!sessionId || typeof sessionId !== 'string') {
         res.status(400).json({ error: 'Missing sessionId query parameter' });

@@ -35,53 +35,145 @@ async function main(): Promise<void> {
 function render(app: HTMLDivElement): void {
   const user = getUser();
 
-  if (user) {
-    // Authenticated state
-    app.innerHTML = `
-      <section id="center">
-        <div class="user-card">
-          ${user.profilePictureUrl ? `<img src="${user.profilePictureUrl}" alt="Profile" class="avatar" />` : '<div class="avatar-placeholder"></div>'}
-          <h1>Welcome, ${user.firstName || user.email}!</h1>
-          <p class="email">${user.email}</p>
-          ${'organizationId' in user && user.organizationId ? `<p class="org">Organization: ${user.organizationId}</p>` : ''}
-        </div>
-        <div class="actions">
-          <button id="sign-out" type="button" class="btn btn-secondary">Sign Out</button>
-        </div>
-        <div class="user-details">
-          <h2>User Details</h2>
-          <pre><code>${JSON.stringify(user, null, 2)}</code></pre>
-        </div>
-      </section>
-    `;
+  // Clear existing content
+  app.innerHTML = '';
 
-    // Attach sign out handler
-    document.getElementById('sign-out')?.addEventListener('click', () => {
+  if (user) {
+    // Authenticated state - build DOM programmatically
+    const section = document.createElement('section');
+    section.id = 'center';
+
+    // User card
+    const userCard = document.createElement('div');
+    userCard.className = 'user-card';
+
+    // Profile picture or placeholder - validate URL scheme
+    if (user.profilePictureUrl) {
+      try {
+        const url = new URL(user.profilePictureUrl);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+          const img = document.createElement('img');
+          img.setAttribute('src', user.profilePictureUrl);
+          img.setAttribute('alt', 'Profile');
+          img.className = 'avatar';
+          userCard.appendChild(img);
+        } else {
+          const placeholder = document.createElement('div');
+          placeholder.className = 'avatar-placeholder';
+          userCard.appendChild(placeholder);
+        }
+      } catch {
+        // Invalid URL - show placeholder
+        const placeholder = document.createElement('div');
+        placeholder.className = 'avatar-placeholder';
+        userCard.appendChild(placeholder);
+      }
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'avatar-placeholder';
+      userCard.appendChild(placeholder);
+    }
+
+    // Welcome heading
+    const h1 = document.createElement('h1');
+    h1.textContent = 'Welcome, ' + (user.firstName || user.email) + '!';
+    userCard.appendChild(h1);
+
+    // Email
+    const emailP = document.createElement('p');
+    emailP.className = 'email';
+    emailP.textContent = user.email;
+    userCard.appendChild(emailP);
+
+    // Organization (if available)
+    if ('organizationId' in user && user.organizationId) {
+      const orgP = document.createElement('p');
+      orgP.className = 'org';
+      orgP.textContent = 'Organization: ' + user.organizationId;
+      userCard.appendChild(orgP);
+    }
+
+    section.appendChild(userCard);
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const signOutBtn = document.createElement('button');
+    signOutBtn.id = 'sign-out';
+    signOutBtn.type = 'button';
+    signOutBtn.className = 'btn btn-secondary';
+    signOutBtn.textContent = 'Sign Out';
+    signOutBtn.addEventListener('click', () => {
       signOut();
     });
-  } else {
-    // Unauthenticated state
-    app.innerHTML = `
-      <section id="center">
-        <div class="hero-text">
-          <h1>WorkOS AuthKit Demo</h1>
-          <p>Vanilla JavaScript + TypeScript</p>
-        </div>
-        <div class="actions">
-          <button id="sign-in" type="button" class="btn btn-primary">Sign In</button>
-          <button id="sign-up" type="button" class="btn btn-secondary">Sign Up</button>
-        </div>
-      </section>
-    `;
+    actions.appendChild(signOutBtn);
 
-    // Attach sign in/up handlers (must be on user gesture)
-    document.getElementById('sign-in')?.addEventListener('click', async () => {
+    section.appendChild(actions);
+
+    // User details
+    const userDetails = document.createElement('div');
+    userDetails.className = 'user-details';
+
+    const h2 = document.createElement('h2');
+    h2.textContent = 'User Details';
+    userDetails.appendChild(h2);
+
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = JSON.stringify(user, null, 2);
+    pre.appendChild(code);
+    userDetails.appendChild(pre);
+
+    section.appendChild(userDetails);
+
+    app.appendChild(section);
+  } else {
+    // Unauthenticated state - build DOM programmatically
+    const section = document.createElement('section');
+    section.id = 'center';
+
+    // Hero text
+    const heroText = document.createElement('div');
+    heroText.className = 'hero-text';
+
+    const h1 = document.createElement('h1');
+    h1.textContent = 'WorkOS AuthKit Demo';
+    heroText.appendChild(h1);
+
+    const p = document.createElement('p');
+    p.textContent = 'Vanilla JavaScript + TypeScript';
+    heroText.appendChild(p);
+
+    section.appendChild(heroText);
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const signInBtn = document.createElement('button');
+    signInBtn.id = 'sign-in';
+    signInBtn.type = 'button';
+    signInBtn.className = 'btn btn-primary';
+    signInBtn.textContent = 'Sign In';
+    signInBtn.addEventListener('click', async () => {
       await signIn();
     });
+    actions.appendChild(signInBtn);
 
-    document.getElementById('sign-up')?.addEventListener('click', async () => {
+    const signUpBtn = document.createElement('button');
+    signUpBtn.id = 'sign-up';
+    signUpBtn.type = 'button';
+    signUpBtn.className = 'btn btn-secondary';
+    signUpBtn.textContent = 'Sign Up';
+    signUpBtn.addEventListener('click', async () => {
       await signUp();
     });
+    actions.appendChild(signUpBtn);
+
+    section.appendChild(actions);
+
+    app.appendChild(section);
   }
 }
 
