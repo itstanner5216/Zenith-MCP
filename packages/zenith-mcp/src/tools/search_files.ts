@@ -433,7 +433,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (args.includeMetadata && rawResults.length > 0) {
                 outputLines = await Promise.all(rawResults.map(async (filePath) => {
                     try {
-                        const stat = await fs.stat(filePath); 
+                        const validPath = await ctx.validatePath(filePath);
+                        const stat = await fs.stat(validPath); 
                         const sizeKB = (stat.size / 1024).toFixed(1);
                         const modified = stat.mtime.toISOString().slice(0, 10);
                         return `${filePath}  (${sizeKB}KB, ${modified})`;
