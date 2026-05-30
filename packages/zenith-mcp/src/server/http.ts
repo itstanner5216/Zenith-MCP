@@ -333,10 +333,7 @@ async function requireApiKey(req: Request, res: Response, next: NextFunction): P
     }
 
     try {
-        const result = await workos.apiKeys.validateApiKey({ value: token }) as unknown;
-        const apiKey =
-            (result as { apiKey?: { permissions?: string[] } }).apiKey ??
-            (result as { api_key?: { permissions?: string[] } }).api_key;
+        const { apiKey } = await workos.apiKeys.createValidation({ value: token });
 
         if (!apiKey) {
             res.status(401).json({ error: 'Invalid WorkOS API key.' });
