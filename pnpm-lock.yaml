@@ -61,6 +61,9 @@ importers:
       '@repomix/tree-sitter-wasms':
         specifier: ^0.1.17
         version: 0.1.17
+      '@workos-inc/node':
+        specifier: ^9.3.1
+        version: 9.3.1
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
@@ -472,6 +475,10 @@ packages:
   '@workos-inc/authkit-js@0.20.0':
     resolution: {integrity: sha512-8+sw8eH1+XCt3NDoIB2bKKbHvq1N7CVFJeyq1uVrUWG83GCIbNNrFwWrocVNfeQJyhKsVVuDpRcp03iSVsK5Gg==}
 
+  '@workos-inc/node@9.3.1':
+    resolution: {integrity: sha512-z6+V5lPAdEtJ2IklAsOUJWv5guihkMbtC8WHmLCKOJYLa/H0j9bRj/OmxTs7T+bzL2dhItxPRarhxlAAq/0jgQ==}
+    engines: {node: '>=22.11.0'}
+
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
@@ -656,6 +663,9 @@ packages:
   etag@1.8.1:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
+
+  eventemitter3@5.0.4:
+    resolution: {integrity: sha512-mlsTRyGaPBjPedk6Bvw+aqbsXDtoAyAzm5MO7JgU+yVRyMQ5O8bD4Kcci7BS85f93veegeCPkL8R4GLClnjLFw==}
 
   eventsource-parser@3.0.8:
     resolution: {integrity: sha512-70QWGkr4snxr0OXLRWsFLeRBIRPuQOvt4s8QYjmUlmlkyTZkRqS7EDVRZtzU3TiyDbXSzaOeF0XUKy8PchzukQ==}
@@ -1647,6 +1657,10 @@ snapshots:
 
   '@workos-inc/authkit-js@0.20.0': {}
 
+  '@workos-inc/node@9.3.1':
+    dependencies:
+      eventemitter3: 5.0.4
+
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
@@ -1802,6 +1816,8 @@ snapshots:
       '@types/estree': 1.0.9
 
   etag@1.8.1: {}
+
+  eventemitter3@5.0.4: {}
 
   eventsource-parser@3.0.8: {}
 
