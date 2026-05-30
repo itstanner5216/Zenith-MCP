@@ -21,3 +21,6 @@ yarn.lock
 *.tsbuildinfo
 .nyc_output/
 .env.local
+
+# Pi
+.pi
