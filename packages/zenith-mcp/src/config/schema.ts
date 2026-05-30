@@ -24,6 +24,7 @@ export interface ProjectEntry {
 
 export interface ZenithConfig {
   port: number;
+  sandbox: boolean;
   tools: Record<string, boolean>;
   projects: ProjectEntry[];
   auto_write: {
@@ -62,6 +63,7 @@ const DEFAULT_SENSITIVE_STR =
 
 export const DEFAULT_CONFIG: ZenithConfig = {
   port: 7000,
+  sandbox: false,
   tools: {},
   projects: [],
   auto_write: {
@@ -163,8 +165,9 @@ function blank(): RawEntry {
 export function configToRaw(config: ZenithConfig): RawConfig {
   const entries: RawEntry[] = [];
 
-  // Top-level port (no section header — it sits above all sections)
+  // Top-level port and sandbox (no section header — they sit above all sections)
   entries.push(kv("Port", config.port, String(config.port)));
+  entries.push(kv("Sandbox", config.sandbox, statusToStr(config.sandbox)));
   entries.push(blank());
 
   // ### Tools
@@ -309,6 +312,8 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
       if (key.toLowerCase() === "port") {
         const n = parseInt(raw_val, 10);
         if (!isNaN(n)) config.port = n;
+      } else if (key.toLowerCase() === "sandbox") {
+        config.sandbox = strToStatus(raw_val);
       }
       continue;
     }
