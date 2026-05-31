@@ -42,7 +42,6 @@ countOnly?: boolean
 contentQuery?: string
 pattern?: string (glob)
 pathContains?: string
-pathContains?: string
 extensions?: string[]
 namePattern?: string
 includeMetadata?: boolean
