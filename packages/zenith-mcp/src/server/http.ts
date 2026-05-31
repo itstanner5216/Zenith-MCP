@@ -86,10 +86,10 @@ const port = cliPort ?? config.port;
 // ---------------------------------------------------------------------------
 // API key authentication — simple Bearer token via ZENITH_API_KEY env var
 // ---------------------------------------------------------------------------
-const ZENITH_API_KEY = process.env.ZENITH_API_KEY || '';
+const ZENITH_API_KEY = process.env.ZENITH_API_KEY || process.env.ZENITH_MCP_API_KEY || '';
 if (!ZENITH_API_KEY) {
     console.error(
-        'FATAL: ZENITH_API_KEY environment variable is required for the HTTP transport.\n' +
+        'FATAL: ZENITH_API_KEY or ZENITH_MCP_API_KEY environment variable is required for the HTTP transport.\n' +
         'Set it to a secret string and pass it as a Bearer token in the Authorization header.',
     );
     process.exit(1);
