@@ -14,7 +14,7 @@
 //   GET  /health       — Simple health check
 // ---------------------------------------------------------------------------
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -293,15 +293,9 @@ app.use(express.json({ limit: '4mb' }));
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
     const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
     const provided = authMatch?.[1] ?? '';
-    const providedBuffer = Buffer.from(provided);
-    const expectedBuffer = Buffer.from(ZENITH_API_KEY);
-    // Pad/truncate to expectedBuffer.length so timingSafeEqual always runs,
-    // preventing length-based timing side-channels.
-    const candidate = Buffer.alloc(expectedBuffer.length);
-    providedBuffer.copy(candidate, 0, 0, expectedBuffer.length);
-    const lengthOk = providedBuffer.length === expectedBuffer.length;
-    const bytesOk = timingSafeEqual(candidate, expectedBuffer);
-    if (lengthOk && bytesOk) {
+    const providedDigest = createHash('sha256').update(provided, 'utf8').digest();
+    const expectedDigest = createHash('sha256').update(ZENITH_API_KEY, 'utf8').digest();
+    if (timingSafeEqual(providedDigest, expectedDigest)) {
         next();
     } else {
         res.status(401).json({ error: 'Invalid or missing API key.' });
