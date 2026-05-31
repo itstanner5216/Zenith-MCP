@@ -132,6 +132,49 @@ describe('HTTP streamable initialize session cleanup', () => {
         return await response.json();
     }
 
+    it('returns 401 when /mcp is called without a bearer token', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json, text/event-stream',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(INIT_REQUEST),
+        });
+
+        expect(response.status).toBe(401);
+        await expect(response.json()).resolves.toEqual({ error: 'Invalid or missing API key.' });
+    });
+
+    it('returns 401 when /mcp is called with an invalid bearer token', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+                Authorization: ['Bearer', 'invalid-token'].join(' '),
+                Accept: 'application/json, text/event-stream',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(INIT_REQUEST),
+        });
+
+        expect(response.status).toBe(401);
+        await expect(response.json()).resolves.toEqual({ error: 'Invalid or missing API key.' });
+    });
+
+    it('allows a valid bearer token to reach /mcp', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+                Authorization: ['Bearer', API_KEY].join(' '),
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(INIT_REQUEST),
+        });
+
+        // 406 comes from downstream MCP transport validation (missing Accept), proving auth passed.
+        expect(response.status).toBe(406);
+    });
+
     it('removes the pre-registered session when initialize is rejected by non-throwing transport validation', async () => {
         // Inferred from http.ts: isInitializeRequest only validates the JSON-RPC body.
         // The SDK can still reject the request later for HTTP-level errors such as
