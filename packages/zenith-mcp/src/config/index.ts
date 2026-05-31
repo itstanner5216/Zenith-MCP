@@ -23,6 +23,7 @@ export {
   loadConfig,
   saveConfig,
   mergeToolsIntoConfig,
+  migrateConfigFile,
   syncToolsWithConfig,
   patchToolsInConfig,
 } from "./loader.js";

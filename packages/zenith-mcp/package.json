@@ -20,7 +20,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": "26.2.0"
   },
   "scripts": {
     "clean": "shx rm -rf dist tsconfig.tsbuildinfo",

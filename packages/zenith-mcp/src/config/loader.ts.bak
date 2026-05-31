@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseConfig, serializeConfig } from "./parser.js";
-import type { RawConfig, KVEntry } from "./parser.js";
+import type { RawConfig } from "./parser.js";
 import { DEFAULT_CONFIG, CONFIG_PATH, configToRaw, rawToConfig } from "./schema.js";
 import type { ZenithConfig } from "./schema.js";
 
@@ -28,158 +28,6 @@ export function configExists(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// normalizeLegacyRaw — translation layer for older config formats
-// ---------------------------------------------------------------------------
-
-/**
- * Keys that used to appear at the top level (outside any ### section) in
- * legacy configs but belong under ### Advanced.
- */
-const LEGACY_ADVANCED_KEYS = new Set([
-  "char_budget",
-  "search_char_budget",
-  "refactor_max_chars",
-  "refactor_max_context",
-  "refactor_version_ttl_hours",
-  "session_ttl_ms",
-  "default_excludes",
-  "sensitive_patterns",
-]);
-
-/**
- * YAML-like bare identifiers (e.g. `auto_write:`) that the old format used
- * as section headers instead of `### Auto Write`.
- */
-const LEGACY_YAML_SECTION_MAP: Record<string, string> = {
-  auto_write: "Auto Write",
-  rag:        "Zenith-Rag",
-  advanced:   "Advanced",
-};
-
-/**
- * Normalize a `RawConfig` that may have been produced from a legacy config
- * file into the canonical form that `rawToConfig()` expects.
- *
- * Two legacy patterns are handled transparently:
- *
- * 1. **YAML-like indented sections** — older configs used bare `key:` lines
- *    as section headers with indented sub-keys beneath them:
- *
- *    ```
- *    auto_write:        ← parser sees this as a comment; we promote it
- *      status: false    ← parser sees key "  status"; we trim it
- *      backup_mode: file
- *    ```
- *
- *    These are rewritten to the canonical `### Auto Write` subsection with
- *    unindented keys that `rawToConfig()` can route normally.
- *
- * 2. **Orphan top-level Advanced keys** — some configs placed `char_budget`,
- *    `session_ttl_ms`, etc. at the top level with no enclosing section.
- *    These are collected and re-emitted under a `### Advanced` subsection
- *    injected just before the first canonical section header.
- *
- * Returns `{ normalized, wasMigrated }`.  `wasMigrated` is `true` when at
- * least one legacy entry was transformed so callers can decide whether to
- * persist the canonical form back to disk.
- */
-function normalizeLegacyRaw(raw: RawConfig): { normalized: RawConfig; wasMigrated: boolean } {
-  let wasMigrated = false;
-
-  // Current YAML-like parent section (set when we see `auto_write:` etc.)
-  let legacySection: string | null = null;
-  // True once we've crossed the first ### subsection header
-  let inCanonicalSection = false;
-
-  // Collected top-level advanced KVs that had no enclosing ### section
-  const orphanAdvancedKVs: KVEntry[] = [];
-  let advancedInjected = false;
-
-  const result: RawConfig = [];
-
-  for (const entry of raw) {
-    // ── Canonical subsection header ──────────────────────────────────────
-    if (entry.type === "subsection") {
-      // Before entering the first ### block, flush any orphan advanced KVs
-      if (orphanAdvancedKVs.length > 0 && !advancedInjected) {
-        result.push({ type: "subsection", name: "Advanced", raw: "### Advanced" });
-        for (const kv of orphanAdvancedKVs) result.push(kv);
-        result.push({ type: "blank" });
-        advancedInjected = true;
-        wasMigrated = true;
-      }
-      legacySection = null;
-      inCanonicalSection = true;
-      result.push(entry);
-      continue;
-    }
-
-    // ── Section header (## Name) — cosmetic, pass through ───────────────
-    if (entry.type === "section") {
-      result.push(entry);
-      continue;
-    }
-
-    // ── Blank lines — pass through ───────────────────────────────────────
-    if (entry.type === "blank") {
-      result.push(entry);
-      continue;
-    }
-
-    // ── Comment — check for legacy YAML section header (`auto_write:`) ───
-    if (entry.type === "comment") {
-      const bare = entry.text.trim();
-      const m = bare.match(/^([a-z][a-z_]*):$/);
-      if (m && m[1] !== undefined && m[1] in LEGACY_YAML_SECTION_MAP) {
-        const sectionName = LEGACY_YAML_SECTION_MAP[m[1]]!;
-        legacySection = sectionName.toLowerCase();
-        result.push({ type: "subsection", name: sectionName, raw: `### ${sectionName}` });
-        wasMigrated = true;
-        continue;
-      }
-      result.push(entry);
-      continue;
-    }
-
-    // ── KV entry ─────────────────────────────────────────────────────────
-    if (entry.type === "kv") {
-      const hasIndent = entry.key !== entry.key.trimStart();
-
-      // A non-indented key cannot be a sub-key of a YAML-like legacy section.
-      // Clear the tracked section so later orphan-key checks work correctly.
-      if (!hasIndent) legacySection = null;
-
-      // Indented sub-key under a legacy YAML section → trim and keep
-      if (hasIndent && legacySection !== null) {
-        result.push({ ...entry, key: entry.key.trim() });
-        wasMigrated = true;
-        continue;
-      }
-
-      // Top-level advanced key with no enclosing canonical section → collect for later
-      if (!inCanonicalSection && LEGACY_ADVANCED_KEYS.has(entry.key)) {
-        orphanAdvancedKVs.push(entry);
-        wasMigrated = true;
-        continue;
-      }
-
-      result.push(entry);
-      continue;
-    }
-  }
-
-  // If orphan advanced KVs were never flushed (no canonical sections followed)
-  if (orphanAdvancedKVs.length > 0 && !advancedInjected) {
-    result.push({ type: "blank" });
-    result.push({ type: "subsection", name: "Advanced", raw: "### Advanced" });
-    for (const kv of orphanAdvancedKVs) result.push(kv);
-    wasMigrated = true;
-  }
-
-  return { normalized: result, wasMigrated };
-}
-
-// ---------------------------------------------------------------------------
 // loadConfig
 // ---------------------------------------------------------------------------
 
@@ -189,7 +37,6 @@ function normalizeLegacyRaw(raw: RawConfig): { normalized: RawConfig; wasMigrate
  * - If the file does not exist, returns a deep copy of `DEFAULT_CONFIG`.
  * - If any error occurs (read failure, parse failure, conversion failure),
  *   returns a deep copy of `DEFAULT_CONFIG` — this function never throws.
- * - Transparently handles legacy config formats via `normalizeLegacyRaw()`.
  */
 export function loadConfig(): ZenithConfig {
   try {
@@ -199,8 +46,7 @@ export function loadConfig(): ZenithConfig {
 
     const text = readFileSync(CONFIG_PATH, "utf-8");
     const raw: RawConfig = parseConfig(text);
-    const { normalized } = normalizeLegacyRaw(raw);
-    return rawToConfig(normalized);
+    return rawToConfig(raw);
   } catch {
     // Swallow everything — startup must not fail because of a bad config.
     return structuredClone(DEFAULT_CONFIG);
@@ -223,37 +69,6 @@ export function saveConfig(config: ZenithConfig): void {
 
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, text, "utf-8");
-}
-
-// ---------------------------------------------------------------------------
-// migrateConfigFile
-// ---------------------------------------------------------------------------
-
-/**
- * One-shot migration: read the on-disk config, normalize any legacy format
- * patterns, and write the canonical form back.
- *
- * - Returns `"migrated"` if changes were made and written.
- * - Returns `"already_canonical"` if the file was already in canonical form.
- * - Returns `"no_file"` if no config file exists yet.
- * - Throws if the file cannot be read or written.
- *
- * Safe to call at any time — if the file is already canonical, it is not
- * touched.
- */
-export function migrateConfigFile(): "migrated" | "already_canonical" | "no_file" {
-  if (!existsSync(CONFIG_PATH)) return "no_file";
-
-  const text = readFileSync(CONFIG_PATH, "utf-8");
-  const raw = parseConfig(text);
-  const { normalized, wasMigrated } = normalizeLegacyRaw(raw);
-
-  if (!wasMigrated) return "already_canonical";
-
-  // Round-trip through the typed config so the output is fully canonical
-  const config = rawToConfig(normalized);
-  saveConfig(config);
-  return "migrated";
 }
 
 // ---------------------------------------------------------------------------
@@ -441,3 +256,5 @@ export function patchToolsInConfig(tools: Record<string, boolean>): void {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, lines.join("\n"), "utf-8");
 }
+
+

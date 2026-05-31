@@ -2,14 +2,13 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { getCharBudget } from '../core/shared.js';
-import { compressTextFile, computeCompressionBudget, truncateToBudget } from '../core/compression.js';
+import { compressTextFile, truncateToBudget } from '../core/compression.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 interface ReadMultipleFilesArgs {
     paths: string[];
     maxCharsPerFile?: number;
     compression?: boolean;
-    showLineNumbers?: boolean;
 }
 
 interface FileInfoValid {
@@ -59,8 +58,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 .max(50)
                 .describe("File paths to read."),
             maxCharsPerFile: z.number().optional().describe("Max characters per file."),
-            compression: z.boolean().optional().default(true).describe("Compress whitespace in returned content."),
-            showLineNumbers: z.boolean().optional().default(false).describe("Prefix each line with its line number."),
+            compression: z.boolean().optional().default(true).describe("Compress file-read output."),
         }),
         annotations: { readOnlyHint: true }
     }, async (args: ReadMultipleFilesArgs) => {
@@ -86,7 +84,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 } satisfies FileInfoError;
             }
         });
-        // Phase 2: Calculate per-file budgets
+        // Phase 2: Calculate per-file output ceilings
         const validFiles = fileInfos.filter((f): f is FileInfoValid => f.error === null);
         const totalBudget = getCharBudget() - (fileCount * 200);
         let perFileBudget: number | null;
@@ -112,7 +110,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
             });
         }
-        // Phase 3: Read files in parallel with budget enforcement
+        // Phase 3: Read files in parallel with output ceiling enforcement
         const results = await parallelMap(fileInfos, async (fileInfo) => {
             const displayPath = fileInfo.validPath !== null ? fileInfo.validPath : fileInfo.requestedPath;
             const fileLabel = `- ${path.basename(displayPath)}`;
@@ -123,42 +121,35 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const budget = perFileBudget !== null ? perFileBudget : (fileInfo.budget || Math.floor(totalBudget / fileCount));
             const entryPrefix = `${fileLabel}\n`;
             try {
-                let content: string | null = null;
-                let effectiveBudget = budget;
-                if (args.compression !== false && !args.showLineNumbers) {
-                    content = await fs.readFile(validPath, 'utf8');
-                    const totalEntryBudget = computeCompressionBudget(content.length, budget);
-                    const contentBudget = Math.max(0, totalEntryBudget - entryPrefix.length);
-                    const compressed = await compressTextFile(validPath, content, contentBudget);
-                    if (compressed !== null) {
-                        return `${entryPrefix}${compressed.text}`;
-                    }
-                    effectiveBudget = contentBudget;
+                const byteLimit = budget * 4;
+                const fd = await fs.open(validPath, 'r');
+                let content: string;
+                try {
+                    const buf = Buffer.allocUnsafe(byteLimit);
+                    const { bytesRead } = await fd.read(buf, 0, byteLimit, 0);
+                    content = buf.slice(0, bytesRead).toString('utf8');
                 }
-                if (content === null) {
-                    const byteLimit = budget * 4;
-                    const fd = await fs.open(validPath, 'r');
-                    try {
-                        const buf = Buffer.allocUnsafe(byteLimit);
-                        const { bytesRead } = await fd.read(buf, 0, byteLimit, 0);
-                        content = buf.slice(0, bytesRead).toString('utf8');
-                    }
-                    finally {
-                        await fd.close();
-                    }
+                finally {
+                    await fd.close();
                 }
+
+                const effectiveBudget = Math.max(0, budget - entryPrefix.length);
                 const truncatedResult = truncateToBudget(content, effectiveBudget);
                 content = truncatedResult.text;
                 const truncated = truncatedResult.truncated;
-                if (args.showLineNumbers) {
-                    const lines = content.split('\n');
-                    if (lines[lines.length - 1] === '')
-                        lines.pop();
-                    content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
+
+                const lines = content.split('\n');
+                if (lines[lines.length - 1] === '')
+                    lines.pop();
+                content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
+
+                if (args.compression !== false) {
+                    const compressed = await compressTextFile(validPath, content, effectiveBudget);
+                    if (compressed !== null) {
+                        content = compressed.text;
+                    }
                 }
-                if (args.compression !== false && !args.showLineNumbers) {
-                    return `${entryPrefix}${content}`;
-                }
+
                 return truncated
                     ? `${entryPrefix}${content}\n[truncated]`
                     : `${entryPrefix}${content}`;
