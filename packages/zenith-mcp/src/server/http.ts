@@ -293,10 +293,11 @@ app.use(express.json({ limit: '4mb' }));
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
     const match = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
     const provided = match?.[1] ?? '';
+    const providedBuffer = Buffer.from(provided);
+    const expectedBuffer = Buffer.from(ZENITH_API_KEY);
     if (
-        provided.length === ZENITH_API_KEY.length &&
-        timingSafeEqual(Buffer.from(provided), Buffer.from(ZENITH_API_KEY))
-    ) {
+        providedBuffer.length === expectedBuffer.length &&
+        timingSafeEqual(providedBuffer, expectedBuffer)
         next();
     } else {
         res.status(401).json({ error: 'Invalid or missing API key.' });
