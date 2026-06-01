@@ -300,6 +300,7 @@ function sanitizeForwardedPrefix(raw: string | string[] | undefined): string {
 // Express app
 // ---------------------------------------------------------------------------
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '4mb' }));
 
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
