@@ -190,7 +190,6 @@ Tree-sitter powers:
 - `search_file` symbol lookup
 - `search_files` symbol mode
 - `search_files` definition mode
-- `search_files` structural mode
 - `refactor_batch` symbol loading/outlier detection
 - Syntax warnings after edits
 - Structured compression anchors
@@ -315,11 +314,11 @@ Keep stash responses concise. Return the stash ID and only the failed edit indic
 |------|-------|----------|
 | `read_file` | Read one text file with windowing/truncation/compression | `path`, `maxChars`, `head`, `tail`, `offset`, `aroundLine`, `context`, `ranges`, `showLineNumbers`, `compression` |
 | `read_media_file` | Read supported media as base64 | `path` |
-| `read_multiple_files` | Read up to 50 files with budget balancing | `paths`, `maxCharsPerFile`, `compression`, `showLineNumbers` |
+| `read_multiple_files` | Read up to 50 files with budget balancing; output is line-numbered by default | `paths`, `maxCharsPerFile`, `compression` |
 | `write_file` | Create/overwrite/append text | `path`, `content`, `failIfExists`, `append` |
 | `edit_file` | Surgical content/block/symbol edits | `path`, `edits[]`, `dryRun` |
 | `directory` | Directory list/tree exploration | `mode: list/tree`, `path`, `depth`, `includeSizes`, `sortBy`, `excludePatterns`, `showSymbols`, `showSymbolNames` |
-| `search_files` | Multi-file content/files/symbol/structural/definition search | `mode`, `path`, mode-specific query fields |
+| `search_files` | Multi-file content/files/symbol/definition search | `mode`, `path`, mode-specific query fields |
 | `search_file` | Single-file grep or symbol lookup | `path`, `grep`, `grepContext`, `symbol`, `nearLine`, `expandLines`, `maxChars` |
 | `file_manager` | mkdir/delete/move/info | `mode`, `path`, `source`, `destination` |
 | `stashRestore` | Retry/inspect/clear stashed edit/write failures | `mode: apply/restore/list/read`, `stashId`, `corrections`, `newPath`, `dryRun`, `type` |
@@ -361,7 +360,6 @@ Modes:
 - `content`
 - `files`
 - `symbol`
-- `structural`
 - `definition`
 
 Keep modes distinct. Do not make `content` return file metadata beyond what is needed for search hits.

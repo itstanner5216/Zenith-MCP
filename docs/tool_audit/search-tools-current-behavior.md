@@ -98,7 +98,7 @@ expandLines?: number (extra lines above/below symbol bounds, 0–50)
 
 **Schema:**
 ```
-mode: "content" | "files" | "symbol" | "structural" | "definition" (required)
+mode: "content" | "files" | "symbol" | "definition" (required)
 path: string (required — directory to search)
 maxResults?: number
 contentQuery?: string
@@ -113,7 +113,6 @@ namePattern?: string
 includeMetadata?: boolean
 symbolQuery?: string
 symbolKind?: 'function' | 'class' | 'method' | 'interface' | 'type' | 'enum' | 'module' | 'any'
-structuralQuery?: string
 definesSymbol?: string
 ```
 
@@ -165,52 +164,6 @@ definesSymbol?: string
 - Does NOT return symbol source code — only locations
 - 512KB file size cap is hardcoded
 - No JS regex search here — purely tree-sitter
-
----
-
-### search_files — `structural` mode
-
-**Trigger:** `args.mode === "structural"`
-
-**Relevant params:** `path`, `structuralQuery`, `symbolKind`, `maxResults`
-
-**Process:**
-
-1. Resolve project root from the search path (using git, markers, registry)
-2. Get symbol index DB: `getDb(repoRoot)`
-3. **Index the directory** via `indexDirectory(db, repoRoot, rootPath, { maxFiles: 2000 })`
-   - This ensures the symbol DB is populated before querying
-4. Compute `scopePrefix = path.relative(repoRoot, rootPath)` for scoping
-5. **Look up the query symbol** in the DB:
-   - If `scopePrefix`: `findSymbolDetailsScoped(db, structuralQuery, 'def', scopePrefix%)`
-   - Else: `findSymbolDetails(db, structuralQuery, 'def')`
-6. If 0 results → return not found
-7. If multiple results → return disambiguation list: `a) filePath:line, b) ...`
-8. Take the single result row → resolve absolute path → detect language
-9. Read the query symbol's source file
-10. **Compute structural fingerprint:**
-    - `getStructuralFingerprint(source, lang, startLine, endLine)`
-    - This is a tree-sitter-based AST fingerprint (parameter shapes, return types, structure)
-11. If no fingerprint → return `'Could not compute fingerprint.'`
-12. **Query candidates** from the DB:
-    - `findStructuralCandidates(db, { type?, filePrefix? })`
-    - `type` comes from `symbolKind` or falls back to the query symbol's type
-    - Returns all `'def'` symbols matching the filters, ordered by name
-13. **Score each candidate:**
-    - Skip the query symbol itself
-    - For each candidate file: read source (with file cache), compute fingerprint
-    - `computeStructuralSimilarity(queryFp, candidateFp)` → score 0.0–1.0
-    - Keep if score ≥ 0.5
-14. Sort by score descending, take top N (default 20, max 50)
-15. Format: `filePath:line  [score%] name`
-
-**Key details:**
-- Uses the **symbol index DB** (`.mcp/symbols.db`) — requires prior indexing
-- Indexes the target directory on-demand before querying
-- The fingerprint comparison is tree-sitter-based — compares AST structure, not text
-- Threshold of 0.5 (50% similarity) is hardcoded
-- Only compares `'def'` symbols — not references
-- File cache prevents re-reading the same file for multiple symbols
 
 ---
 
@@ -338,7 +291,6 @@ definesSymbol?: string
 | Substring symbol search | ❌ | ✅ symbol mode |
 | Exact symbol definition find | ❌ | ✅ definition mode |
 | List all symbols in scope | ❌ | ✅ symbol mode (no query) |
-| Structural similarity | ❌ | ✅ structural mode |
 | Find files by glob/name | ❌ | ✅ files mode |
 | BM25 ranked content search | ❌ | ✅ content mode |
 | Context lines in grep | ✅ (ripgrep -C) | ✅ (ripgrep -C) |
@@ -364,7 +316,7 @@ definesSymbol?: string
 
 ## Params That Don't Do What They Suggest
 
-1. **`includeHidden` in files mode** — accepted in schema but only passed to ripgrep in content mode; does nothing in files/symbol/definition/structural modes
+1. **`includeHidden` in files mode** — accepted in schema but only passed to ripgrep in content mode; does nothing in files/symbol/definition modes
 2. **`pattern` in symbol mode** — only filters file discovery (ripgrep `--files`), not symbol matching
 3. **`maxResults` in content mode** — default 50 but the ripgrep call uses `max(userMaxResults, 500)` meaning it always fetches at least 500 lines regardless; the actual cap is the char budget
 4. **`contextLines` with JS fallback** — silently ignored; only ripgrep supports it
@@ -376,11 +328,9 @@ definesSymbol?: string
 
 1. **`search_file` has no JS fallback for grep** — if ripgrep isn't available, single-file regex search completely fails. Yet the tool description doesn't communicate this requirement.
 
-2. **`search_files` definition mode is almost identical to symbol mode** — definition uses exact match + parent-chain verification; symbol uses substring match. Both do live tree-sitter parsing of every file. The structural mode is the only one using the index DB for lookup.
+2. **`search_files` definition mode is almost identical to symbol mode** — definition uses exact match + parent-chain verification; symbol uses substring match. Both do live tree-sitter parsing of every file.
 
-3. **`search_files` structural mode indexes on every call** — `indexDirectory()` runs each time, which re-checks file hashes. This is idempotent but adds latency even when the index is fresh.
-
-4. **BM25 pre-filter can cause false negatives** — if the BM25 file ranker excludes a file that actually contains the match, the ripgrep pass won't find it. The fallback is a full ripgrep scan, but it only triggers if the pre-filter returns 0 candidates (not if it returns some but misses others).
+3. **BM25 pre-filter can cause false negatives** — if the BM25 file ranker excludes a file that actually contains the match, the ripgrep pass won't find it. The fallback is a full ripgrep scan, but it only triggers if the pre-filter returns 0 candidates (not if it returns some but misses others).
 
 5. **`search_file` symbol mode uses `findSymbol()` while `search_files` definition mode uses `getDefinitions()`** — these are different tree-sitter functions with different matching behavior. `findSymbol` supports dot-qualification natively; `getDefinitions` + manual parent-chain checking is a re-implementation of similar logic.
 

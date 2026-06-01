@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Aggressively attempt to load .env from multiple sensible locations
+const tryLoadEnv = (path: string) => {
+    try { process.loadEnvFile(path); } catch (e) {}
+};
+
+tryLoadEnv('.env'); // 1. Try Current Working Directory
+tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../../.env')); // 2. Try the Zenith-MCP monorepo root
+tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../.env')); // 3. Try packages/zenith-mcp package root
+
 // ---------------------------------------------------------------------------
 // http-server.js — Native HTTP entrypoint for MCP Streamable HTTP + legacy SSE
 //
