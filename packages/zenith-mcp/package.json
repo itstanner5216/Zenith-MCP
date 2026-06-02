@@ -13,14 +13,13 @@
   },
   "type": "module",
   "bin": {
-    "zenith-mcp": "dist/cli/stdio.js",
-    "zenith-mcp-http": "dist/server/http.js"
+    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js"
   },
   "files": [
     "dist"
   ],
   "engines": {
-    "node": "26.2.0"
+    "node": "26.3.0"
   },
   "scripts": {
     "clean": "shx rm -rf dist tsconfig.tsbuildinfo",
