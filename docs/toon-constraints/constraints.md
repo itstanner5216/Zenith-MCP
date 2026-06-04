@@ -12,6 +12,94 @@ If this assertion can ever fail, the implementation is broken regardless of what
 
 anything from 68-72 percent is acceptable, for the added markers, it doesnt need to be exactly 70 just within that range
 
+---
+
+## Priority 0.5 — Package Ownership (NON-NEGOTIABLE)
+
+Every single TOON / compression-related **decision** lives in `packages/zenith-toon`. Period. No exceptions.
+
+### The Seam
+
+The data flow is exactly:
+
+```
+caller → zenith-mcp (read tool)
+          zenith-mcp → zenith-toon : { rawText, languageInfo, astInfo, symbolInfo, budget/maxChars, ...allowed read-only context }
+          zenith-toon → zenith-mcp : compressed text string
+zenith-mcp → caller : that exact string, verbatim, as the tool result
+```
+
+MCP is allowed — and expected — to hand TOON the AST / symbol / language information it has already computed for other purposes (tree-sitter parses, symbol-index rows, call-graph edges, file/project metadata). TOON should not re-parse what MCP already knows. That hand-off is **data transport**, not intelligence transfer.
+
+What crosses the seam is **facts**: "here is the raw text, here is the language, here are the symbols/defs/refs/edges I already have indexed, here is the project root, here is the budget."
+
+What does NOT cross the seam is **decisions**: which lines to keep, which symbols matter, how to weight edges, how to allocate budget, what the keep-ratio should be, whether compression was worth it, how to format markers, where to truncate.
+
+### MCP's Role
+
+MCP is the context provider and the pipe. It may:
+
+- Read the file off disk
+- Resolve language / path / project-root / DB-path context
+- Reuse its already-computed AST/symbol/edge data (from `getSymbols`, `getFileBlockEdges`, the symbol-index DB, etc.) and hand the **raw results** to TOON as inputs
+- Pass the caller's budget / maxChars through as a number
+- Take TOON's returned string and place it in the tool response, untouched
+
+MCP must not post-process, re-truncate, re-budget, re-wrap, decorate, or otherwise modify TOON's returned text. Pipe in, pipe out.
+
+### TOON's Role
+
+TOON owns every compression decision. Given the inputs MCP supplies, TOON:
+
+- Decides which symbols / blocks / lines are structurally important
+- Constructs its own `StructureBlock[]` / `Anchor[]` / `ASTEdge[]` / `CompressionContext` from the AST/symbol facts MCP handed in (TOON does the shaping; MCP just supplies the raw symbol rows and edge rows)
+- Decides edge weighting (e.g. the `Math.sqrt(call_count)` transform — a SageRank tuning concern, lives in TOON)
+- Computes the budget, the keep-ratio, the 70% floor, allocator decisions
+- Runs SageRank, BMX+, Deduplicator, BudgetAllocator
+- Performs line selection, marker emission, the Phase H assertion, the verbatim/line-number guarantees
+- Decides whether compression is useful and falls back to truncation if not
+- Returns the final compressed string
+
+### Forbidden in `zenith-mcp` (rip out on sight)
+
+These exist in MCP today and must move to TOON:
+
+- `computeCompressionBudget`, `isCompressionUseful`, `DEFAULT_COMPRESSION_KEEP_RATIO`, `truncateToBudget`, `compressTextFile` — compression decisions, all TOON's job
+- MCP-side construction of `StructureBlock[]` or `CompressionContext` (MCP supplies the raw symbol/edge data; TOON shapes it)
+- MCP-side edge weighting for compression purposes (the `Math.sqrt(call_count)` math currently in `getFileBlockEdges` — the **query** can stay; the weighting transform moves to TOON)
+- Any helper / wrapper / adapter / "bridge" file in MCP whose purpose is to pre-shape data for TOON. MCP hands over raw facts; TOON does the shaping.
+- Any new MCP-side file with "compression" or "toon" in its name
+
+Note: MCP keeping `getSymbols`, `getFileBlockEdges`, `findRepoRoot`, the symbol-index DB, etc. is **fine and expected** — those serve `edit_file`, `refactor_batch`, `directory` listings, search, and the AST-fact hand-off to TOON. What's forbidden is MCP using them to make compression decisions.
+
+### For Subagents
+
+If you are about to write compression logic — line selection, budget math, ranking, marker emission, keep-ratio decisions, "useful compression" gates, fallback truncation, anchor extraction, structure shaping — inside `packages/zenith-mcp/`, **stop**. You are wrong. Move to `packages/zenith-toon/` and do it there.
+
+If you are about to reimplement SageRank / BMX+ / BudgetAllocator / Deduplicator anywhere — including inside TOON — **stop**. They already exist in `packages/zenith-toon/src/{sagerank,bmx-plus,budget,dedup}.ts`. Import them. Do not write a "simpler" version.
+
+MCP's side of the integration seam should look approximately like:
+
+```ts
+// MCP gathers facts it already has
+const languageInfo = getLangForFile(path);
+const symbolInfo   = await getSymbols(rawText, languageInfo);    // reused from MCP's existing index
+const edgeInfo     = getFileBlockEdges(db, relPath, defNames);   // raw query result, no weighting
+
+// Hand them to TOON — TOON decides everything from here
+const compressed = await zenithToon.compressFile({
+  rawText, languageInfo, symbolInfo, edgeInfo, budget, projectRoot,
+});
+
+return { content: [{ type: 'text', text: compressed }] };
+```
+
+If MCP's side of the seam contains keep-ratio math, structure construction, edge weighting, fallback selection, or anything that looks like a decision, something has leaked out of TOON that shouldn't have.
+
+---
+
+---
+
 
 I dont know what youre talking about but youre making up shit i never said and making this so complicated and it is literally simple. Ready? 
 
@@ -70,9 +158,9 @@ Bad, why? Less than 10 lines of code, makes result useless, bad, not allowed:
 [TRUNCATED: lines 25-50]
 
 
-### 1. `_MIN_OMISSION_THRESHOLD` Must Remain Enforced (currently = 10)
+### 1. `_MIN_OMISSION_THRESHOLD` Must Remain Enforced (currently = 6)
 
-**The rule:** No two truncation markers in the output may be closer than 10 lines from each other. The minimum block of shown content between any two markers must be at least 10 lines.
+**The rule:** No two truncation markers in the output may be closer than 6 lines from each other. The minimum block of shown content between any two markers must be at least 6 lines. (Earlier drafts of this doc said 10; 10 turned out to be essentially impossible to satisfy alongside the 68–72% keep-ratio. The correct, enforced value is **6**.)
 
 **What this prevents:** Output like this:
 ```
@@ -84,8 +172,8 @@ Bad, why? Less than 10 lines of code, makes result useless, bad, not allowed:
 ```
 That 3-line sliver between two markers is pointless — it's too small to be useful context and it fragments the output.
 
-**What this does NOT mean:** It does NOT have a default resolution. It does NOT mean "always include more lines to reach 10" and it does NOT mean "always drop the small block." The resolution is an intelligent AST-driven decision:
-- If those lines are important (high-value anchors, central logic), expand the shown block to meet the 10-line minimum
+**What this does NOT mean:** It does NOT have a default resolution. It does NOT mean "always include more lines to reach 6" and it does NOT mean "always drop the small block." The resolution is an intelligent AST-driven decision:
+- If those lines are important (high-value anchors, central logic), expand the shown block to meet the 6-line minimum
 - If those lines are unimportant, merge them into the surrounding truncation (drop them)
 
 There is no mechanical default. The selection intelligence decides which resolution is correct based on what those lines actually contain.
@@ -204,7 +292,7 @@ The existing code is intentionally inline. Keep it that way. If you need to chan
 
 - Do not change the function signature: `(text, budget, structure, astEdges?) → string`
 - Do not change the public API (`compressSourceStructured` export)
-- `_MIN_OMISSION_THRESHOLD` (6) must remain enforced in the reassembly loop — no marker for gaps < 10 lines
+- `_MIN_OMISSION_THRESHOLD` (6) must remain enforced in the reassembly loop — no marker for gaps < 6 lines
 - Every non-marker output line must be a character-perfect copy of the input
 - Still works correctly when `astEdges` is undefined/empty (fallback = no connectivity boost, same behavior as today minus fixes 1-4/6)
 - The 70% budget floor (`Math.max(budget, Math.floor(text.length * 0.70))`) is intentional and must NOT be changed
@@ -222,7 +310,7 @@ The existing code is intentionally inline. Keep it that way. If you need to chan
 | Stripping comments to "save space" | Comments are verbatim file content; stripping them means output doesn't map to real file |
 | Reordering output lines to group by importance | Breaks line-number correspondence |
 | Adding new marker formats without the line range info | Model loses track of what's missing |
-| Making the threshold configurable per-call | Unnecessary complexity; 10 is the right value |
+| Making the threshold configurable per-call | Unnecessary complexity; 6 is the right value |
 | Removing blank lines between blocks to "save budget" | Breaks line-number mapping |
 | Creating helper/wrapper functions like `formatMarker()` or `emitLine()` | Adds indirection that obscures control flow and invites future silent breakage — fix logic inline where it lives |
 | "Centralizing" marker emission into a single utility | Same problem; the code is inline by design, keep it inline |
