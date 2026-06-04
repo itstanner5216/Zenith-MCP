@@ -12,7 +12,7 @@
     "url": "https://github.com/itstanner5216/Zenith-MCP.git"
   },
   "bin": {
-    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js"
+    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js --port=27127 --host=0.0.0.0"
   },
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -26,7 +26,7 @@
     "build:turbo": "turbo run build",
     "test": "pnpm --filter zenith-mcp run test",
     "test:turbo": "turbo run test --filter=zenith-mcp",
-    "start": "pnpm --env-file-if-exists=/home/tanner/mcp-servers/.env filter zenith-mcp run start",
+    "start": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js --port=27127 --host=0.0.0.0 ",
     "dev": "turbo run dev",
     "lint": "turbo run lint"
   },

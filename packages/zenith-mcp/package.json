@@ -13,7 +13,7 @@
   },
   "type": "module",
   "bin": {
-    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js"
+    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js --port=27127 --host=0.0.0.0"
   },
   "files": [
     "dist"
@@ -28,8 +28,8 @@
     "watch": "tsc --watch",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "start": "node dist/cli/stdio.js",
-    "start:http": "node dist/server/http.js"
+    "zenith-stdio": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/cli/stdio.js",
+    "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js --port=27127 --host=0.0.0.0"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
