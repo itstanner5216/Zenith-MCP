@@ -271,6 +271,71 @@ describe('applyEditList mixed modes', () => {
     });
 });
 
+describe('applyEditList validation guards', () => {
+    it('content mode errors when oldContent is missing', async () => {
+        const edits = [{ mode: 'content', newContent: 'x' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('content mode requires');
+    });
+
+    it('content mode errors when newContent is undefined', async () => {
+        const edits = [{ mode: 'content', oldContent: 'x' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('content mode requires');
+    });
+
+    it('content mode errors when oldContent is empty string', async () => {
+        const edits = [{ mode: 'content', oldContent: '', newContent: 'x' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('content mode requires');
+    });
+
+    it('content mode allows newContent to be empty string (deletion)', async () => {
+        const edits = [{ mode: 'content', oldContent: '    return true;', newContent: '' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors).toHaveLength(0);
+        expect(result.workingContent).not.toContain('return true');
+    });
+
+    it('symbol mode errors when symbol is missing', async () => {
+        const edits = [{ mode: 'symbol', newText: 'replaced' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('symbol mode requires');
+    });
+
+    it('symbol mode errors when newText is undefined', async () => {
+        const edits = [{ mode: 'symbol', symbol: 'hello' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('symbol mode requires');
+    });
+
+    it('symbol mode errors when symbol is empty string', async () => {
+        const edits = [{ mode: 'symbol', symbol: '', newText: 'x' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('symbol mode requires');
+    });
+
+    it('unknown mode returns error', async () => {
+        const edits = [{ mode: 'invalid' }];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('Unknown or missing mode');
+    });
+
+    it('missing mode returns error', async () => {
+        const edits = [{}];
+        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.errors[0].msg).toContain('Unknown or missing mode');
+    });
+});
+
 describe('syntaxWarn', () => {
     it('returns empty string for clean JS', async () => {
         const result = await syntaxWarn('/tmp/test.js', 'const x = 1;');

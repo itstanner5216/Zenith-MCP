@@ -295,6 +295,10 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
 
         // SYMBOL mode
         if (edit.mode === 'symbol') {
+            if (!edit.symbol || edit.newText === undefined) {
+                errors.push({ i, msg: `${tag}symbol mode requires symbol and newText.` });
+                continue;
+            }
             const dis = disambiguations?.get(i);
             const nearLine = dis?.nearLine ?? edit.nearLine;
             const langName = getLangForFile(filePath);
@@ -304,7 +308,7 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
             const findSymbolOpts: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (nearLine !== undefined) findSymbolOpts.nearLine = nearLine;
-            const symbolMatches = await findSymbol(workingContent, langName, edit.symbol!, findSymbolOpts);
+            const symbolMatches = await findSymbol(workingContent, langName, edit.symbol, findSymbolOpts);
             // findSymbol returns null when the language has no compiled tags
             // query (grammar present, query file missing or unloadable —
             // common for parse-capable-only languages like cmake/make/dart/
@@ -331,11 +335,11 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
             const lines = workingContent.split('\n');
             const originalText = lines.slice(sym.line - 1, sym.endLine).join('\n');
-            const normalizedNew = normalizeLineEndings(edit.newText!);
+            const normalizedNew = normalizeLineEndings(edit.newText);
             lines.splice(sym.line - 1, sym.endLine - (sym.line - 1), ...normalizedNew.split('\n'));
             workingContent = lines.join('\n');
             pendingSnapshots.push({
-                symbol: edit.symbol!,
+                symbol: edit.symbol,
                 originalText,
                 line: sym.line,
                 filePath: filePath,
@@ -345,19 +349,23 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
 
         // CONTENT mode
         if (edit.mode === 'content') {
-            const dis = disambiguations?.get(i);
-            const nearLine = dis?.nearLine ?? edit.nearLine;
-            const match = findMatch(workingContent, edit.oldContent!, nearLine);
-            if (!match) {
-                errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent!, i, isBatch) });
+            if (!edit.oldContent || edit.newContent === undefined) {
+                errors.push({ i, msg: `${tag}content mode requires oldContent and newContent.` });
                 continue;
             }
-            const normalizedNew = normalizeLineEndings(edit.newContent!);
+            const dis = disambiguations?.get(i);
+            const nearLine = dis?.nearLine ?? edit.nearLine;
+            const match = findMatch(workingContent, edit.oldContent, nearLine);
+            if (!match) {
+                errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent, i, isBatch) });
+                continue;
+            }
+            const normalizedNew = normalizeLineEndings(edit.newContent);
             if (match.strategy === 'indent-stripped') {
                 const matchedLines = match.matchedText.split('\n');
                 const newLines = normalizedNew.split('\n');
                 const originalIndent = matchedLines[0]!.match(/^\s*/)?.[0] || '';
-                const oldIndent = normalizeLineEndings(edit.oldContent!).split('\n')[0]!.match(/^\s*/)?.[0] || '';
+                const oldIndent = normalizeLineEndings(edit.oldContent).split('\n')[0]!.match(/^\s*/)?.[0] || '';
                 const reindentedNew = newLines.map((line, j) => {
                     if (j === 0) return originalIndent + line.trimStart();
                     const lineIndent = line.match(/^\s*/)?.[0] || '';
@@ -370,6 +378,10 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
             continue;
         }
+
+        // Unknown or missing mode
+        errors.push({ i, msg: `${tag}Unknown or missing mode: ${edit.mode ?? '(none)'}. Must be block, content, or symbol.` });
+        continue;
     }
 
     return { workingContent, errors, pendingSnapshots };
