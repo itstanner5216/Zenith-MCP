@@ -14,7 +14,7 @@
   "bin": {
     "zenith-mcp": "node --env-file-if-exists=/home/tanner/mcp-servers/.env packages/zenith-mcp/dist/server/http.js --port=27127 --host=0.0.0.0"
   },
-  "packageManager": "pnpm@11.5.0",
+  "packageManager": "pnpm@11.5.1",
   "scripts": {
     "clean": "pnpm -r --filter zenith-toon --filter zenith-mcp run clean",
     "build": "pnpm -r --filter zenith-toon --filter zenith-mcp run build",
@@ -32,6 +32,6 @@
   },
   "devDependencies": {
     "turbo": "^2.9.16",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   }
 }
