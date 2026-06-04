@@ -6,7 +6,7 @@
   "type": "module",
   "main": "packages/zenith-mcp/src/server/http.ts",
   "license": "MIT",
-  "packageManager": "pnpm@11.4.0",
+  "packageManager": "pnpm@11.5.1",
   "scripts": {
     "clean": "pnpm -r --filter zenith-toon --filter zenith-mcp run clean",
     "build": "pnpm -r --filter zenith-toon --filter zenith-mcp run build",
@@ -24,10 +24,10 @@
     "lint": "turbo run lint"
   },
   "devDependencies": {
-    "turbo": "^2.9.15",
-    "typescript": "^5.9.3"
+    "turbo": "^2.9.16",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
-    "pnpm": "^11.4.0"
+    "pnpm": "^11.5.0"
   }
 }
