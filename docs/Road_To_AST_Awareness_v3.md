@@ -1,53 +1,5 @@
 # Road to AST Awareness — v3
 
-**Predecessor:** v2 (`docs/Road_To_AST_Awareness_v2.md`)
-**Audit:** `docs/plan_audit/road-to-ast-awareness-audit.md`
-**Status:** Fully implementable. No deferrals. No Phase 2.
-
----
-
-## What Changed Since v2
-
-1. **v2 §"W6: injections table has no consumer" — deferred extraction to Phase 2.** v3 lands `extractInjections`, the `injections` table, `insertInjection`/`getInjectionsForFile` adapter functions, and the consumer (injection spans flow into the facts payload so TOON preserves embedded-language ranges verbatim per Priority 0).
-
-2. **v2 §"core/tree-sitter/structure.ts" — proposed `getSymbolStructure` but deferred per-language node-name tables.** v3 provides literal maps for 18 languages (python, typescript, tsx, javascript, rust, go, java, c_sharp, c, cpp, kotlin, php, ruby, swift, bash, lua, nix, scss) plus explicit fall-through for the 7 queryless grammars.
-
-3. **v2 §"core/indexing/extract.ts" — single parse but actually re-parsed per extractor.** v2's `extractParsedFile` calls `getSymbols` (which parses internally) plus `getSymbolStructure` (which parses again) plus `getBlockAnchors` (which parses again). v3 mandates a single shared tree: parse once in `extract.ts`, pass `tree.rootNode` to every extractor.
-
-4. **v2 §"core/compression.ts — GUTTED" — still constructs `StructureBlock[]` and `CompressionContext` in MCP.** This violates constraints.md §Priority 0.5 ("MCP-side construction of `StructureBlock[]` or `CompressionContext`" is forbidden). v3 removes all TOON-type construction from MCP. MCP passes raw facts; TOON shapes them internally.
-
-5. **v2 §"tools/read_file.ts" — claimed MCP should not compute 0.70 but then showed `budget = maxChars` which TOON internally floors.** This is correct behavior but v2 waffled. v3 is explicit: MCP passes `maxChars` as the budget ceiling. TOON applies its own 70% floor internally in `compressSourceStructured`.
-
-6. **v2 §"core/tree-sitter/imports.ts" — still a full re-parse extractor.** v3 uses the already-parsed tree from `extract.ts` and runs the modular `references.scm` query against it for richer import data (module path string preservation), not just post-processing flat symbol rows.
-
-7. **v2 §"Injections" — `ParsedFileRecord.injections` field was declared but `InjectionRow` was absent from `types.ts`.** v3 adds the full type and wiring.
-
-8. **v2 left the dormant `patterns` table unaddressed.** v3 wires it to `refactor_batch reapply` (the `symbolGroup` cache already uses it for pattern storage; the table just needs the adapter functions called).
-
-9. **v2 left the dormant `project_roots` global registry unwired.** v3 wires `registerRepoRoot` in `getDb()`.
-
-10. **v2's `compressForTool` still imported `StructureBlock`/`CompressionContext` from zenith-toon and shaped them in MCP.** v3 replaces this with a single `compressFile` call that passes raw facts; TOON owns all shaping.
-
----
-
-## Corrections from Prior Plans
-
-1. **v2 line 12: "`DEF_TYPES` (currently missing from runtime.ts but used by ref-structural-similarity.ts)"** — `DEF_TYPES` does NOT exist anywhere in `runtime.ts` (confirmed: `grep -n DEF_TYPES runtime.ts` returns empty). The ref design doc imports it from `./runtime.js` but that import is fictional. v3 defines `DEF_TYPES` as a new export in `runtime.ts`.
-
-2. **v2 line 148: "`.cs` → `'c_sharp'`" — currently `.cs` maps to `'csharp'` (languages.ts:64).** Both `tree-sitter-csharp.wasm` and `tree-sitter-c_sharp.wasm` exist in `grammars/grammars/`. The rich 91-line `c_sharp-tags.scm` is the correct target. The modular directories `c_sharp/` and `csharp/` have **identical** 61-line `definitions.scm` files. The grammar WASM that matches the richer ctags file is `tree-sitter-c_sharp.wasm`. v3 maps `.cs` → `'c_sharp'`.
-
-3. **This prompt states "7 grammars with WASM but no query files (cmake, dart, elixir, ini, make, perl, r)."** Confirmed correct via filesystem inspection.
-
-4. **AGENTS.md §11 states compression uses a subprocess bridge.** This is stale. Current `compression.ts` (line 12) directly imports `{ compressString, compressSourceStructured } from 'zenith-toon'` — a workspace ESM import, no subprocess. v3 continues the direct ESM import pattern.
-
-5. **This prompt says "`Math.sqrt(call_count)` edge transforms" are forbidden in MCP.** Confirmed: `db-adapter.ts:514` contains `weight: Math.sqrt(row.call_count)` inside `getFileBlockEdges`. v3 removes the sqrt; passes raw `call_count`.
-
-6. **v2 §"resolve.ts" states `ON DELETE SET NULL` on `callee_symbol_id`.** This is correct design — but v2 never specified what re-triggers resolution after callee re-index. v3 specifies: `indexDirectory` calls `resolveEdgeTargets` for all files in the batch after persist completes.
-
-7. **Prompt claims typescript has `injections.scm`.** Confirmed false — only `tsx/injections.scm` exists; `typescript/` directory has no `injections.scm` file. Languages with injections.scm: bash, css, dockerfile, hcl, html, javascript, markdown, nix, php, svelte, tsx, vue, xml (13 total).
-
----
-
 ## Full v3 Architecture
 
 ### File Layout
@@ -77,6 +29,14 @@ core/
     types.ts                          # NEW — shared shapes between extract & persist
     resolve.ts                        # NEW — cross-file edge resolution
 ```
+
+## Task 1
+
+Review the codebase, focus on the language/ast awareness and where it is implemented/utilized.
+Review the docs/tool_audit, docs/toon-constraints docs/toon-goal. Review the codebase and be sure you know everything needed. 
+
+
+## Task 2
 
 ---
 
@@ -116,6 +76,8 @@ export const DEF_TYPES: ReadonlySet<string> = new Set([
 ```
 
 **Insertion point:** After `export const _symbolCache` (line ~61), before the PIC section.
+
+## Task 3
 
 #### New: `QUERIES_LANG_MAP`
 
@@ -164,6 +126,8 @@ export const QUERIES_LANG_MAP: Readonly<Record<string, readonly string[]>> = {
     yaml:       ['definitions.scm', 'locals.scm', 'references.scm'],
 };
 ```
+
+## Task 4
 
 #### New: `getCompiledModularQuery()`
 
@@ -221,6 +185,8 @@ export async function getCompiledModularQuery(langName: string, queryFile: strin
 
 ---
 
+## Task 5
+
 ### `core/tree-sitter/languages.ts` — MODIFICATION
 
 ```typescript
@@ -238,6 +204,8 @@ export async function getCompiledModularQuery(langName: string, queryFile: strin
 **Rationale:** `c_sharp-tags.scm` is 91 lines with namespace/struct/interface/enum/record/method/constructor/property/field/event/delegate/enumerator captures + full reference captures. `csharp-tags.scm` is 19 lines with only class/interface/method/module. The grammar WASM is `tree-sitter-c_sharp.wasm`. The `csharp` WASM and query files become dead weight (can be removed in a future cleanup; not deleted by v3 per file-safety policy).
 
 ---
+
+## Task 6
 
 ### `core/tree-sitter/capture-tags.ts` — NEW
 
@@ -282,6 +250,8 @@ export function parseCaptureTag(captureName: string): ParsedCaptureTag | null {
 
 ---
 
+## Task 7
+
 ### `core/tree-sitter/body.ts` — NEW
 
 **Full path:** `packages/zenith-mcp/src/core/tree-sitter/body.ts`
@@ -316,6 +286,8 @@ export function bodyHash(slice: string): string {
 ```
 
 ---
+
+## Task 8
 
 ### `core/tree-sitter/structure.ts` — NEW
 
@@ -578,7 +550,13 @@ export function extractStructureForDef(rootNode: Node, startLine: number, endLin
 }
 ```
 
+**Scope note (honest):** Even with the per-language tables above, this extractor records child node *types* in `params[]`, not parameter names or parameter type text. That is intentional and sufficient for the only current consumer — `refactor_batch.ts`'s structural-similarity outlier check (`findModal` / `firstDiffReason`) — which compares stable per-language fingerprints, not full parameter semantics. The shape is intentionally NOT a parameter-by-parameter rename or type-comparison tool.
+
+A future consumer that needs richer shape (parameter names, default-value presence, type-annotation node text, variadic flag) can extend `SymbolStructure` and `extractStructureForDef` here **without a schema migration**: the persisted JSON columns (`params_json`, `decorators_json`, `modifiers_json` on `symbol_structures`) already accept arbitrary objects, and the adapter's `getSymbolStructure` parses them back natively. Until such a consumer exists, adding richer fields would be speculative bloat and this plan explicitly does not do it.
+
 ---
+
+## Task 9
 
 ### `core/tree-sitter/anchors.ts` — NEW
 
@@ -845,6 +823,8 @@ export function extractAnchorsForDef(defNode: Node, langName: string, defStartRo
 
 ---
 
+## Task 10
+
 ### `core/tree-sitter/imports.ts` — NEW
 
 **Full path:** `packages/zenith-mcp/src/core/tree-sitter/imports.ts`
@@ -899,6 +879,8 @@ export function extractImportsFromSymbols(symbols: SymbolInfo[]): ImportEdge[] {
 ```
 
 ---
+
+## Task 11
 
 ### `core/tree-sitter/injections.ts` — NEW
 
@@ -1003,6 +985,8 @@ export async function extractInjections(rootNode: Node, langName: string): Promi
 ```
 
 ---
+
+## Task 12
 
 ### `core/tree-sitter/locals.ts` — NEW
 
@@ -1135,6 +1119,8 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
 
 ---
 
+## Task 13
+
 ### `core/indexing/types.ts` — NEW
 
 **Full path:** `packages/zenith-mcp/src/core/indexing/types.ts`
@@ -1221,6 +1207,8 @@ export interface ParsedFileRecord {
 ```
 
 ---
+
+## Task 14 
 
 ### `core/indexing/extract.ts` — NEW
 
@@ -1414,6 +1402,8 @@ export async function extractParsedFile(
 
 ---
 
+## Task 15
+
 ### `core/indexing/persist.ts` — NEW
 
 **Full path:** `packages/zenith-mcp/src/core/indexing/persist.ts`
@@ -1492,6 +1482,8 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
 
 ---
 
+## Task 16
+
 ### `core/indexing/resolve.ts` — NEW
 
 **Full path:** `packages/zenith-mcp/src/core/indexing/resolve.ts`
@@ -1558,6 +1550,8 @@ export function resolveEdgeTargets(conn: DbConnection, filePath: string): void {
 ```
 
 ---
+
+## Task 17
 
 ### `core/db-adapter.ts` — EXPANSION
 
@@ -1768,7 +1762,10 @@ export function updateEdgeCalleeSymbol(conn: DbConnection, edgeId: number, calle
 // --- Aggregate facts read (for TOON integration) ---
 
 export interface FileFacts {
-    defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null }>;
+    // NOTE: defs carries `captureTag` so the compression seam can forward it to
+    // zenith-toon without a second query. Sourced from the v0→v1 `capture_tag`
+    // column on `symbols`.
+    defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
     edges: Array<{ caller_name: string; callee_name: string; call_count: number }>;
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number }>;
@@ -1776,7 +1773,10 @@ export interface FileFacts {
 }
 
 export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
-    const defs = prepareOrCache(conn, `SELECT id, name, line, end_line AS endLine, type, visibility FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`).all(filePath) as FileFacts['defs'];
+    const defs = prepareOrCache(conn,
+        `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
+         FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
+    ).all(filePath) as FileFacts['defs'];
     const edges = prepareOrCache(conn, `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count FROM edges e JOIN symbols caller ON caller.id = e.container_def_id WHERE caller.file_path = ? AND caller.kind = 'def' GROUP BY caller.name, e.referenced_name`).all(filePath) as FileFacts['edges'];
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
@@ -1805,6 +1805,8 @@ weight: row.call_count,
 TOON's `_mergeASTEdges` (sagerank.ts:873–909) consumes `.weight` and multiplies by `astWeight` (default 2.0). The sqrt transform, if needed, is TOON's responsibility per constraints.md §Priority 0.5 line 56.
 
 ---
+
+## Task 18
 
 ### `core/symbol-index.ts` — MODIFICATION
 
@@ -1851,6 +1853,8 @@ try {
 The table itself is part of the v0→v1 DDL block above, so a fresh DB and an existing pre-v1 DB both end up with it. No separate one-off DDL is needed in `getDb`.
 
 ---
+
+## Task 19
 
 ### `core/compression.ts` — GUTTED (v3 remediation: Priority 0.5 hardening)
 
@@ -1967,25 +1971,6 @@ export async function compressForTool(
 }
 ```
 
-#### `FileFacts.defs` shape addition (db-adapter.ts)
-
-`getFileFacts` must also return `captureTag` so the seam forwards it without re-querying:
-
-```typescript
-// db-adapter.ts — FileFacts.defs
-defs: Array<{
-    id: number; name: string; line: number; endLine: number;
-    type: string | null; visibility: string | null;
-    captureTag: string | null;       // NEW
-}>;
-
-// db-adapter.ts — getFileFacts() defs query
-const defs = prepareOrCache(conn,
-    `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
-     FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
-).all(filePath) as FileFacts['defs'];
-```
-
 #### Mechanical Priority 0.5 verification (run after execution)
 
 All five greps below MUST return zero hits inside `packages/zenith-mcp/src/`:
@@ -2008,6 +1993,8 @@ Zero hits = Priority 0.5 holds.
 - `compressTextFile`
 
 ---
+
+## Task 20
 
 ### `tools/read_file.ts` — MODIFICATION
 
@@ -2050,6 +2037,10 @@ if (args.compression) {
 }
 ```
 
+---
+
+## Task 21
+
 ### `tools/read_multiple_files.ts` — MODIFICATION
 
 ```typescript
@@ -2083,6 +2074,8 @@ if (compressed !== null) { content = compressed; }
 ```
 
 ---
+
+## Task 22
 
 ### `tools/refactor_batch.ts` — MODIFICATION (un-breaks outlier detection)
 
@@ -2125,6 +2118,8 @@ const structs: (SymbolStructure | null)[] = targets.map(t => {
 
 ---
 
+## Task 23
+
 ### `core/tree-sitter.ts` — MODIFICATION (re-export new modules)
 
 Add to the barrel:
@@ -2141,6 +2136,8 @@ export { parseCaptureTag, type ParsedCaptureTag } from './tree-sitter/capture-ta
 ```
 
 ---
+
+## Task 24
 
 ### Dormant `patterns` Table — WIRING
 
@@ -2162,12 +2159,6 @@ export function getPattern(conn: DbConnection, name: string): { edit_body: strin
     return row ? { edit_body: row.edit_body, symbol_kind: row.symbol_kind } : null;
 }
 ```
-
----
-
-### Loose `grammars/tree-sitter-javascript.wasm`
-
-The file at `grammars/tree-sitter-javascript.wasm` (416,499 bytes, executable) is dead weight. `runtime.ts` loads from `GRAMMARS_DIR` which points to `grammars/grammars/` (where the canonical 358,909-byte copy lives). **v3 ignores it.** The file is not deleted (per file-safety policy). It can be removed in a cleanup pass.
 
 ---
 
@@ -2264,8 +2255,8 @@ These grammars have WASM files but no `<lang>-tags.scm` and no query directory.
 ### Consumer Wiring
 
 - [ ] `refactor_batch.ts` outlier detection → `findSymbolStructuresByName`
-- [ ] `compression.ts` facts pipe → `getFileFacts` + raw `call_count` edges
-- [ ] `compression.ts` injection awareness → `facts.injections` boosts block priority
+- [ ] `compression.ts` facts pipe → `getFileFacts` returns raw rows (defs, edges with raw `call_count`, anchors, imports, injections); no shaping, no weighting
+- [ ] `compression.ts` → single import of `compressFile` from `zenith-toon`; injection ranges forwarded as raw `RawFileFacts.injections` (TOON owns any priority/preservation decisions)
 - [ ] `read_file.ts` → `compressForTool`
 - [ ] `read_multiple_files.ts` → `compressForTool`
 - [ ] `symbol-index.ts indexDirectory` → `resolveEdgeTargets` post-batch
@@ -2281,132 +2272,28 @@ These grammars have WASM files but no `<lang>-tags.scm` and no query directory.
 - [ ] `compression.ts::compressTextFile` — removed (replaced by `compressForTool`)
 - [ ] `db-adapter.ts:514 Math.sqrt(row.call_count)` — replaced with raw `row.call_count`
 
----
+### Test Repair Gate (must pass before declaring v3 landed)
 
-## Self-Audit Against Constraints
+The pre-v3 test suite has several failures whose assertions pin exactly the surface this plan deletes (`compressTextFile` return shape, `truncateToBudget`, the old `compressionUtils` exports). Execution must repair these tests — ignoring them is not acceptable. The build can be green while tests are red; that is the current baseline.
 
-### Priority 0 (constraints.md)
-
-| Constraint | v3 Status |
-|---|---|
-| Line numbers must be TRUE to original file | v3 does not touch TOON's line-selection or marker emission. MCP passes raw text + budget; TOON returns verbatim lines. |
-| Pre-emit assertion (ascending indices, valid markers) | Not affected — assertion lives inside `_compressSourceStructured` in zenith-toon. |
-| 68–72% keep-ratio acceptable | MCP passes `maxChars` as budget ceiling. TOON internally floors at `Math.max(budget, Math.floor(text.length * 0.70))`. v3 does not override this. |
-| Single canonical marker `[TRUNCATED: lines X-Y]` flush-left | Not affected — marker format is TOON-internal. |
-| Verbatim line rule | Not affected — MCP passes raw text, receives compressed text, pipes to caller untouched. |
-| `_MIN_OMISSION_THRESHOLD = 6` | Not affected — lives in TOON. |
-
-### Priority 0.5 (constraints.md)
-
-| Constraint | v3 Status |
-|---|---|
-| Every compression decision in zenith-toon | ✅ `compressForTool` passes raw facts. No budget math, no keep-ratio, no "is useful" gate in MCP. |
-| MCP supplies raw facts only | ✅ `getFileFacts` returns defs/edges/anchors/imports/injections as raw DB rows. |
-| No MCP-side `StructureBlock[]` or `CompressionContext` construction | ✅ **v3 remediation**: `compressForTool` now calls a single new TOON entrypoint `compressFile(req)` and passes raw `RawFileFacts`. MCP imports zero TOON-internal types. Mechanical proof: the five `grep` commands in the `core/compression.ts — GUTTED` section must all return zero hits inside `packages/zenith-mcp/src/`. |
-| No edge weighting in MCP | ✅ `call_count` passed raw. `Math.sqrt` removed from `getFileBlockEdges`. |
-| Forbidden symbols removed | ✅ `computeCompressionBudget`, `isCompressionUseful`, `DEFAULT_COMPRESSION_KEEP_RATIO`, `truncateToBudget`, `compressTextFile` all deleted. |
-| No file with "compression" or "toon" in name making decisions | ✅ `compression.ts` is a facts pipe only. |
-
-### zenith-toon-goal.md
-
-| Rule | v3 Status |
-|---|---|
-| TOON owns compression intelligence | ✅ MCP is pipe + context provider. |
-| MCP may provide: file text, path, root, budget, DB metadata, language hints | ✅ That's exactly what `compressForTool` provides. |
-| No fake local SageRank/BMX/budget/dedup | ✅ None proposed. All live in zenith-toon. |
-| No MCP-side tree-sitter-to-TOON compression adapters | ✅ The thin `compression.ts` gathers existing MCP data (getSymbols, getFileFacts) and passes it. No "adapter" or "shaping" logic. |
-| Use the real engines (import, don't reimplement) | ✅ `compressSourceStructured` and `compressString` imported directly from zenith-toon workspace package. |
-
-### AGENTS.md Invariants
-
-| Rule | v3 Status |
-|---|---|
-| Only `db-adapter.ts` imports `node:sqlite` | ✅ Verified by grep — single hit at `db-adapter.ts:1`. |
-| No subprocess bridge | ✅ Direct ESM workspace import `from 'zenith-toon'`. |
-| One transaction per file re-index | ✅ `persistParsedFile` wraps everything in one `runTransaction`. |
-| Schema changes additive | ✅ All new columns nullable, all new tables standalone, `CREATE IF NOT EXISTS`. |
+- [ ] **T1. Baseline snapshot.** Before any v3 file is written, run `pnpm -s test --run` from repo root and capture the failing-test set. Anything failing for a v3-unrelated reason gets a tracking note (do not fix here). Anything failing because it asserts against deleted MCP surface is a v3 obligation.
+- [ ] **T2. Rewrite or delete every test reference to deleted exports.** For each of `compressTextFile`, `computeCompressionBudget`, `isCompressionUseful`, `DEFAULT_COMPRESSION_KEEP_RATIO`, `truncateToBudget`, grep the entire `packages/zenith-mcp/tests/**` tree and either rewrite the assertion against the new seam (`compressForTool` return shape — a string or `null`) or delete the test if it pinned an internal that no longer exists. Known affected suites at time of writing: `tool-compression`, `read-multiple-files`, `read-multiple-files-concurrent`, `http-session-cleanup`, `compression-utils`. Confirm the list against T1.
+- [ ] **T3. Add one extractor smoke test per new module.** For each of `structure`, `anchors`, `imports`, `injections`, `locals`, add at least one test using a tiny fixture file in each of python, typescript, rust, go. These prove the per-language tables (PARAM_CONTAINERS_BY_LANG, ANCHOR_RULES, etc.) actually fire and the injections two-level `setProperties` lookup works against the real `web-tree-sitter` runtime.
+- [ ] **T4. Add a `compressForTool` integration test.** Exercise (a) the empty-facts path (no repo root, no DB) and (b) the populated-facts path (a small repo with an indexed file). Assert ONLY that the output is `string | null` and (when non-null) shorter than the input. **The test must not import or assert any TOON-internal shape** — if it does, it leaks Priority 0.5 across the test boundary.
+- [ ] **T5. Re-run and gate.** `pnpm -s test --run` must show **net new failing tests ≤ 0** versus the T1 baseline. v3 is not landed until this holds.
 
 ---
 
-## v3.1 Remediation Addendum
+## Mechanical Verification (run after execution)
 
-This addendum is additive to the v3 plan above. It records corrections applied after a third-party verdict (see `docs/plan_audit/v2-vs-v3-verdict.md`) flagged eight execution-blocking issues. Every fix is already inlined in the relevant section above; this addendum is the index so an engineer can audit that each fix landed.
-
-### A1. Priority 0.5 hardening of the `core/compression.ts` seam
-
-**Issue:** The original v3 `compressForTool` snippet imported `StructureBlock`/`CompressionContext` from `zenith-toon`, constructed them in MCP, mapped DB anchors onto blocks, forwarded `astEdges`, filtered `exportedSymbols`, and boosted block priority for injections. All five are TOON-side decisions; constraints.md §Priority 0.5 forbids them in MCP.
-
-**Fix (see `core/compression.ts — GUTTED (v3 remediation)` section):**
-- New TOON entrypoint `compressFile(req: CompressFileRequest): string | null` added to `packages/zenith-toon/src/string-codec.ts` and re-exported from `index.ts`.
-- New TOON-public type `RawFileFacts` defined in `packages/zenith-toon/src/types.ts`. Contains only raw, position-bearing data: defs, edges (raw `callCount`), anchors, imports, injections. No priorities. No weights. No `StructureBlock`. No `CompressionContext`.
-- MCP's `compression.ts` now imports exactly one symbol from `zenith-toon` (`compressFile`) and zero internal types. The body gathers raw facts and forwards them.
-- Five mechanical grep checks (listed in the section) prove the invariant after execution. Any non-zero hit is a Priority 0.5 regression.
-
-### A2. Uniform `prepareOrCache` use in `findSymbolStructuresByName`
-
-**Issue:** The original snippet used `handle(conn).prepare(sql).all(...)` for the conditional-kind branch, breaking the rule that every adapter function uses the same `prepareOrCache` wrapper.
-
-**Fix:** Replaced with `prepareOrCache(conn, sql).all(...params)`. The cache key is the final SQL string, so the kind-filtered and non-filtered shapes get distinct slots. Inline comment documents the rationale.
-
-### A3. Strict dot-qualified resolution in `resolve.ts`
-
-**Issue:** The dot-qualified fallback (`Foo.bar` → try `bar`) accepted any unambiguous `bar` even when its containing class wasn't `Foo`. That misroutes edges across unrelated namespaces.
-
-**Fix:** The fallback now requires that the short-name's parent (looked up via the new `findSymbolParent` adapter) exists AND its `name` equals the qualifier. If either condition fails, the edge stays null. New adapter function `findSymbolParent(conn, symbolId)` added with verbatim SQL using `prepareOrCache`. Inline rationale documents that ambiguous edges heal on the next sweep through `ON DELETE SET NULL`.
-
-### A4. Per-language parameter and modifier maps in `structure.ts`
-
-**Issue:** A single global `PARAM_CONTAINER_TYPES` set and a single global `MODIFIER_KEYWORDS` set drove structural extraction for every language, conflating grammar-specific node types (`formals` vs `formal_parameters` vs `parameter_list` vs `closure_parameters` etc.) and missing language-specific keywords (`pub`, `suspend`, `readonly`, `nonmutating`).
-
-**Fix:** Two new per-language tables: `PARAM_CONTAINERS_BY_LANG` (17 languages literal + global fallback) and `MODIFIER_KEYWORDS_BY_LANG` (6 languages whose modifier vocabulary materially differs from the global default; unioned with the default at lookup time so generic keywords are never lost). Two new helper functions: `paramContainersFor(langName)` and `modifierKeywordsFor(langName)`. `extractStructureForDef` now takes a `langName` argument and uses the per-language lookups. The single caller in `extract.ts` was updated to pass `langName`.
-
-### A5. Predicate handling in `injections.ts`
-
-**Issue:** Original code used a single `(match as any).setProperties` cast and only checked the match-level field. Nearly every shipped `injections.scm` writes `(#set! injection.language "sql")` at the pattern level, which lives on `Query.setProperties[patternIndex]`, not the match.
-
-**Fix:** Two-level lookup, properly typed against the actual `web-tree-sitter@0.26.9` `.d.ts`:
-1. Check `QueryMatch.setProperties` (match-level) for predicates that reference a capture.
-2. Fall back to `Query.setProperties[match.patternIndex]` (pattern-level) for the constant `#set!` form that nearly every injections.scm uses.
-
-No `as any` on either branch; both casts are to narrow structural types derived from the upstream `.d.ts`. Inline comments cite the `.d.ts` line numbers (828–845, 904–905).
-
-### A6. `project_roots` DDL inside the v0→v1 ladder + prose cleanup
-
-**Issue:** The v0→v1 DDL block did not include `CREATE TABLE project_roots`; only the prose around `getDb` mentioned that v3 would add it. Result: a fresh DB on a new project would call `upsertProjectRoot` against a table that didn't exist.
-
-**Fix:** `CREATE TABLE IF NOT EXISTS project_roots (...)` appended to the v0→v1 DDL block. Prose around `getDb` updated to remove the misleading "global registry" framing — v3 puts the table in the project DB, full stop. Trade-off and future global-registry path documented honestly. The dead `initGlobalSchema` path remains unreferenced; a follow-up cleanup may delete it but v3 does not (file-safety policy).
-
-### A7. Test repair mandate (execution-time requirement)
-
-**Issue:** Build is green; tests are not (verified by the v2-vs-v3 reviewer). Several pre-existing failures (`tool-compression`, `read-multiple-files`, `read-multiple-files-concurrent`, `http-session-cleanup`, `compression-utils`) reference exactly the surface v3 deletes (`truncateToBudget`, the old `compressTextFile` return shape, etc.). Execution must repair these tests, not ignore them.
-
-**Procedure:**
-- **T1.** Before any v3 code lands, run `pnpm -s test --run` and snapshot the failing-test list. Anything failing for a non-v3 reason gets a tracking note; anything failing because it pins the deleted surface gets rewritten against `compressForTool` / the inline 3-line truncator.
-- **T2.** For each deleted MCP-side export (`compressTextFile`, `computeCompressionBudget`, `isCompressionUseful`, `DEFAULT_COMPRESSION_KEEP_RATIO`, `truncateToBudget`), grep the entire `packages/zenith-mcp/tests/**` tree and rewrite or delete every reference. The replacement assertions should target the `compressForTool` return shape (a string or null) and the truncator's behavior at the call-site level.
-- **T3.** Add at least one new test per new extractor (`structure`, `anchors`, `imports`, `injections`, `locals`) using a tiny fixture file in each of: python, typescript, rust, go. These prove the per-language tables actually fire.
-- **T4.** Add a `compressForTool` integration test that exercises the empty-facts fallback path (no repo root, no DB) and the populated-facts path. Assert ONLY that the output is a string (or null) shorter than `rawText`. The test must not pin any internal TOON shape — if it does, it leaks Priority 0.5 across the test boundary.
-- **T5.** Re-run `pnpm -s test --run`. **Net change in failing tests must be ≤ 0.**
-
-### A8. Honest scope of per-language structural extraction
-
-**Issue:** Even with A4 applied, structural extraction stays *approximate* for languages whose parameter lists carry rich shape (typed/defaulted/destructured parameters, generics with constraints, variadic forms). The current `extractStructureForDef` records child node *types* as `params[]`, not parameter names or types. That is enough to drive `refactor_batch`'s structural-similarity outlier check (the consumer that exists today), but it is not a full semantic parameter model.
-
-**Decision and remediation path:**
-- v3 ships exactly what the only current consumer (`refactor_batch.ts::findModal`/`firstDiffReason`) needs: a stable, comparable per-language fingerprint of parameter container *shape* plus return-kind node type plus parent-kind plus decorators plus modifiers. That is sufficient to flag outliers; it is intentionally not a parameter-by-parameter rename tool.
-- A future consumer that needs richer shape (parameter names, default-value presence, type-annotation node text, variadic flag) can extend `SymbolStructure` and `extractStructureForDef` without schema migration: the JSON columns (`params_json`, etc.) already accept richer objects, and the adapter's `getSymbolStructure` returns parsed objects so consumers see the new shape natively.
-- Until that consumer exists, adding more fields to `SymbolStructure` would be speculative bloat. The plan explicitly does not do it.
-- The honest scope is documented here so a future agent does not interpret "per-language structure" as "full semantic parameter model."
-
-### A9. Mechanical verification checklist (run after execution)
-
-All commands run from the repo root. **Every one of these must be true** before v3 is considered landed.
+All commands run from the repo root. **Every one of these must be true** before v3 is considered landed. Each check is paired with the requirement it proves.
 
 ```bash
-# 1. Only db-adapter.ts imports node:sqlite.
+# 1. Only db-adapter.ts imports node:sqlite. (AGENTS.md invariant)
 grep -rn "node:sqlite" packages/zenith-mcp/src/ | grep -v db-adapter.ts
 # Expected: empty.
 
-# 2. No MCP-side compression-decision symbols remain.
+# 2. No MCP-side compression-decision symbols remain. (Priority 0.5)
 grep -rn 'StructureBlock\|CompressionContext' packages/zenith-mcp/src/
 grep -rn 'compressSourceStructured\|compressString\b' packages/zenith-mcp/src/
 grep -rn 'computeCompressionBudget\|isCompressionUseful\|DEFAULT_COMPRESSION_KEEP_RATIO\|truncateToBudget\|compressTextFile' packages/zenith-mcp/src/
@@ -2414,37 +2301,40 @@ grep -rn 'Math\.sqrt(.*call_count\|astWeight\|astEdges' packages/zenith-mcp/src/
 grep -rn 'block\.priority' packages/zenith-mcp/src/
 # Expected: all five empty.
 
-# 3. Single TOON import in MCP compression seam.
+# 3. Single TOON import in MCP compression seam. (Priority 0.5)
 grep -n "from 'zenith-toon'" packages/zenith-mcp/src/core/compression.ts
 # Expected: one line: `import { compressFile } from 'zenith-toon';`
 
 # 4. handle(conn).prepare is never used outside the (test-only) escape hatch.
+#    (db-adapter uniformity — every adapter goes through prepareOrCache)
 grep -rn 'handle(conn)\.prepare\|handle([a-z]*)\.prepare' packages/zenith-mcp/src/core/db-adapter.ts
 # Expected: only inside the documented test-only escape-hatch comment block.
 
-# 5. No dot-qualified fallback links without a parent check.
+# 5. Dot-qualified fallback enforces the strict parent check. (resolver correctness)
 grep -n 'findSymbolByNameUnique' packages/zenith-mcp/src/core/indexing/resolve.ts
 grep -n 'findSymbolParent'      packages/zenith-mcp/src/core/indexing/resolve.ts
-# Expected: both present in the same file.
+# Expected: both present in the same file. The parent check must reject `Foo.bar`
+# when the unique short-name's parent is not literally named `Foo`.
 
 # 6. Per-language tables actually live in structure.ts.
 grep -n 'PARAM_CONTAINERS_BY_LANG\|MODIFIER_KEYWORDS_BY_LANG' \
   packages/zenith-mcp/src/core/tree-sitter/structure.ts
 # Expected: both present.
 
-# 7. Injections predicate fix is in place.
+# 7. Injections predicate fix is in place — two-level setProperties lookup.
 grep -n 'setProperties\|patternIndex' packages/zenith-mcp/src/core/tree-sitter/injections.ts
-# Expected: at least one match for each on separate lines (the two-level lookup).
+# Expected: at least one match for each on separate lines.
 
 # 8. project_roots lives in the v0→v1 DDL.
 grep -n 'project_roots' packages/zenith-mcp/src/core/db-adapter.ts
 # Expected: at least one hit inside initSymbolSchema's v0→v1 block.
 
-# 9. Build and tests.
+# 9. Build and tests. (Test Repair Gate)
 pnpm -s build
 pnpm -s test --run
 # Build: must be green.
-# Tests: net new failing tests must be ≤ 0 vs the pre-v3 baseline captured in T1.
+# Tests: net new failing tests must be ≤ 0 vs the pre-v3 baseline captured in T1
+# of the Test Repair Gate above.
 ```
 
 If any of the nine checks fails, **do not declare v3 landed.**
