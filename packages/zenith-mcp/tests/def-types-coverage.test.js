@@ -57,8 +57,6 @@ function stripComments(text) {
                 i += 2;
                 continue;
             }
-                continue;
-            }
             if (c === '"') inString = false;
             out += c;
             i++;
