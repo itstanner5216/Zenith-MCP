@@ -11,18 +11,21 @@
 // Architecture (docs/toon-constraints/constraints.md §0.5 and
 // docs/toon-goal/zenith-toon-goal.md):
 //
-//   tree-sitter extracts symbol facts          ← only the ingestion
-//          ↓                                     path (symbol-index)
-//   db-adapter persists them                     and the extractor's
-//          ↓                                     own tests are allowed
-//   all later symbol consumers read from DB      to call extraction.
+//   tree-sitter extracts symbol facts          ← only the DB
+//          ↓                                     ingestion path
+//   db-adapter persists them                     (./symbol-index.ts)
+//          ↓                                     is allowed to call
+//   all later symbol consumers read from DB      extraction directly.
 //
 // Consumers MUST go through this module. Direct imports of
 // `getSymbols` / `getDefinitions` / `findSymbol` from
 // `./tree-sitter/symbols.js` are forbidden in consumer code — the
 // barrel deliberately does not re-export them, and the submodule is
-// reserved for the ingestion path. New code that needs symbol data
-// goes through the helpers below.
+// reserved for the ingestion path. The extractor's own behavioral
+// tests under `packages/zenith-mcp/tests/` may import the submodule
+// because they ARE the extractor's tests; that is not a consumer
+// pattern and does not extend to other tests or to any src/ file.
+// Every other reader uses the helpers below.
 //
 // Indexing is on-demand: every helper calls `ensureIndexFresh()` so
 // the DB reflects current disk state before the query runs. If the

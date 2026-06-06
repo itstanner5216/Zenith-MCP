@@ -4,15 +4,18 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { getLangForFile, isSupported } from './tree-sitter.js';
-// EXTRACTOR DIRECT IMPORT — sanctioned ingestion-path call site.
+// EXTRACTOR DIRECT IMPORT — sole sanctioned non-test call site.
 //
-// Per docs/toon-constraints §0.5 the only allowed direct callers of
-// the tree-sitter symbol extractor are (a) this module (the DB
-// ingestion path — `indexFile` extracts symbols and persists them via
-// `insertSymbol`); (b) the edit engine (in-flight edit buffer that has
-// no on-disk source for the DB to read from); and (c) the extractor's
-// own tests under `packages/zenith-mcp/tests/`. Every other consumer
-// goes through `./indexed-symbols.js` for DB-backed reads.
+// Per docs/toon-constraints §0.5 the ONLY non-test caller allowed to
+// invoke the tree-sitter symbol extractor directly is this module —
+// the DB ingestion path. `indexFile` below extracts symbols and
+// persists them through `insertSymbol`; every other reader in the
+// codebase goes through `./indexed-symbols.js` for DB-backed reads.
+//
+// The extractor's own behavioral tests under
+// `packages/zenith-mcp/tests/` may also import from the symbols
+// submodule because they ARE the extractor's tests; that is not a
+// general consumer pattern.
 import { getSymbols } from './tree-sitter/symbols.js';
 import { getDefaultExcludes, isSensitive, getRefactorVersionTtlMs } from './shared.js';
 import { minimatch } from 'minimatch';
