@@ -158,8 +158,9 @@ function extractDefinitionNodeTypes(scmText) {
         const c = text[i];
         if (c !== '(' && c !== '[') { i++; continue; }
         const end = findMatchingClose(text, i);
-        if (end === -1) break;
-        // include trailing quantifier + capture in the pattern text we
+        if (end === -1) {
+            throw new Error(`Malformed tree-sitter query: unmatched '${c}' at offset ${i}`);
+        }
         // search for definition markers
         let after = end + 1;
         while (after < n && /\s/.test(text[after])) after++;
