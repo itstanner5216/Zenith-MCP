@@ -159,6 +159,7 @@ function extractDefinitionNodeTypes(scmText) {
         if (end === -1) {
             throw new Error(`Malformed tree-sitter query: unmatched '${c}' at offset ${i}`);
         }
+        // include trailing quantifier + capture in the pattern text we
         // search for definition markers
         let after = end + 1;
         while (after < n && /\s/.test(text[after])) after++;
