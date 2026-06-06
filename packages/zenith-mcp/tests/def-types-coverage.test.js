@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { DEF_TYPES } from '../dist/core/tree-sitter/symbols.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const QUERIES_DIR = path.resolve(__dirname, '../grammars/queries');
+const QUERIES_DIR = path.resolve(__dirname, '../dist/grammars/queries');
 
 // ---------------------------------------------------------------------------
 // Tree-sitter query (.scm) parser
