@@ -65,7 +65,7 @@ export interface SymbolFilterOptions {
 // ---------------------------------------------------------------------------
 
 export const DEF_TYPES: ReadonlySet<string> = new Set<string>([
-    // XML/HTML element-shape patterns (camelCase upstream node names)
+    // XML/HTML element-shape patterns (PascalCase upstream node names)
     'Attribute',
     'EmptyElemTag',
     'STag',
