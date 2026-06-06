@@ -48,11 +48,15 @@ function stripComments(text) {
             if (c === '\\') {
                 // Escape sequence inside a quoted string — copy both chars
                 // verbatim. If a stray backslash sits at EOF the input is
-                // malformed; bail rather than fabricate a missing char.
-                if (i + 1 >= text.length) break;
+                // malformed; fail loudly rather than fabricating a missing char.
+                if (i + 1 >= text.length) {
+                    throw new Error('Malformed tree-sitter query: trailing backslash in string literal');
+                }
                 out += c;
                 out += text[i + 1];
                 i += 2;
+                continue;
+            }
                 continue;
             }
             if (c === '"') inString = false;
