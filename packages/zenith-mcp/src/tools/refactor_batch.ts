@@ -11,7 +11,7 @@ import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
-import { getFileCount, getFilePaths, findSymbolFiles, getFileHash } from '../core/db-adapter.js';
+import { getFileCount, getFilePaths, findSymbolFiles, getFileHash, findSymbolStructuresByName } from '../core/db-adapter.js';
 // ---------------------------------------------------------------------------
 // Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
@@ -468,8 +468,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const [symName, group] of bySymbol) {
                 if (group.length < 2)
                     continue;
-                const structs: (SymbolStructure | null)[] = [];
-                // TODO: Populate actual SymbolStructure from AST for each occurrence in group
+                const dbStructs = findSymbolStructuresByName(db, symName);
+                const structs: (SymbolStructure | null)[] = group.map(occ => {
+                    const match = dbStructs.find(s => s.file_path === occ.relFile && s.line === occ.line);
+                    if (!match)
+                        return null;
+                    return { params: match.params, returnKind: match.returnText, parentKind: match.parentKind, decorators: match.decorators, modifiers: match.modifiers };
+                });
                 const modal = findModal(structs);
                 if (!modal)
                     continue;
@@ -971,8 +976,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Outlier flagging: compare new targets against the ORIGINAL baseline
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
-            const structs: (SymbolStructure | null)[] = [];
-            // TODO: Populate actual SymbolStructure from AST for each target
+            const structs: (SymbolStructure | null)[] = targets.map(t => {
+                const matches = findSymbolStructuresByName(db, t.symbol);
+                const match = matches.find(s => s.file_path === t.relFile && s.line === t.line);
+                if (!match)
+                    return null;
+                return { params: match.params, returnKind: match.returnText, parentKind: match.parentKind, decorators: match.decorators, modifiers: match.modifiers };
+            });
             {
                 const baseline = cachedPayload.modalStructure;
                 const modal = baseline || (targets.length >= 2 ? findModal(structs) : null);

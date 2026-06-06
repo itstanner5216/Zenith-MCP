@@ -2,7 +2,7 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { getCharBudget } from '../core/shared.js';
-import { compressTextFile, truncateToBudget } from '../core/compression.js';
+import { compressForTool } from '../core/compression.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 interface ReadMultipleFilesArgs {
@@ -134,9 +134,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
 
                 const effectiveBudget = Math.max(0, budget - entryPrefix.length);
-                const truncatedResult = truncateToBudget(content, effectiveBudget);
-                content = truncatedResult.text;
-                const truncated = truncatedResult.truncated;
+                let truncated = false;
+                if (content.length > effectiveBudget) {
+                    let cutoff = content.lastIndexOf('\n', effectiveBudget);
+                    if (cutoff === -1) cutoff = effectiveBudget;
+                    content = content.slice(0, cutoff);
+                    truncated = true;
+                }
 
                 const lines = content.split('\n');
                 if (lines[lines.length - 1] === '')
@@ -144,9 +148,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
 
                 if (args.compression !== false) {
-                    const compressed = await compressTextFile(validPath, content, effectiveBudget);
+                    const compressed = await compressForTool(validPath, content, effectiveBudget);
                     if (compressed !== null) {
-                        content = compressed.text;
+                        content = compressed;
                     }
                 }
 

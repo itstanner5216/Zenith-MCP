@@ -3,7 +3,7 @@ import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { readFileContent } from '../core/lib.js';
 import { getCharBudget } from '../core/shared.js';
-import { compressTextFile, truncateToBudget } from '../core/compression.js';
+import { compressForTool } from '../core/compression.js';
 import { ToolServer, ToolContext } from './types.js';
 
 interface LineWindow {
@@ -99,8 +99,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
         let content = await readFileContent(validPath);
         let truncated = false;
         if (content.length > maxChars) {
-            const truncatedResult = truncateToBudget(content, maxChars);
-            content = truncatedResult.text;
+            let cutoff = content.lastIndexOf('\n', maxChars);
+            if (cutoff === -1) cutoff = maxChars;
+            content = content.slice(0, cutoff);
             truncated = true;
         }
 
@@ -110,9 +111,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
         content = lines.map((line: string, i: number) => `${i + 1}:${line}`).join('\n');
 
         if (args.compression) {
-            const compressed = await compressTextFile(validPath, content, maxChars);
+            const compressed = await compressForTool(validPath, content, maxChars);
             if (compressed !== null) {
-                content = compressed.text;
+                content = compressed;
             }
         }
 

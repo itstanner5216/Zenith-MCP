@@ -73,6 +73,38 @@ export interface CompressionContext {
 }
 
 // ---------------------------------------------------------------------------
+// compressFile entrypoint contract — raw facts in, compressed string out
+// ---------------------------------------------------------------------------
+
+/**
+ * Raw structural facts about a single file, gathered by the consumer.
+ * TOON owns all shaping/compression decisions; the consumer only gathers facts.
+ */
+export interface RawFileFacts {
+    path: string;                 // repo-relative; TOON does not read the filesystem
+    langName: string | null;      // tree-sitter language name, or null if unsupported
+    defs: Array<{
+        name: string;
+        kind: string;             // always 'def' on this payload
+        type: string;             // e.g. 'function', 'method', 'class'
+        line: number;             // 1-based
+        endLine: number;          // 1-based
+        visibility: string | null;
+        captureTag: string | null;
+    }>;
+    edges: Array<{ callerName: string; calleeName: string; callCount: number }>; // raw count; no sqrt
+    anchors: Array<{ symbolName: string; kind: string; line: number; text: string }>; // 1-based
+    imports: Array<{ module: string; importedNames: string[]; line: number }>;
+    injections: Array<{ injectedLang: string; startLine: number; endLine: number }>; // verbatim ranges; Priority 0
+}
+
+export interface CompressFileRequest {
+    source: string;
+    maxChars: number;             // ceiling only; TOON floors at 70% internally
+    facts: RawFileFacts;
+}
+
+// ---------------------------------------------------------------------------
 // config shapes
 // ---------------------------------------------------------------------------
 

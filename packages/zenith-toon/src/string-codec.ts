@@ -9,7 +9,7 @@
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
 import { SageRank } from './sagerank.js';
-import type { StructureBlock, ASTEdge, CompressionContext } from './types.js';
+import type { StructureBlock, Anchor, ASTEdge, CompressionContext, RawFileFacts, CompressFileRequest } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Detection patterns
@@ -60,7 +60,7 @@ const _SOURCE_IMPORT_RE = /^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)/
 const _DECORATOR_RE = /^\s*@\w+/;
 const _DOC_TAG_RE = /^\s*(?:\*\s*)?@(?:param|returns?|type|template|typedef|property|throws?)\b/;
 
-const _MIN_OMISSION_THRESHOLD = 10;
+const _MIN_OMISSION_THRESHOLD = 6;
 
 // ---------------------------------------------------------------------------
 // Content Type Detection
@@ -180,10 +180,11 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     other.push([i, line]);
   }
 
-  // Phase 2: Calculate header cost (headers always included)
+  // Phase 2: Calculate header cost (headers always included).
+  // Cost includes the `N. ` prefix width emitted per shown line.
   let headerCost = 0;
-  for (const [, line] of headers) {
-    headerCost += line.length + 1;
+  for (const [hi, line] of headers) {
+    headerCost += line.length + (String(hi + 1).length + 2) + 1;
   }
   const frameBudget = Math.max(0, budget - headerCost);
 
@@ -195,7 +196,7 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     selectedFrameIndices = [];
     let used = 0;
     for (let fi = 0; fi < frames.length; fi++) {
-      const lineLen = frames[fi]![1].length + 1;
+      const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
       if (used + lineLen <= frameBudget) {
         selectedFrameIndices.push(fi);
         used += lineLen;
@@ -233,13 +234,13 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     
     // First pass: add SageRank-selected frames
     for (const fi of result.selectedIndices) {
-      const lineLen = frames[fi]![1].length + 1;
+      const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
       if (used + lineLen <= frameBudget) {
         selectedFrameIndices.push(fi);
         used += lineLen;
       }
     }
-    
+
     // Second pass: if budget remains, fill with highest-scored non-selected
     if (used < frameBudget) {
       const scores = result.scores;
@@ -248,9 +249,9 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
         .map((_, i) => i)
         .filter(i => !selectedSet.has(i))
         .sort((a, b) => scores[b]! - scores[a]!);
-      
+
       for (const fi of remaining) {
-        const lineLen = frames[fi]![1].length + 1;
+        const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
         if (used + lineLen <= frameBudget) {
           selectedFrameIndices.push(fi);
           used += lineLen;
@@ -283,10 +284,10 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     }
   }
 
-  // Add tiny gap lines to selected (within budget)
-  let usedAfterGaps = selected.reduce((sum, [, line]) => sum + line.length + 1, 0);
+  // Add tiny gap lines to selected (within budget). Prefix width charged.
+  let usedAfterGaps = selected.reduce((sum, [idx, line]) => sum + line.length + (String(idx + 1).length + 2) + 1, 0);
   for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
-    const lineLen = lines[idx]!.length + 1;
+    const lineLen = lines[idx]!.length + (String(idx + 1).length + 2) + 1;
     if (usedAfterGaps + lineLen <= budget) {
       selected.push([idx, lines[idx]!]);
       usedAfterGaps += lineLen;
@@ -295,23 +296,35 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
   selected.sort((a, b) => a[0] - b[0]);
   const finalKeptIndices = selected.map(([idx]) => idx);
 
-  // Phase 6: Build result with markers only for gaps >= threshold
+  // Phase 6: Build result. Every shown line is `${idx+1}. <verbatim>`; gaps >=
+  // threshold become a single flush-left `[TRUNCATED: lines X-Y]`. The
+  // budget-break keeps output within budget.
   const resultParts: string[] = [];
+  let emittedUsed = 0;
 
   // Check for leading gap
   if (finalKeptIndices[0]! >= _MIN_OMISSION_THRESHOLD) {
-    resultParts.push(`[TRUNCATED: lines 1-${finalKeptIndices[0]!}]`);
+    const leadMarker = `[TRUNCATED: lines 1-${finalKeptIndices[0]!}]`;
+    resultParts.push(leadMarker);
+    emittedUsed += leadMarker.length + 1;
   }
 
   for (let i = 0; i < selected.length; i++) {
-    resultParts.push(selected[i]![1]);
+    const [idx, line] = selected[i]!;
+    const shown = `${idx + 1}. ${line}`;
+    if (emittedUsed + shown.length + 1 > budget) break;
+    resultParts.push(shown);
+    emittedUsed += shown.length + 1;
 
     if (i < selected.length - 1) {
       const currentIdx = finalKeptIndices[i]!;
       const nextIdx = finalKeptIndices[i + 1]!;
       const gap = nextIdx - currentIdx - 1;
       if (gap >= _MIN_OMISSION_THRESHOLD) {
-        resultParts.push(`[TRUNCATED: lines ${currentIdx + 2}-${nextIdx}]`);
+        const gapMarker = `[TRUNCATED: lines ${currentIdx + 2}-${nextIdx}]`;
+        if (emittedUsed + gapMarker.length + 1 > budget) break;
+        resultParts.push(gapMarker);
+        emittedUsed += gapMarker.length + 1;
       }
     }
   }
@@ -320,7 +333,10 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
   const lastKept = finalKeptIndices[finalKeptIndices.length - 1]!;
   const trailingGap = lines.length - 1 - lastKept;
   if (trailingGap >= _MIN_OMISSION_THRESHOLD) {
-    resultParts.push(`[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`);
+    const trailMarker = `[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`;
+    if (emittedUsed + trailMarker.length + 1 <= budget) {
+      resultParts.push(trailMarker);
+    }
   }
 
   return resultParts.join('\n');
@@ -559,12 +575,12 @@ function _compressLog(text: string, budget: number): string {
 
   for (const idx of rankedIndices) {
     const pattern = uniquePatterns[idx]!;
-    const lineCost = pattern.firstEntry.line.length + 1;
-    const repeatMarkerCost = pattern.count > 1 ? `  [repeated ${pattern.count} times]`.length : 0;
+    const fe = pattern.firstEntry;
+    const lineCost = fe.line.length + (String(fe.originalIdx + 1).length + 2) + 1;
 
-    if (used + lineCost + repeatMarkerCost > budget) continue;
+    if (used + lineCost > budget) continue;
     selectedPatterns.push(pattern);
-    used += lineCost + repeatMarkerCost;
+    used += lineCost;
   }
 
   // Phase 5: For patterns with multiple occurrences, also try to include last occurrence
@@ -580,7 +596,7 @@ function _compressLog(text: string, budget: number): string {
     // Include last if different and budget allows
     if (entries.length > 1) {
       const lastEntry = entries[entries.length - 1]!;
-      const lastCost = lastEntry.line.length + 1;
+      const lastCost = lastEntry.line.length + (String(lastEntry.originalIdx + 1).length + 2) + 1;
       if (used + lastCost <= budget && !includedIndices.has(lastEntry.originalIdx)) {
         finalEntries.push(lastEntry);
         includedIndices.add(lastEntry.originalIdx);
@@ -589,25 +605,29 @@ function _compressLog(text: string, budget: number): string {
     }
   }
 
-  // Phase 6: Sort by original position and build output
+  // Phase 6: Sort by original position and build output. Every shown line is
+  // `${idx+1}. <verbatim>` (no `[repeated N]` suffix — Priority-0 forbids
+  // appended annotations); gaps >= threshold get a flush-left
+  // `[TRUNCATED: lines X-Y]`. Budget-break keeps output within budget.
   finalEntries.sort((a, b) => a.originalIdx - b.originalIdx);
 
   const outputParts: string[] = [];
-  const patternCounts = new Map<string, number>();
-  for (const pattern of selectedPatterns) {
-    if (pattern.count > 1) {
-      patternCounts.set(pattern.normHash, pattern.count);
-    }
-  }
+  let emittedUsed = 0;
+  let prevIdx = -1;
 
   for (const entry of finalEntries) {
-    const count = patternCounts.get(entry.normHash);
-    if (count !== undefined) {
-      outputParts.push(`${entry.line}  [repeated ${count} times]`);
-      patternCounts.delete(entry.normHash); // Only annotate once
-    } else {
-      outputParts.push(entry.line);
+    if (prevIdx >= 0 && entry.originalIdx - prevIdx - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const gapMarker = `[TRUNCATED: lines ${prevIdx + 2}-${entry.originalIdx}]`;
+      if (emittedUsed + gapMarker.length + 1 <= budget) {
+        outputParts.push(gapMarker);
+        emittedUsed += gapMarker.length + 1;
+      }
     }
+    const shown = `${entry.originalIdx + 1}. ${entry.line}`;
+    if (emittedUsed + shown.length + 1 > budget) break;
+    outputParts.push(shown);
+    emittedUsed += shown.length + 1;
+    prevIdx = entry.originalIdx;
   }
 
   // Phase 7: Add truncation marker if needed
@@ -785,7 +805,8 @@ function _compressSourceCode(text: string, budget: number): string {
     if (line === undefined) {
       throw new Error(`invariant: lc called with out-of-range index ${idx}`);
     }
-    return line.length + 1;
+    // Cost includes the `N. ` prefix width emitted per shown line.
+    return line.length + (String(idx + 1).length + 2) + 1;
   };
 
   let mandatoryChars = 0;
@@ -856,54 +877,76 @@ function _compressSourceCode(text: string, budget: number): string {
     }
   }
 
-  // Reconstruct in original line order
+  // Reconstruct in original line order. Every shown line is `${idx+1}. <verbatim>`;
+  // every omitted gap becomes a single flush-left `[TRUNCATED: lines X-Y]`
+  // (1-based inclusive). Budget-break keeps output within budget.
   const allIncluded = new Set<number>([...mandatory, ...includedBody]);
   const result: string[] = [];
+  let emittedUsed = 0;
+
+  const pushShown = (idx: number, line: string): boolean => {
+    const shown = `${idx + 1}. ${line}`;
+    if (emittedUsed + shown.length + 1 > budget) return false;
+    result.push(shown);
+    emittedUsed += shown.length + 1;
+    return true;
+  };
+  const pushMarker = (x: number, y: number): boolean => {
+    const marker = `[TRUNCATED: lines ${x}-${y}]`;
+    if (emittedUsed + marker.length + 1 > budget) return false;
+    result.push(marker);
+    emittedUsed += marker.length + 1;
+    return true;
+  };
 
   // Module docstring block
+  let broke = false;
   for (const idx of modDocKeep) {
     const line = lines[idx];
     if (line === undefined) continue;
-    result.push(line);
+    if (!pushShown(idx, line)) { broke = true; break; }
   }
-  if (modDocOmitted > 0) {
+  if (!broke && modDocOmitted > 0) {
     // modDocKeep has the kept indices, modDocIndices has all docstring indices
     const docOmitStart = modDocKeep[modDocKeep.length - 1]! + 1;
     const docOmitEnd = modDocIndices[modDocIndices.length - 1]!;
-    result.push(`[TRUNCATED: lines ${docOmitStart + 1}-${docOmitEnd + 1}]`);
+    if (!pushMarker(docOmitStart + 1, docOmitEnd + 1)) broke = true;
   }
 
-  // Scan remaining lines in order, inserting omission markers at cut points
-  let pendingBlanks: string[] = [];
+  // Scan remaining lines in order, inserting omission markers at cut points.
+  // Blank indices are buffered so they can be numbered when emitted.
+  let pendingBlankIdx: number[] = [];
   let omitStart = -1;  // Track where omission began (0-indexed)
-  let omitIndent = '    ';
 
   for (const [idx, line] of lines.entries()) {
+    if (broke) break;
     if (modDocSet.has(idx)) continue;
 
     if (!line.trim()) {
-      pendingBlanks.push(line);
+      pendingBlankIdx.push(idx);
       continue;
     }
 
     if (allIncluded.has(idx)) {
       if (omitStart >= 0) {
         // Emit marker for lines omitStart through idx-1 (1-based)
-        result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${idx}]`);
+        if (!pushMarker(omitStart + 1, idx)) { broke = true; break; }
         omitStart = -1;
       }
-      result.push(...pendingBlanks);
-      pendingBlanks = [];
-      result.push(line);
-      omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
+      for (const bi of pendingBlankIdx) {
+        if (!pushShown(bi, lines[bi]!)) { broke = true; break; }
+      }
+      pendingBlankIdx = [];
+      if (broke) break;
+      if (!pushShown(idx, line)) { broke = true; break; }
     } else {
-      pendingBlanks = []; // discard blanks belonging to omitted section
+      pendingBlankIdx = []; // discard blanks belonging to omitted section
       if (omitStart < 0) omitStart = idx;  // Start new omission range
     }
   }
 
-  if (omitStart >= 0) {
-    result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${lines.length}]`);
+  if (!broke && omitStart >= 0) {
+    pushMarker(omitStart + 1, lines.length);
   }
 
   return result.join('\n');
@@ -1110,9 +1153,9 @@ function _compressSourceStructured(
       .map((s) => s.block);
   }
 
-  const lineCost = (idx: number): number => lineAt(idx).length + 1;
-  const renderedSignature = (idx: number): string => lineAt(idx) + `  # L${idx + 1}`;
-  const renderedSignatureCost = (idx: number): number => renderedSignature(idx).length + 1;
+  // Per-line emit cost INCLUDES the `N. ` prefix width so budget accounting
+  // matches what is actually emitted (Priority-0 / anti-bloat).
+  const lineCost = (idx: number): number => lineAt(idx).length + (String(idx + 1).length + 2) + 1;
 
   for (const block of sortedBlocks) {
     const start = Math.max(0, block.startLine);
@@ -1123,22 +1166,20 @@ function _compressSourceStructured(
       .filter((i) => !resultLines.has(i));
     if (newIndices.length === 0) continue;
 
-    const sigText = renderedSignature(start);
-    const sigSize = renderedSignatureCost(start);
-    const newSize = sigSize + newIndices.filter((i) => i !== start).reduce((sum, i) => sum + lineCost(i), 0);
-    const rangeMarker = `    # ... [lines ${start + 2}-${end + 1} omitted]`;
+    const sigSize = lineCost(start);
+    const newSize = newIndices.reduce((sum, i) => sum + lineCost(i), 0);
+    const rangeMarker = `[TRUNCATED: lines ${start + 2}-${end + 1}]`;
     const rangeMarkerCost = rangeMarker.length + 1;
 
     if (used + newSize <= budget) {
       for (const i of newIndices) {
         resultLines.set(i, lineAt(i));
       }
-      resultLines.set(start, sigText);
       used += newSize;
     } else if (!resultLines.has(start) && used + sigSize + rangeMarkerCost <= budget) {
       const bodyIndices = newIndices.filter((i) => i !== start);
-      
-      const MARKER_COST = 45;
+
+      const MARKER_COST = rangeMarkerCost;
       const selectedSet = new Set<number>();
       let selectedBodyCost = 0;
       const remaining = budget - used - sigSize;
@@ -1153,8 +1194,9 @@ function _compressSourceStructured(
       if (selectedSet.size > 0) {
         const omittedLines = bodyIndices.filter((idx) => !selectedSet.has(idx));
         const omittedCount = omittedLines.length;
-        
-        // Never truncate tiny blocks, even if it puts us slightly over budget
+
+        // Never truncate tiny blocks (gap < threshold): include the omitted
+        // lines so no sub-threshold gap is left inside this block.
         if (omittedCount > 0 && omittedCount < _MIN_OMISSION_THRESHOLD) {
           for (const idx of omittedLines) {
             selectedSet.add(idx);
@@ -1162,72 +1204,135 @@ function _compressSourceStructured(
           }
         }
 
-        resultLines.set(start, sigText);
+        resultLines.set(start, lineAt(start));
         for (const idx of selectedSet) {
           resultLines.set(idx, lineAt(idx));
         }
         used += sigSize + selectedBodyCost;
       } else {
-        resultLines.set(start, sigText);
-        const markerLine = start + 1;
-        if (markerLine <= end && !resultLines.has(markerLine)) {
-          // Instead of adding rangeMarker to resultLines (which causes issues in the loop),
-          // we just omit the rest. The reassembly loop will naturally emit an omission marker!
-        }
+        // Signature only; the rest of the block falls into a gap and is marked
+        // by the emit walk below.
+        resultLines.set(start, lineAt(start));
         used += sigSize;
       }
     }
   }
 
-  // Reassemble in original line order with gap markers exactly like text version
-  const output: string[] = [];
-  let omitCount = 0;
-  let omitIndent = '    ';
-  let pendingBlanks: string[] = [];
-
-  for (let idx = 0; idx < n; idx++) {
-    const line = lines[idx];
-    if (line === undefined) continue;
-
-    if (!line.trim()) {
-      pendingBlanks.push(line);
-      continue;
-    }
-
-    if (resultLines.has(idx)) {
-      if (omitCount > 0) {
-        // If we skipped a small amount of lines that somehow bypassed the threshold logic
-        if (omitCount < _MIN_OMISSION_THRESHOLD) {
-          for (let prevIdx = idx - omitCount; prevIdx < idx; prevIdx++) {
-            if (lines[prevIdx] && lines[prevIdx]!.trim()) {
-              output.push(lines[prevIdx]!);
-            }
-          }
-        } else {
-          output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
-        }
-        omitCount = 0;
+  // Fill sub-threshold gaps between consecutive selected indices: a gap < the
+  // threshold cannot earn a marker, so (Priority-0) its lines must be shown.
+  if (resultLines.size >= 2) {
+    const tinyGapLines = new Set<number>();
+    const keys = [...resultLines.keys()].sort((a, b) => a - b);
+    let prev = keys[0]!;
+    for (let ki = 1; ki < keys.length; ki++) {
+      const ln = keys[ki]!;
+      const gap = ln - prev - 1;
+      if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
+        for (let g = prev + 1; g < ln; g++) tinyGapLines.add(g);
       }
-      output.push(...pendingBlanks);
-      pendingBlanks = [];
-      output.push(resultLines.get(idx)!);
-      omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
-    } else {
-      pendingBlanks = []; // discard blanks belonging to omitted section
-      omitCount++;
+      prev = ln;
+    }
+    for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
+      if (!resultLines.has(idx) && used + lineCost(idx) <= budget) {
+        resultLines.set(idx, lineAt(idx));
+        used += lineCost(idx);
+      }
     }
   }
 
-  if (omitCount > 0) {
-    if (omitCount < _MIN_OMISSION_THRESHOLD) {
-      for (let prevIdx = n - omitCount; prevIdx < n; prevIdx++) {
-        if (lines[prevIdx] && lines[prevIdx]!.trim()) {
-          output.push(lines[prevIdx]!);
+  // Settle interior slivers: any run of selected lines bounded on BOTH sides by
+  // a gap >= threshold (so it would sit between two markers) with fewer than the
+  // threshold of non-blank shown lines is dropped (merged into the surrounding
+  // truncation), per the constraint resolution for unimportant slivers. This
+  // guarantees no two markers ever sandwich a sub-threshold sliver.
+  {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const keys = [...resultLines.keys()].sort((a, b) => a - b);
+      // Partition selected indices into maximal contiguous runs.
+      const runs: number[][] = [];
+      let run: number[] = [];
+      for (const k of keys) {
+        if (run.length === 0 || k === run[run.length - 1]! + 1) {
+          run.push(k);
+        } else {
+          runs.push(run);
+          run = [k];
         }
       }
-    } else {
-      output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
+      if (run.length > 0) runs.push(run);
+
+      for (let r = 0; r < runs.length; r++) {
+        // The emit walk emits NO leading/trailing marker, so only runs with a
+        // real run on BOTH sides can ever sit between two markers.
+        if (r === 0 || r === runs.length - 1) continue;
+        const cur = runs[r]!;
+        const first = cur[0]!;
+        const last = cur[cur.length - 1]!;
+        const gapBefore = first - runs[r - 1]![runs[r - 1]!.length - 1]! - 1;
+        const gapAfter = runs[r + 1]![0]! - last - 1;
+        const boundedBefore = gapBefore >= _MIN_OMISSION_THRESHOLD;
+        const boundedAfter = gapAfter >= _MIN_OMISSION_THRESHOLD;
+        if (!boundedBefore || !boundedAfter) continue;
+        const nonBlankShown = cur.filter((i) => lineAt(i).trim() !== '').length;
+        if (nonBlankShown < _MIN_OMISSION_THRESHOLD) {
+          for (const i of cur) {
+            used -= lineCost(i);
+            resultLines.delete(i);
+          }
+          changed = true;
+          break;
+        }
+      }
     }
+  }
+
+  // Phase H: inline assertion over the final selected set (Priority-0).
+  {
+    const finalKeys = [...resultLines.keys()].sort((a, b) => a - b);
+    for (let ki = 0; ki < finalKeys.length; ki++) {
+      const idx = finalKeys[ki]!;
+      if (idx < 0 || idx >= n) {
+        throw new Error(`Priority-0 violation: selected index ${idx} out of range (n=${n})`);
+      }
+      if (ki > 0) {
+        const prevIdx = finalKeys[ki - 1]!;
+        if (idx <= prevIdx) {
+          throw new Error(`Priority-0 violation: selected indices not strictly ascending (${prevIdx} >= ${idx})`);
+        }
+        const gap = idx - prevIdx - 1;
+        if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
+          throw new Error(`Priority-0 violation: gap ${prevIdx + 2}-${idx} is ${gap} lines (< ${_MIN_OMISSION_THRESHOLD}) but not fully selected`);
+        }
+      }
+    }
+  }
+
+  // Emit in original line order. Every shown line is `${idx+1}. <verbatim>`;
+  // every gap >= threshold becomes a single flush-left `[TRUNCATED: lines X-Y]`
+  // (1-based inclusive). The budget-break keeps output within budget.
+  const output: string[] = [];
+  const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
+  let prev = -1;
+  let actualUsed = 0;
+
+  for (const ln of sortedKeys) {
+    const lineText = `${ln + 1}. ${resultLines.get(ln)!}`;
+    const lineSize = lineText.length + 1;
+    if (prev >= 0 && ln - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const gapMarker = `[TRUNCATED: lines ${prev + 2}-${ln}]`;
+      const gapMarkerSize = gapMarker.length + 1;
+      // The marker is mandatory for a >= threshold gap; if it (plus the line)
+      // cannot fit, stop here rather than emit an unmarked discontinuity.
+      if (actualUsed + gapMarkerSize + lineSize > budget) break;
+      output.push(gapMarker);
+      actualUsed += gapMarkerSize;
+    }
+    if (actualUsed + lineSize > budget) break;
+    output.push(lineText);
+    actualUsed += lineSize;
+    prev = ln;
   }
 
   return output.join('\n');
@@ -1254,27 +1359,81 @@ function _contentAwareTruncate(text: string, budget: number): string {
     headRatio = 0.5;
   }
 
-  // Compute line numbers for the truncation marker
-  const totalLines = text.split('\n').length;
-  const markerTemplate = '\n[TRUNCATED: lines X-Y]\n';
-  const usable = budget - markerTemplate.length;
-  if (usable <= 0) {
-    return text.slice(0, budget);
-  }
+  // Line-based selection so every shown line carries its true 1-based number and
+  // is verbatim (no mid-line cuts). The head/tail char budgets keep the original
+  // head-vs-tail heuristic; emission is whole numbered lines + one flush-left
+  // `[TRUNCATED: lines X-Y]` for the omitted middle. Prefix width is charged and
+  // the budget-break keeps output within budget.
+  const lines = text.split('\n');
+  const totalLines = lines.length;
+  const lineCost = (idx: number): number => lines[idx]!.length + (String(idx + 1).length + 2) + 1;
+
+  const markerReserve = `[TRUNCATED: lines ${totalLines}-${totalLines}]`.length + 1;
+  const usable = Math.max(0, budget - markerReserve);
   const headBudget = Math.floor(usable * headRatio);
   const tailBudget = usable - headBudget;
 
-  // Count lines in head and tail portions
-  const headText = text.slice(0, headBudget);
-  const tailText = text.slice(-tailBudget);
-  const headLines = headText.split('\n').length;
-  const tailLines = tailText.split('\n').length;
-  const firstOmitted = headLines + 1;
-  const lastOmitted = totalLines - tailLines;
-  
-  const marker = `\n[TRUNCATED: lines ${firstOmitted}-${lastOmitted}]\n`;
+  // Take whole lines from the head up to headBudget.
+  const headIdx: number[] = [];
+  let headUsed = 0;
+  for (let i = 0; i < totalLines; i++) {
+    const c = lineCost(i);
+    if (headUsed + c > headBudget) break;
+    headIdx.push(i);
+    headUsed += c;
+  }
+  // Take whole lines from the tail up to tailBudget, not overlapping the head.
+  const tailIdx: number[] = [];
+  let tailUsed = 0;
+  const headEnd = headIdx.length > 0 ? headIdx[headIdx.length - 1]! : -1;
+  for (let i = totalLines - 1; i > headEnd; i--) {
+    const c = lineCost(i);
+    if (tailUsed + c > tailBudget) break;
+    tailIdx.push(i);
+    tailUsed += c;
+  }
+  tailIdx.reverse();
 
-  return headText + marker + tailText;
+  const selected = [...headIdx, ...tailIdx];
+  const output: string[] = [];
+  let prev = -1;
+
+  if (selected.length === 0) {
+    // Budget too small for even one whole line. Never cut mid-line: emit the
+    // first (and, if distinct, the last) whole numbered line verbatim with a
+    // real-range marker between them. This degenerate output is intentionally
+    // not budget-clamped — clamping would corrupt line content.
+    const degenerate = totalLines > 1 ? [0, totalLines - 1] : [0];
+    for (const idx of degenerate) {
+      if (prev >= 0 && idx - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+        output.push(`[TRUNCATED: lines ${prev + 2}-${idx}]`);
+      }
+      output.push(`${idx + 1}. ${lines[idx]!}`);
+      prev = idx;
+    }
+    return output.join('\n');
+  }
+
+  // Normal path: whole numbered lines bounded by the head/tail budgets, with a
+  // single flush-left marker for the omitted middle. Budget-break ensures the
+  // emitted output never exceeds budget.
+  let emittedUsed = 0;
+  for (const idx of selected) {
+    if (prev >= 0 && idx - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const marker = `[TRUNCATED: lines ${prev + 2}-${idx}]`;
+      if (emittedUsed + marker.length + 1 <= budget) {
+        output.push(marker);
+        emittedUsed += marker.length + 1;
+      }
+    }
+    const shown = `${idx + 1}. ${lines[idx]!}`;
+    if (emittedUsed + shown.length + 1 > budget) break;
+    output.push(shown);
+    emittedUsed += shown.length + 1;
+    prev = idx;
+  }
+
+  return output.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,4 +1491,35 @@ export function compressSourceStructured(
   budget = Math.max(budget, minBudget);
   if (text.length <= budget) return text;
   return _compressSourceStructured(text, budget, structure, context);
+}
+
+/**
+ * Compress a single file from raw structural facts.
+ *
+ * Shapes the caller-supplied facts into the structured-source inputs and
+ * delegates to compressSourceStructured (the real engine). Owns no compression
+ * logic of its own — only fact-shaping and the usefulness gate.
+ */
+export function compressFile(req: CompressFileRequest): string | null {
+  if (req.source.length === 0) return null;
+  if (req.facts.langName === null && req.facts.defs.length === 0) return null;
+  const facts: RawFileFacts = req.facts;
+  const structure: StructureBlock[] = facts.defs.map((d) => ({
+    name: d.name, kind: d.kind, type: d.type,
+    startLine: d.line - 1, endLine: d.endLine - 1,
+    exported: d.visibility === 'public', anchors: [] as Anchor[],
+  }));
+  for (const a of facts.anchors) {
+    const anchorLine = a.line - 1;
+    const owner = structure.find((b) => anchorLine >= b.startLine && anchorLine <= b.endLine);
+    if (owner === undefined) continue;
+    owner.anchors.push({ startLine: anchorLine, endLine: anchorLine, kind: a.kind, priority: 300 });
+  }
+  const context: CompressionContext = {
+    callGraph: facts.edges.map((e) => ({ caller: e.callerName, callee: e.calleeName, weight: e.callCount })),
+    exportedSymbols: facts.defs.filter((d) => d.visibility === 'public').map((d) => d.name),
+  };
+  const out = compressSourceStructured(req.source, req.maxChars, structure, context);
+  if (out.length >= req.source.length) return null; // compression not useful (TOON owns this decision); caller falls back
+  return out;
 }

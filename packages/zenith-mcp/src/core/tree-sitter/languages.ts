@@ -61,9 +61,9 @@ const EXT_TO_LANG: Record<string, string> = {
     '.cppm': 'cpp',
     '.ixx':  'cpp',
     // C#
-    '.cs':   'csharp',
+    '.cs':   'c_sharp',
     // C# (additions)
-    '.csx':  'csharp',
+    '.csx':  'c_sharp',
     // Kotlin
     '.kt':   'kotlin',
     '.kts':  'kotlin',
