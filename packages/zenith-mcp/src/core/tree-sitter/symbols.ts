@@ -65,7 +65,7 @@ export interface SymbolFilterOptions {
 // ---------------------------------------------------------------------------
 
 export const DEF_TYPES: ReadonlySet<string> = new Set<string>([
-    // XML/HTML element-shape patterns (PascalCase upstream node names)
+    // XML/HTML element-shape patterns (camelCase upstream node names)
     'Attribute',
     'EmptyElemTag',
     'STag',
@@ -217,6 +217,106 @@ export const DEF_TYPES: ReadonlySet<string> = new Set<string>([
 ]);
 
 // ---------------------------------------------------------------------------
+// Definition node selection
+//
+// `getSymbols()` historically picked the body node for a definition by
+// taking whichever `@definition.<kind>` capture fired last inside a single
+// tree-sitter match. That works when each `.scm` pattern carries exactly
+// one definition capture, but it is fragile against nested or overlapping
+// patterns: a parent definition can silently steal a child's source span,
+// and any future signature-extraction code that walks `bodyCapture.node`'s
+// children for `parameters` / `return_type` / `type_parameters` would
+// inherit children that don't belong to it.
+//
+// `selectDefinitionNode()` replaces that policy with a deterministic
+// ancestor walk: from the name node outward, collect every DEF_TYPES-typed
+// ancestor; the tightest is the primary definition; if a strictly-outer
+// ancestor is a known wrapper around the primary's type, that wrapper is
+// the span node. Primary is what you walk for parameters/return shape;
+// span is what you use for the full user-visible range (including any
+// leading decorator prefix).
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of {@link selectDefinitionNode}. Carries two views of the owning
+ * definition so different consumers can pick the right one:
+ *
+ * - `primaryNode` — the tightest DEF_TYPES-typed ancestor of the name.
+ *   The place where the definition's parameters, return type, and type
+ *   parameters live. Walk this when extracting signature shape; a parent
+ *   container cannot accidentally contribute its own children here.
+ *
+ * - `spanNode` — the outermost wrapper that contributes leading metadata
+ *   to the source span (today: Python's `decorated_definition` over a
+ *   `function_definition` or `class_definition`). Equal to `primaryNode`
+ *   whenever no wrapper applies. Use this when you want the full
+ *   user-visible range of the definition including its decorators.
+ *
+ * - `candidates` — the innermost-first list of DEF_TYPES ancestors that
+ *   were considered, exposed for diagnostics and tests.
+ */
+export interface DefinitionNodeSelection {
+    primaryNode: Node;
+    spanNode: Node;
+    candidates: ReadonlyArray<Node>;
+}
+
+/**
+ * Known wrapper definition types and the set of inner definition types
+ * each is allowed to wrap. A wrapper carries leading metadata (decorators,
+ * export modifiers) and surrounds a real definition that holds the
+ * parameters and return shape.
+ *
+ * Conservatively populated — only entries that appear in the shipped
+ * `*-tags.scm` files belong here. Extend when grammars introduce
+ * additional wrapper conventions.
+ */
+const WRAPPER_DEFINITIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
+    ['decorated_definition', new Set<string>(['function_definition', 'class_definition'])],
+]);
+
+/**
+ * Deterministically pick the definition node that owns `nameNode`.
+ *
+ * Walks every DEF_TYPES-typed ancestor of `nameNode` from inside out,
+ * returns the tightest as `primaryNode`. If any strictly-outer ancestor
+ * is a known wrapper around `primaryNode`'s type, that wrapper is
+ * returned as `spanNode` (otherwise `spanNode === primaryNode`).
+ *
+ * Returns `null` if `nameNode` has no DEF_TYPES ancestor — the caller
+ * should fall back to its own span source (the body capture, or the
+ * name node's own range).
+ */
+export function selectDefinitionNode(nameNode: Node): DefinitionNodeSelection | null {
+    const candidates: Node[] = [];
+    let cur: Node | null = nameNode.parent;
+    while (cur !== null) {
+        if (DEF_TYPES.has(cur.type)) {
+            candidates.push(cur);
+        }
+        cur = cur.parent;
+    }
+    if (candidates.length === 0) return null;
+
+    // candidates is non-empty (just checked); the `!` is erased at compile
+    // time and preserves runtime exactly. Same pattern is used below for
+    // candidates[i] inside the bounded loop.
+    const primary = candidates[0]!;
+    let span: Node = primary;
+
+    for (let i = 1; i < candidates.length; i++) {
+        const outer = candidates[i]!;
+        const wrapInners = WRAPPER_DEFINITIONS.get(outer.type);
+        if (wrapInners && wrapInners.has(primary.type)) {
+            span = outer;
+            break;
+        }
+    }
+
+    return { primaryNode: primary, spanNode: span, candidates };
+}
+
+// ---------------------------------------------------------------------------
 // Symbol cache helpers
 // ---------------------------------------------------------------------------
 
@@ -329,10 +429,29 @@ export async function getSymbols(source: string, langName: string, options: Symb
             const line = nameCapture.node.startPosition.row + 1;
             const column = nameCapture.node.startPosition.column;
 
-            // endLine comes from the body capture if available, otherwise from
-            // the name capture's own end (single-line symbol)
+            // endLine source-of-truth ranking, most preferred first:
+            //
+            // 1. For definitions: walk DEF_TYPES ancestors of the name node
+            //    and use the primary (tightest) ancestor's end. This is
+            //    deterministic, span-tight, and never lets a parent
+            //    container's range bleed into the symbol — a method inside
+            //    a class gets the method's own end, not the class's end.
+            // 2. The body capture from the `.scm` pattern, if present.
+            //    Used for references (the selection function is
+            //    definition-only) and as a fallback when the name node
+            //    has no DEF_TYPES ancestor (malformed-pattern edge case).
+            // 3. The name node's own end (single-line symbol).
             let endLine: number;
-            if (bodyCapture) {
+            if (kind === 'def') {
+                const selected = selectDefinitionNode(nameCapture.node);
+                if (selected) {
+                    endLine = selected.primaryNode.endPosition.row + 1;
+                } else if (bodyCapture) {
+                    endLine = bodyCapture.node.endPosition.row + 1;
+                } else {
+                    endLine = nameCapture.node.endPosition.row + 1;
+                }
+            } else if (bodyCapture) {
                 endLine = bodyCapture.node.endPosition.row + 1;
             } else {
                 endLine = nameCapture.node.endPosition.row + 1;

@@ -17,10 +17,11 @@ export {
     getCompiledQuery,
 } from './tree-sitter/runtime.js';
 
-export type { SymbolInfo, SymbolFilterOptions } from './tree-sitter/symbols.js';
+export type { SymbolInfo, SymbolFilterOptions, DefinitionNodeSelection } from './tree-sitter/symbols.js';
 
 export {
     DEF_TYPES,
+    selectDefinitionNode,
     getSymbols,
     getDefinitions,
     getSymbolSummary,
