@@ -17,11 +17,18 @@ export {
     getCompiledQuery,
 } from './tree-sitter/runtime.js';
 
-export type { SymbolInfo, SymbolFilterOptions, DefinitionNodeSelection } from './tree-sitter/symbols.js';
+export type { SymbolInfo, SymbolFilterOptions } from './tree-sitter/symbols.js';
+
+// NOTE: DEF_TYPES, selectDefinitionNode, and DefinitionNodeSelection are
+// intentionally NOT re-exported here. They are symbol-extraction internals
+// that belong to the indexing/persistence path. Consumer-facing symbol
+// access must come from the DB-backed adapter, not from the extractor.
+// The submodule (`./tree-sitter/symbols.js`) still exports them so the
+// in-package tests (which validate the extraction internals directly)
+// and any future indexing-path call sites can reach them without
+// promoting them to a general public API.
 
 export {
-    DEF_TYPES,
-    selectDefinitionNode,
     getSymbols,
     getDefinitions,
     getSymbolSummary,

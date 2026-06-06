@@ -27,12 +27,21 @@
 
 import { describe, expect, it } from 'vitest';
 import { Parser } from 'web-tree-sitter';
+// `getDefinitions` and `loadLanguage` are pre-existing exports from the
+// public tree-sitter barrel. The new selection primitives — `DEF_TYPES`
+// and `selectDefinitionNode` — are intentionally NOT exposed at the
+// barrel because they are extraction internals on the DB ingestion path,
+// not a general public symbol API. The test imports them directly from
+// the symbols submodule to validate the internals without promoting
+// them to public surface.
 import {
-    DEF_TYPES,
     getDefinitions,
     loadLanguage,
-    selectDefinitionNode,
 } from '../dist/core/tree-sitter.js';
+import {
+    DEF_TYPES,
+    selectDefinitionNode,
+} from '../dist/core/tree-sitter/symbols.js';
 
 // Helper: locate the first AST node whose type matches `predicate` and
 // whose `.text` equals `name`. Used by the direct selection test to find

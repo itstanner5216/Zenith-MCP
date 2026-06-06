@@ -24,7 +24,11 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEF_TYPES } from '../dist/core/tree-sitter.js';
+// DEF_TYPES is intentionally not re-exported from the public tree-sitter
+// barrel — it is an indexing-path internal. This test imports it directly
+// from the submodule to validate the extraction vocabulary without
+// promoting it to a general public API.
+import { DEF_TYPES } from '../dist/core/tree-sitter/symbols.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const QUERIES_DIR = path.resolve(__dirname, '../grammars/queries');
