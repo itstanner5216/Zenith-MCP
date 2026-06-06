@@ -20,6 +20,7 @@ export {
 export type { SymbolInfo, SymbolFilterOptions } from './tree-sitter/symbols.js';
 
 export {
+    DEF_TYPES,
     getSymbols,
     getDefinitions,
     getSymbolSummary,
