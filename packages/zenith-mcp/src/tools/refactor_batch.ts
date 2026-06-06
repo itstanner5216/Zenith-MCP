@@ -5,7 +5,12 @@ import { randomBytes, createHash } from 'crypto';
 import type { ToolServer, ToolContext } from './types.js';
 import { getProjectContext } from '../core/project-context.js';
 import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, findRepoRoot, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
-import { getLangForFile, findSymbol, checkSyntaxErrors, } from '../core/tree-sitter.js';
+import { getLangForFile, checkSyntaxErrors } from '../core/tree-sitter.js';
+// Refactor-batch is a SYMBOL-FACT CONSUMER — per docs/toon-constraints
+// §0.5 symbol lookups come from the DB-backed adapter, never the
+// tree-sitter extractor directly. Indexing is on-demand via
+// `ensureIndexFresh` inside `loadSymbolInFile`.
+import { loadSymbolInFile } from '../core/indexed-symbols.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
@@ -437,7 +442,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const langName = getLangForFile(validPath);
                 if (!langName)
                     continue;
-                const matches = await findSymbol(source, langName, symbol, { kindFilter: 'def' });
+                const matches = await loadSymbolInFile(validPath, symbol, { kindFilter: 'def' });
                 if (!matches || !matches.length)
                     continue;
                 const sourceLines = source.split('\n');
@@ -946,7 +951,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const langName = getLangForFile(validPath);
                     if (!langName)
                         continue;
-                    const matches = await findSymbol(source, langName, symName, { kindFilter: 'def' });
+                    const matches = await loadSymbolInFile(validPath, symName, { kindFilter: 'def' });
                     if (!matches || !matches.length)
                         continue;
                     for (const m of matches) {
@@ -1189,7 +1194,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!langName) {
                 return { content: [{ type: 'text' as const, text: `${args.symbol}: unsupported language for ${relPath}.` }] };
             }
-            const matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' });
+            const matches = await loadSymbolInFile(absPath, args.symbol, { kindFilter: 'def' });
             if (!matches?.length) {
                 return { content: [{ type: 'text' as const, text: `${args.symbol}: not found in ${relPath}.` }] };
             }

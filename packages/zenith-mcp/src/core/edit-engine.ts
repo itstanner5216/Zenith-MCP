@@ -1,6 +1,24 @@
 import path from 'path';
 import { normalizeLineEndings } from '../core/lib.js';
-import { getLangForFile, findSymbol, checkSyntaxErrors } from '../core/tree-sitter.js';
+import { getLangForFile, checkSyntaxErrors } from '../core/tree-sitter.js';
+// EXTRACTOR DIRECT IMPORT — narrowly scoped exception.
+//
+// Per docs/toon-constraints §0.5 symbol facts come from the DB-backed
+// adapter, not the tree-sitter extractor. This file is the one
+// principled exception inside `src/core/`:
+//
+// The edit engine operates on an IN-FLIGHT EDIT BUFFER (the
+// `workingContent` string that mutates between symbol-mode edits in
+// the same applyEditList run). That buffer does not exist on disk
+// between edits — its line numbers and content drift as each prior
+// edit applies, so the persisted symbol index (which reflects disk
+// state) cannot answer "where is symbol X in this in-memory buffer?"
+//
+// `findSymbol` here is the only available source of ground truth for
+// the buffer's current shape. It is NOT used as a general consumer
+// API. New consumers — anything reading symbols for a file on disk —
+// must go through `../core/indexed-symbols.js`.
+import { findSymbol } from '../core/tree-sitter/symbols.js';
 
 // ---------------------------------------------------------------------------
 // Edit interfaces

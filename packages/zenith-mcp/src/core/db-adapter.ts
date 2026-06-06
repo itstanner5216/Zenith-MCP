@@ -538,7 +538,7 @@ export function getFileBlockEdges(
 /**
  * Get definitions in a file with their line ranges.
  * Used to map tree-sitter blocks to symbol names.
- * 
+ *
  * SQL: SELECT id, name, line, end_line, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line
  */
 export function getFileDefinitions(
@@ -549,6 +549,51 @@ export function getFileDefinitions(
         conn,
         `SELECT id, name, line, end_line AS endLine, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
     ).all(filePath) as Array<{ id: number; name: string; line: number; endLine: number; type: string | null }>;
+}
+
+/**
+ * Get all symbols (defs and refs) for a single file with the full
+ * tree-sitter symbol shape: name, kind, type, line, endLine, column.
+ *
+ * SQL: SELECT name, kind, type, line, end_line AS endLine, column FROM
+ *      symbols WHERE file_path = ? ORDER BY line
+ *
+ * This is the DB-backed counterpart to the tree-sitter `getSymbols()`
+ * extractor — consumers should call `ensureIndexFresh()` first to
+ * guarantee the rows reflect the current file content.
+ */
+export function getSymbolsInFile(
+    conn: DbConnection,
+    filePath: string
+): Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }> {
+    return prepareOrCache(
+        conn,
+        `SELECT name, kind, type, line, end_line AS endLine, column FROM symbols WHERE file_path = ? ORDER BY line`
+    ).all(filePath) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
+}
+
+/**
+ * Find symbols by exact name within a single file, optionally filtered
+ * by kind. Used by consumers that previously called the tree-sitter
+ * `findSymbol()` extractor for single-file symbol lookup.
+ *
+ * SQL: SELECT name, kind, type, line, end_line AS endLine, column FROM
+ *      symbols WHERE file_path = ? AND name = ? [AND kind = ?] ORDER BY line
+ */
+export function findSymbolsByNameInFile(
+    conn: DbConnection,
+    filePath: string,
+    name: string,
+    kindFilter?: string
+): Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }> {
+    let sql = `SELECT name, kind, type, line, end_line AS endLine, column FROM symbols WHERE file_path = ? AND name = ?`;
+    const params: string[] = [filePath, name];
+    if (kindFilter !== undefined) {
+        sql += ' AND kind = ?';
+        params.push(kindFilter);
+    }
+    sql += ' ORDER BY line';
+    return handle(conn).prepare(sql).all(...params) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
 }
 
 /**

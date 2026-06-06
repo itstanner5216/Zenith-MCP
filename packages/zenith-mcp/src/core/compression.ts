@@ -10,7 +10,13 @@
 
 import path from 'path';
 import { compressString, compressSourceStructured } from 'zenith-toon';
-import { getLangForFile, getSymbols } from './tree-sitter.js';
+import { getLangForFile } from './tree-sitter.js';
+// Per docs/toon-constraints/constraints.md §0.5 the compression seam is
+// a TOON fact CONSUMER (it hands raw symbol rows to TOON for it to make
+// decisions). Consumers MUST read symbol data from the DB-backed
+// adapter — never call the tree-sitter extractor directly. The DB is
+// populated on demand by `loadFileDefinitions` via `ensureIndexFresh`.
+import { loadFileDefinitions } from './indexed-symbols.js';
 import { findRepoRoot, getDb } from './symbol-index.js';
 import { getFileBlockEdges } from './db-adapter.js';
 import type { StructureBlock, CompressionContext } from 'zenith-toon';
@@ -83,10 +89,8 @@ export async function compressTextFile(
 
     if (langName) {
         try {
-            const rawSymbols = await getSymbols(rawText, langName);
-            if (rawSymbols) {
-                const defs = rawSymbols.filter(s => s.kind === 'def');
-
+            const defs = await loadFileDefinitions(validPath);
+            if (defs && defs.length > 0) {
                 const structure: StructureBlock[] = defs.map(s => ({
                     name: s.name,
                     kind: s.kind,

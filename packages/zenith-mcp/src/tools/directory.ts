@@ -5,7 +5,12 @@ import { Dirent } from "fs";
 import { minimatch } from "minimatch";
 import { formatSize } from '../core/lib.js';
 import { getDefaultExcludes, isSensitive } from '../core/shared.js';
-import { isSupported, getFileSymbolSummary, getFileSymbols } from '../core/tree-sitter.js';
+import { isSupported } from '../core/tree-sitter.js';
+// Directory listings are a SYMBOL-FACT CONSUMER (they render summaries
+// from indexed symbol data). Per docs/toon-constraints §0.5 consumers
+// read from the DB-backed adapter — never the tree-sitter extractor.
+// Indexing is on-demand via `ensureIndexFresh` inside these helpers.
+import { loadFileDefinitions, loadFileSymbolSummary } from '../core/indexed-symbols.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 const LIST_CAP = 250;
@@ -195,15 +200,15 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                         return [entry.name, null, null];
                     try {
                         if (showSymbolNames) {
-                            const symbols = await getFileSymbols(fullPath, { kindFilter: 'def' });
+                            const symbols = await loadFileDefinitions(fullPath);
                             if (!symbols || symbols.length === 0)
                                 return [entry.name, null, null];
                             const names = symbols.slice(0, 50).map(s => `${s.name} (${s.type})`);
-                            const summary = await getFileSymbolSummary(fullPath);
+                            const summary = await loadFileSymbolSummary(fullPath);
                             return [entry.name, summary, names];
                         }
                         else {
-                            const summary = await getFileSymbolSummary(fullPath);
+                            const summary = await loadFileSymbolSummary(fullPath);
                             return [entry.name, summary, null];
                         }
                     }

@@ -2,7 +2,12 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { getCharBudget, ripgrepAvailable, ripgrepSearch, lastRipgrepError } from '../core/shared.js';
-import { getLangForFile, findSymbol } from '../core/tree-sitter.js';
+import { getLangForFile } from '../core/tree-sitter.js';
+// Single-file symbol lookup for code navigation is a SYMBOL-FACT
+// CONSUMER. Per docs/toon-constraints §0.5 consumers read from the
+// DB-backed adapter, not the tree-sitter extractor. Indexing is
+// on-demand via `ensureIndexFresh` inside `loadSymbolInFile`.
+import { loadSymbolInFile } from '../core/indexed-symbols.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 interface SearchFileArgs {
@@ -77,7 +82,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             const totalLines = allLines.length;
             const findOptions: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (args.nearLine !== undefined) findOptions.nearLine = args.nearLine;
-            const matches = await findSymbol(source, langName, args.symbol, findOptions);
+            const matches = await loadSymbolInFile(validPath, args.symbol, findOptions);
             if (!matches || matches.length === 0) {
                 throw new Error('Symbol not found.');
             }

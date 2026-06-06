@@ -4,8 +4,13 @@ import path from "path";
 import { minimatch } from "minimatch";
 import { getDefaultExcludes, isSensitive, ripgrepAvailable, ripgrepSearch, ripgrepFindFiles, bm25RankResults, bm25PreFilterFiles, getCharBudget, getSearchCharBudget, RANK_THRESHOLD } from '../core/shared.js';
 import type { RipgrepResult } from '../core/shared.js';
-import { isSupported, getLangForFile, getDefinitions } from '../core/tree-sitter.js';
-import type { SymbolFilterOptions } from '../core/tree-sitter.js';
+import { isSupported, getLangForFile } from '../core/tree-sitter.js';
+// Search tools are SYMBOL-FACT CONSUMERS — per docs/toon-constraints §0.5
+// they read from the DB-backed adapter, never the tree-sitter extractor.
+// `loadFileDefinitions` indexes each file on demand via `ensureIndexFresh`
+// so the symbol rows always reflect current disk content.
+import { loadFileDefinitions } from '../core/indexed-symbols.js';
+import type { SymbolFilterOptions } from '../core/indexed-symbols.js';
 import { ToolServer, ToolContext } from './types.js';
 
 interface SearchFilesArgs {
@@ -119,10 +124,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             const langName = getLangForFile(filePath);
                             if (!langName)
                                 return null;
-                            const source = await fs.readFile(filePath, 'utf-8');
                             const symOpts: SymbolFilterOptions = {};
                             if (typeFilter !== undefined) symOpts.typeFilter = typeFilter;
-                            const defs = await getDefinitions(source, langName, symOpts);
+                            const defs = await loadFileDefinitions(filePath, symOpts);
                             if (!defs || defs.length === 0)
                                 return null;
                             const rel = path.relative(rootPath, filePath);
@@ -163,11 +167,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
                             const langName = getLangForFile(filePath);
                             if (!langName)
                                 return null;
-                            const source = await fs.readFile(filePath, 'utf-8');
                             const symOpts: SymbolFilterOptions = {};
                             if (symbolQuery !== undefined) symOpts.nameFilter = symbolQuery;
                             if (typeFilter !== undefined) symOpts.typeFilter = typeFilter;
-                            const defs = await getDefinitions(source, langName, symOpts);
+                            const defs = await loadFileDefinitions(filePath, symOpts);
                             if (!defs || defs.length === 0)
                                 return null;
                             const rel = path.relative(rootPath, filePath);
@@ -296,8 +299,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         const langName = getLangForFile(filePath);
                         if (!langName)
                             return null;
-                        const source = await fs.readFile(filePath, 'utf-8'); 
-                        const defs = await getDefinitions(source, langName);
+                        const defs = await loadFileDefinitions(filePath);
                         if (!defs)
                             return null;
                         const parts = symbolName.split('.');
