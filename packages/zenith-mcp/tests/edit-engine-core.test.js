@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { findMatch, applyEditList, syntaxWarn } from '../dist/core/edit-engine.js';
 
 const sampleContent = `function hello() {
@@ -13,6 +16,28 @@ function world() {
 
 const x = 42;
 `;
+
+// Symbol-mode edits now go through the DB-backed symbol-index path
+// (per docs/toon-constraints/constraints.md §0.5: consumers read symbol
+// facts from the indexed adapter, not the tree-sitter extractor). Tests
+// that exercise symbol-mode therefore need a real file on disk under a
+// directory that `findRepoRoot` recognizes as a project root (i.e. has
+// a `.git/` entry somewhere above it). This fixture provides exactly
+// that: a fresh tempdir per test, with an empty `.git/` marker and the
+// sample file written to disk.
+let testDir;
+let testFilePath;
+
+beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-engine-core-'));
+    fs.mkdirSync(path.join(testDir, '.git'));
+    testFilePath = path.join(testDir, 'test.js');
+    fs.writeFileSync(testFilePath, sampleContent);
+});
+
+afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+});
 
 describe('findMatch', () => {
     it('finds exact match', () => {
@@ -81,7 +106,7 @@ describe('applyEditList content mode', () => {
             oldContent: '    return true;',
             newContent: '    return false;',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('return false');
         expect(result.workingContent).not.toContain('return true;');
@@ -93,7 +118,7 @@ describe('applyEditList content mode', () => {
             oldContent: 'nonexistent text here',
             newContent: 'replacement',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors.length).toBeGreaterThan(0);
         expect(result.errors[0].msg).toContain('not found');
     });
@@ -103,7 +128,7 @@ describe('applyEditList content mode', () => {
             { mode: 'content', oldContent: '"hello"', newContent: '"hi"' },
             { mode: 'content', oldContent: '"world"', newContent: '"earth"' },
         ];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js', isBatch: true });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath, isBatch: true });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('"hi"');
         expect(result.workingContent).toContain('"earth"');
@@ -114,7 +139,7 @@ describe('applyEditList content mode', () => {
             { mode: 'content', oldContent: '"hello"', newContent: '"hi"' },
             { mode: 'content', oldContent: 'NONEXISTENT', newContent: '"fail"' },
         ];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js', isBatch: true });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath, isBatch: true });
         expect(result.errors.length).toBeGreaterThan(0);
     });
 
@@ -125,7 +150,7 @@ describe('applyEditList content mode', () => {
             oldContent: 'function foo() {\n    return 1;\n}',
             newContent: 'function foo() {\n    return 2;\n}',
         }];
-        const result = await applyEditList(indented, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(indented, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('return 2');
     });
@@ -139,7 +164,7 @@ describe('applyEditList block mode', () => {
             block_end: '}',
             replacement_block: 'function hello() {\n    console.log("replaced");\n}',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('replaced');
         expect(result.workingContent).not.toContain('return true');
@@ -152,7 +177,7 @@ describe('applyEditList block mode', () => {
             block_end: '}',
             replacement_block: 'something',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors.length).toBeGreaterThan(0);
         expect(result.errors[0].msg).toContain('block_start not found');
     });
@@ -172,7 +197,7 @@ function foo() {
             block_end: '}',
             replacement_block: 'replaced',
         }];
-        const result = await applyEditList(ambiguous, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(ambiguous, edits, { filePath: testFilePath });
         expect(result.errors.length).toBeGreaterThan(0);
         expect(result.errors[0].msg).toContain('Ambiguous');
     });
@@ -195,7 +220,7 @@ function foo() {
             replacement_block: 'replaced block',
         }];
         const result = await applyEditList(ambiguous, edits, {
-            filePath: '/tmp/test.js',
+            filePath: testFilePath,
             disambiguations,
         });
         expect(result.errors).toHaveLength(0);
@@ -209,7 +234,7 @@ function foo() {
             block_end: '}',
             replacement_block: '',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
     });
 });
@@ -221,7 +246,7 @@ describe('applyEditList symbol mode', () => {
             symbol: 'hello',
             newText: 'function hello() {\n    return "replaced";\n}',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('replaced');
     });
@@ -232,7 +257,7 @@ describe('applyEditList symbol mode', () => {
             symbol: 'nonexistent',
             newText: 'irrelevant',
         }];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors.length).toBeGreaterThan(0);
         expect(result.errors[0].msg).toContain('Symbol not found');
     });
@@ -264,7 +289,7 @@ describe('applyEditList mixed modes', () => {
                 newContent: 'const x = 99;',
             },
         ];
-        const result = await applyEditList(sampleContent, edits, { filePath: '/tmp/test.js' });
+        const result = await applyEditList(sampleContent, edits, { filePath: testFilePath });
         expect(result.errors).toHaveLength(0);
         expect(result.workingContent).toContain('block');
         expect(result.workingContent).toContain('99');
@@ -273,7 +298,7 @@ describe('applyEditList mixed modes', () => {
 
 describe('syntaxWarn', () => {
     it('returns empty string for clean JS', async () => {
-        const result = await syntaxWarn('/tmp/test.js', 'const x = 1;');
+        const result = await syntaxWarn(testFilePath, 'const x = 1;');
         expect(result).toBe('');
     });
 

@@ -283,6 +283,98 @@ export async function getCompiledQuery(langName: string): Promise<Query | null> 
 }
 
 /**
+ * Per-language declaration of which modular query files exist.
+ * Derived from `grammars/queries/<lang>/` directory listing.
+ * Used by getCompiledModularQuery to avoid filesystem probes for known-absent files.
+ */
+export const QUERIES_LANG_MAP: Readonly<Record<string, readonly string[]>> = {
+    bash:       ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    c:          ['definitions.scm', 'locals.scm', 'references.scm'],
+    c_sharp:    ['definitions.scm', 'locals.scm', 'references.scm'],
+    cpp:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    csharp:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    css:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    dockerfile: ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    go:         ['definitions.scm', 'locals.scm', 'references.scm'],
+    graphql:    ['definitions.scm', 'locals.scm', 'references.scm'],
+    hcl:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    html:       ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    java:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    javascript: ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    json:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    kotlin:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    lua:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    markdown:   ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    nix:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    php:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    prisma:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    proto:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    python:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    query:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    regex:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    ruby:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    rust:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    scss:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    sql:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    svelte:     ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    swift:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    toml:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    tsx:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    typescript: ['definitions.scm', 'locals.scm', 'references.scm'],
+    vue:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    xml:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    yaml:       ['definitions.scm', 'locals.scm', 'references.scm'],
+};
+
+const _modularQueryCache: Map<string, Query | null> = new Map();
+
+/**
+ * Load and compile a modular query file (locals.scm, injections.scm, etc.).
+ * Cached permanently. Returns null if the language has no such file or compilation fails.
+ *
+ * Does NOT affect the existing getCompiledQuery() for <lang>-tags.scm.
+ */
+export async function getCompiledModularQuery(langName: string, queryFile: string): Promise<Query | null> {
+    const cacheKey = `${langName}:${queryFile}`;
+    if (_modularQueryCache.has(cacheKey)) {
+        return _modularQueryCache.get(cacheKey) ?? null;
+    }
+
+    // Fast reject: check QUERIES_LANG_MAP before touching the filesystem
+    const available = QUERIES_LANG_MAP[langName];
+    if (!available || !available.includes(queryFile)) {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    const language = await loadLanguage(langName);
+    if (!language) {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    const scmPath = path.join(QUERIES_DIR, langName, queryFile);
+    let content: string;
+    try {
+        content = await fs.readFile(scmPath, 'utf-8');
+    } catch {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    try {
+        const query = new Query(language, content);
+        _modularQueryCache.set(cacheKey, query);
+        return query;
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Failed to compile ${queryFile} for ${langName}: ${message}\n`);
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+}
+
+/**
  * Check if tree-sitter is available (runtime can init, grammars exist).
  */
 export async function treeSitterAvailable(): Promise<boolean> {

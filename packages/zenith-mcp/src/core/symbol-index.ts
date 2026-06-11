@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
-import { getSymbols, getLangForFile, isSupported } from './tree-sitter.js';
+import { getLangForFile, isSupported } from './tree-sitter.js';
 import { getDefaultExcludes, isSensitive, getRefactorVersionTtlMs } from './shared.js';
 import { minimatch } from 'minimatch';
 import {
@@ -12,16 +12,13 @@ import {
     closeDb,
     initSymbolSchema,
     getFileHash,
-    upsertFile,
     deleteFile,
     getFilesByPrefix,
-    insertSymbol,
     deleteSymbolsByFile,
     getCallers,
     getCallees,
     getCallersFiltered,
     getCalleesFiltered,
-    insertEdge,
     snapshotVersion,
     getVersionHistory as adapterGetVersionHistory,
     getVersionText as adapterGetVersionText,
@@ -30,7 +27,11 @@ import {
     pruneOtherSessions,
     runTransaction,
     findSymbolFiles,
+    upsertProjectRoot,
 } from './db-adapter.js';
+import { extractParsedFile } from './indexing/extract.js';
+import { persistParsedFile } from './indexing/persist.js';
+import { resolveEdgeTargets } from './indexing/resolve.js';
 
 // ---------------------------------------------------------------------------
 // Repo root detection
@@ -122,6 +123,9 @@ export function getDb(repoRoot: string): DbConnection {
     }
 
     _dbCache.set(repoRoot, conn);
+    try {
+        upsertProjectRoot(conn, { rootPath: repoRoot, name: path.basename(repoRoot), createdAt: Date.now() });
+    } catch { /* registry upsert is best-effort; must not break getDb */ }
     return conn;
 }
 
@@ -150,15 +154,6 @@ function hashFileContent(content: string): string {
 // ---------------------------------------------------------------------------
 // Indexing
 // ---------------------------------------------------------------------------
-
-interface SymbolLike {
-    kind: string;
-    name: string;
-    type: string;
-    line: number;
-    endLine: number;
-    column: number;
-}
 
 function shouldIndexFile(repoRoot: string, absPath: string): boolean {
     if (!isSupported(absPath)) return false;
@@ -216,61 +211,12 @@ export async function indexFile(db: DbConnection, repoRoot: string, absFilePath:
         return;
     }
 
-    const symbols = await getSymbols(source, langName);
-    if (!symbols) {
+    const parsed = await extractParsedFile(source, langName, relPath, hash);
+    if (!parsed) {
         purgeIndexedPath(db, relPath);
         return;
     }
-
-    const defs = symbols.filter((s: SymbolLike) => s.kind === 'def');
-    const refs = symbols.filter((s: SymbolLike) => s.kind === 'ref');
-
-    runTransaction(db, () => {
-        deleteSymbolsByFile(db, relPath);
-        upsertFile(db, relPath, hash, Date.now());
-
-        const defIds: Array<{ id: number; line: number; endLine: number }> = [];
-        for (const sym of defs) {
-            const rowId = insertSymbol(db, {
-                name: sym.name,
-                kind: sym.kind,
-                type: sym.type,
-                filePath: relPath,
-                line: sym.line,
-                endLine: sym.endLine,
-                column: sym.column
-            });
-            defIds.push({ id: rowId, line: sym.line, endLine: sym.endLine });
-        }
-
-        for (const ref of refs) {
-            insertSymbol(db, {
-                name: ref.name,
-                kind: ref.kind,
-                type: ref.type,
-                filePath: relPath,
-                line: ref.line,
-                endLine: ref.endLine,
-                column: ref.column
-            });
-
-            // Find innermost containing def (smallest span that contains this ref)
-            let bestDef: { id: number; line: number; endLine: number } | null = null;
-            let bestSpan = Infinity;
-            for (const def of defIds) {
-                if (ref.line >= def.line && ref.line <= def.endLine) {
-                    const span = def.endLine - def.line;
-                    if (span < bestSpan) {
-                        bestSpan = span;
-                        bestDef = def;
-                    }
-                }
-            }
-            if (bestDef) {
-                insertEdge(db, bestDef.id, ref.name);
-            }
-        }
-    });
+    persistParsedFile(db, parsed);
 }
 
 interface IndexDirectoryOpts {
@@ -323,6 +269,12 @@ export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath
     for (let i = 0; i < filePaths.length; i += BATCH_SIZE) {
         const batch = filePaths.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(f => indexFile(db, repoRoot, f)));
+    }
+
+    // Resolve pass: now that all defs across the directory are indexed,
+    // resolve unresolved edge targets to their definition sites.
+    for (const fp of filePaths) {
+        resolveEdgeTargets(db, path.relative(repoRoot, fp));
     }
 }
 

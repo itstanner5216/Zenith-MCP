@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getDefinitions } from '../dist/core/tree-sitter.js';
+import { getDefinitions } from '../dist/core/tree-sitter/symbols.js';
 
 describe('tree-sitter TS symbol queries', () => {
     it('captures wrapped arrow-function exports in TypeScript', async () => {

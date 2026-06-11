@@ -31,6 +31,34 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         _allowedDirectories = [...directories];
     }
 
+    async function isInsideAllowed(candidate: string): Promise<boolean> {
+        // Empty allowlist preserves backwards-compatible "no sandbox" behavior for
+        // callers (CLIs, tests) that explicitly construct the context without dirs.
+        // When any directories ARE supplied, the candidate must resolve inside one
+        // of them — checked with realpath on BOTH sides and a path-separator
+        // boundary so '/tmp/foo' does not match '/tmp/foobar'.
+        if (_allowedDirectories.length === 0) return true;
+        for (const allowed of _allowedDirectories) {
+            const expanded = expandHome(allowed);
+            const absoluteAllowed = path.isAbsolute(expanded)
+                ? path.resolve(expanded)
+                : path.resolve(process.cwd(), expanded);
+            let realAllowed: string;
+            try {
+                realAllowed = await fs.realpath(absoluteAllowed);
+            } catch {
+                // Allowed dir is missing or unreadable: fall back to lexical resolve
+                // so the allowlist is still meaningful when symlink resolution fails.
+                realAllowed = absoluteAllowed;
+            }
+            const withSep = realAllowed.endsWith(path.sep) ? realAllowed : realAllowed + path.sep;
+            if (candidate === realAllowed || candidate.startsWith(withSep)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     async function validatePath(requestedPath: string) {
         const expandedPath = expandHome(requestedPath);
         const absolute = path.isAbsolute(expandedPath)
@@ -38,20 +66,30 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             : path.resolve(process.cwd(), expandedPath);
         normalizePath(absolute);
 
-        // Zenith is intentionally not a sandbox. MCP roots / CLI directories are kept
-        // as project-context hints only; they must never block filesystem access.
         try {
             const realPath = await fs.realpath(absolute);
             normalizePath(realPath);
+            if (!(await isInsideAllowed(realPath))) {
+                throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+            }
             return realPath;
         } catch (error: unknown) {
+            if (error instanceof Error && error.message.startsWith('Access denied')) {
+                throw error;
+            }
             if (hasCode(error) && error.code === 'ENOENT') {
                 const parentDir = path.dirname(absolute);
                 try {
                     const realParentPath = await fs.realpath(parentDir);
                     normalizePath(realParentPath);
+                    if (!(await isInsideAllowed(realParentPath))) {
+                        throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+                    }
                     return absolute;
                 } catch (parentError) {
+                    if (parentError instanceof Error && parentError.message.startsWith('Access denied')) {
+                        throw parentError;
+                    }
                     // Re-throw access-denied and other non-filesystem errors unchanged.
                     // Wrap filesystem errors (ENOENT, EACCES, etc.) with a friendlier message.
                     if (!hasCode(parentError)) throw parentError;

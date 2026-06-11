@@ -32,7 +32,7 @@ export type { ScoredEntries, CompressedOutput } from './pipeline.js';
 // ---------------------------------------------------------------------------
 // String codec public API
 // ---------------------------------------------------------------------------
-export { compressString, compressSourceStructured } from './string-codec.js';
+export { compressString, compressSourceStructured, compressFile } from './string-codec.js';
 
 // ---------------------------------------------------------------------------
 // Engines
@@ -95,6 +95,8 @@ export type {
   ASTEdge,
   ASTEdgeResult,
   CompressionContext,
+  RawFileFacts,
+  CompressFileRequest,
   EntryMeta,
   TemplateInfoFull,
   CompressConfig as CompressConfigShape,
