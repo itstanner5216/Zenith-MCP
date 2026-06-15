@@ -31,7 +31,7 @@ import {
 } from './db-adapter.js';
 import { extractParsedFile } from './indexing/extract.js';
 import { persistParsedFile } from './indexing/persist.js';
-import { resolveEdgeTargets } from './indexing/resolve.js';
+import { resolveAllEdgeTargets } from './indexing/resolve.js';
 
 // ---------------------------------------------------------------------------
 // Repo root detection
@@ -272,10 +272,14 @@ export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath
     }
 
     // Resolve pass: now that all defs across the directory are indexed,
-    // resolve unresolved edge targets to their definition sites.
-    for (const fp of filePaths) {
-        resolveEdgeTargets(db, path.relative(repoRoot, fp));
-    }
+    // resolve unresolved edge targets to their definition sites in ONE pass over
+    // the whole DB (review #18, "Performance Is Correctness"). The previous code
+    // looped resolveEdgeTargets per file — re-querying and re-resolving for each
+    // file, an N+1. resolveAllEdgeTargets fetches all unresolved edges once,
+    // groups by name, and fetches each name's candidate set once. The healing
+    // semantics are unchanged: stale rows nulled by ON DELETE SET NULL are
+    // re-read and re-resolved on the next sweep.
+    resolveAllEdgeTargets(db);
 }
 
 export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFilePaths: string[]): Promise<number> {

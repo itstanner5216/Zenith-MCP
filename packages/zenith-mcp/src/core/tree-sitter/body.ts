@@ -19,8 +19,8 @@ export function bodySlice(source: string, startLine: number, endLine: number): s
 }
 
 /**
- * SHA-1 fingerprint of a body slice. Used for change detection and dedup.
+ * SHA-256 fingerprint of a body slice. Used for change detection and dedup.
  */
 export function bodyHash(slice: string): string {
-    return createHash('sha1').update(slice).digest('hex');
+    return createHash('sha256').update(slice).digest('hex');
 }

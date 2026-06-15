@@ -21,8 +21,13 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
         deleteSymbolsByFile(conn, record.relPath);
         // 2. Upsert file
         upsertFile(conn, record.relPath, record.hash, Date.now());
-        // 3. Insert symbols, build key→id map
+        // 3. Insert symbols, build key→id map.
+        //    Pass 1 inserts every symbol so keyToId is COMPLETE before any
+        //    parent link is resolved. Pass 2 then applies updateSymbolExtras,
+        //    so parent_symbol_id no longer depends on parent-before-child
+        //    ordering in record.symbols (e.g. same-line `class C { m(){} }`).
         const keyToId = new Map<string, number>();
+        const inserted: { sym: typeof record.symbols[number]; rowId: number }[] = [];
         for (const sym of record.symbols) {
             const rowId = insertSymbol(conn, {
                 name: sym.name, kind: sym.kind, type: sym.type,
@@ -30,6 +35,9 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
             });
             const key = `${sym.name}:${sym.line}:${sym.column}`;
             keyToId.set(key, rowId);
+            inserted.push({ sym, rowId });
+        }
+        for (const { sym, rowId } of inserted) {
             if (sym.bodyHash || sym.captureTag || sym.parentSymbolKey || sym.visibility) {
                 const parentId = sym.parentSymbolKey ? (keyToId.get(sym.parentSymbolKey) ?? null) : null;
                 updateSymbolExtras(conn, rowId, { captureTag: sym.captureTag, bodyHash: sym.bodyHash, parentSymbolId: parentId, visibility: sym.visibility });

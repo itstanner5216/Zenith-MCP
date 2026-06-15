@@ -48,11 +48,19 @@ export async function compressForTool(
         facts: {
             path: validPath,
             langName,
-            defs: dbFacts.defs.map(d => ({
-                name: d.name, kind: 'def', type: d.type!,
-                line: d.line, endLine: d.endLine,
-                visibility: d.visibility, captureTag: d.captureTag,
-            })),
+            // A def's `type` is always set from its tree-sitter capture tag
+            // (indexing/extract.ts: `type = tag.slice(16)`), so every def row
+            // carries a type in practice. The `symbols.type` column is merely
+            // declared nullable, so we narrow it honestly with a type-guard
+            // rather than asserting non-null — this drops nothing for real defs
+            // and forwards a `string` (not `string | null`) to TOON's RawFileFacts.
+            defs: dbFacts.defs
+                .filter((d): d is typeof d & { type: string } => d.type !== null)
+                .map(d => ({
+                    name: d.name, kind: 'def', type: d.type,
+                    line: d.line, endLine: d.endLine,
+                    visibility: d.visibility, captureTag: d.captureTag,
+                })),
             edges: dbFacts.edges.map(e => ({
                 callerName: e.caller_name, calleeName: e.callee_name, callCount: e.call_count,
             })),

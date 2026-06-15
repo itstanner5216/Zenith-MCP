@@ -292,7 +292,6 @@ export const QUERIES_LANG_MAP: Readonly<Record<string, readonly string[]>> = {
     c:          ['definitions.scm', 'locals.scm', 'references.scm'],
     c_sharp:    ['definitions.scm', 'locals.scm', 'references.scm'],
     cpp:        ['definitions.scm', 'locals.scm', 'references.scm'],
-    csharp:     ['definitions.scm', 'locals.scm', 'references.scm'],
     css:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
     dockerfile: ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
     go:         ['definitions.scm', 'locals.scm', 'references.scm'],

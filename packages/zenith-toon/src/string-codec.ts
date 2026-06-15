@@ -1864,7 +1864,10 @@ export function compressFile(req: CompressFileRequest): string | null {
     });
   }
   const context: CompressionContext = {
-    callGraph: facts.edges.map((e) => ({ caller: e.callerName, callee: e.calleeName, weight: e.callCount })),
+    // SageRank tuning transform: damp raw call counts with sqrt so a hot edge
+    // (many calls) doesn't linearly dominate AST ranking. Per Priority 0.5 this
+    // edge-weighting decision lives in TOON; MCP hands across the raw callCount.
+    callGraph: facts.edges.map((e) => ({ caller: e.callerName, callee: e.calleeName, weight: Math.sqrt(e.callCount) })),
     exportedSymbols: facts.defs.filter((d) => d.visibility === 'public').map((d) => d.name),
   };
   const out = compressSourceStructured(req.source, req.maxChars, structure, context);

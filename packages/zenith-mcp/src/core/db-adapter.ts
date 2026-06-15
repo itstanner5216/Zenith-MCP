@@ -176,28 +176,41 @@ export function initSymbolSchema(conn: DbConnection): void {
     }
 
     // --- Schema version + migration ladder ---
-    db.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`);
-    const versionRow = db.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number } | undefined;
-    const currentVersion = versionRow?.version ?? 0;
+    //
+    // schema_version is a single-row table keyed on id=1 (review #5). The CHECK
+    // constraint + ON CONFLICT(id) write make the version strictly deterministic:
+    // there is exactly one row, ever. A pre-existing database may still carry the
+    // OLD shape `schema_version(version INTEGER NOT NULL)` with no `id` column —
+    // `CREATE TABLE IF NOT EXISTS` will NOT alter that existing table, so we detect
+    // the old shape explicitly and migrate it in place before reading the version.
+    const currentVersion = normalizeSchemaVersionTable(db);
 
     if (currentVersion < 1) {
-        // v0 → v1: extended symbol columns + new child tables
-        const columnMigrations = [
-            'ALTER TABLE symbols ADD COLUMN capture_tag TEXT',
-            'ALTER TABLE symbols ADD COLUMN body_hash TEXT',
-            'ALTER TABLE symbols ADD COLUMN parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE',
-            'ALTER TABLE symbols ADD COLUMN visibility TEXT',
-            'ALTER TABLE edges ADD COLUMN callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL',
-        ];
-        for (const sql of columnMigrations) {
-            try {
-                db.exec(sql);
-            } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e);
-                if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw e;
+        // v0 → v1: extended symbol columns + new child tables.
+        //
+        // Review #6: the entire v0→v1 ladder (column ALTERs + child-table DDL +
+        // the schema_version write) runs inside one transaction. SQLite DDL is
+        // transactional, so a crash mid-migration rolls the whole ladder back and
+        // the version is NOT advanced — leaving currentVersion at 0 so the next
+        // init re-runs the migration cleanly. The id=1 row is only written after
+        // every statement below has succeeded.
+        runTransaction(conn, () => {
+            const columnMigrations = [
+                'ALTER TABLE symbols ADD COLUMN capture_tag TEXT',
+                'ALTER TABLE symbols ADD COLUMN body_hash TEXT',
+                'ALTER TABLE symbols ADD COLUMN parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE',
+                'ALTER TABLE symbols ADD COLUMN visibility TEXT',
+                'ALTER TABLE edges ADD COLUMN callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL',
+            ];
+            for (const sql of columnMigrations) {
+                try {
+                    db.exec(sql);
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw e;
+                }
             }
-        }
-        db.exec(`
+            db.exec(`
             CREATE TABLE IF NOT EXISTS symbol_structures (
                 symbol_id INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
                 params_json TEXT, return_text TEXT, decorators_json TEXT,
@@ -239,10 +252,59 @@ export function initSymbolSchema(conn: DbConnection): void {
                 name TEXT,
                 created_at INTEGER
             );
-        `);
-        if (!versionRow) db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(1);
-        else db.prepare('UPDATE schema_version SET version = ?').run(1);
+            `);
+            // Advance to v1 idempotently against the single-row table. ON CONFLICT(id)
+            // upserts the lone id=1 row, so re-running this never accumulates rows and
+            // never needs a separate INSERT-vs-UPDATE branch.
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(1);
+        });
     }
+}
+
+/**
+ * Normalizes the `schema_version` table to its single-row shape and returns the
+ * current schema version (0 if the table was just created or held no row).
+ *
+ * Single-row shape (review #5):
+ *   schema_version(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)
+ *
+ * Old shape that may already exist on disk:
+ *   schema_version(version INTEGER NOT NULL)   -- no `id` column, no PK/UNIQUE
+ *
+ * Because `CREATE TABLE IF NOT EXISTS` is a no-op when a table already exists, an
+ * old-shape table would silently survive. We therefore inspect the live columns
+ * via PRAGMA table_info: if an `id` column is absent we read the highest stored
+ * version (collapsing any duplicate rows the old shape allowed), drop the table,
+ * recreate it single-row, and reinsert that version on the id=1 row. The whole
+ * normalization is wrapped in a transaction so a crash cannot leave the table
+ * dropped-but-not-recreated.
+ */
+function normalizeSchemaVersionTable(db: DatabaseSync): number {
+    const columns = db.prepare('PRAGMA table_info(schema_version)').all() as Array<{ name: string }>;
+    const tableExists = columns.length > 0;
+    const hasIdColumn = columns.some((c) => c.name === 'id');
+
+    if (tableExists && !hasIdColumn) {
+        // Old shape detected: migrate in place, preserving the recorded version.
+        const legacyRow = db.prepare('SELECT MAX(version) AS version FROM schema_version').get() as { version: number | null } | undefined;
+        const legacyVersion = legacyRow && legacyRow.version !== null ? legacyRow.version : 0;
+        db.exec('BEGIN');
+        try {
+            db.exec('DROP TABLE schema_version');
+            db.exec('CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?)').run(legacyVersion);
+            db.exec('COMMIT');
+        } catch (e) {
+            db.exec('ROLLBACK');
+            throw e;
+        }
+        return legacyVersion;
+    }
+
+    // Fresh table (or already single-row): create-if-missing then read id=1.
+    db.exec('CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
+    const row = db.prepare('SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
+    return row ? row.version : 0;
 }
 
 /**
@@ -1158,12 +1220,42 @@ export function getUnresolvedEdges(conn: DbConnection, filePath: string): Array<
 }
 
 /**
+ * Whole-DB counterpart to getUnresolvedEdges (review #18, "Performance Is
+ * Correctness"): returns EVERY unresolved edge in one query so the resolver can
+ * sweep the entire database in a single pass instead of re-querying per file
+ * (the N+1 the per-file loop caused). The "unresolved" predicate mirrors
+ * getUnresolvedEdges exactly — `e.callee_symbol_id IS NULL` — minus the
+ * per-file filter. The container symbol's file_path is projected as
+ * `caller_file_path` so scope-aware resolution (#17) can prefer same-file
+ * callees without a second query per edge.
+ *
+ * SQL: SELECT e.id, e.referenced_name, s.file_path AS caller_file_path FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.callee_symbol_id IS NULL
+ */
+export function getAllUnresolvedEdges(conn: DbConnection): Array<{ id: number; referenced_name: string; caller_file_path: string }> {
+    return prepareOrCache(conn, `SELECT e.id, e.referenced_name, s.file_path AS caller_file_path FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.callee_symbol_id IS NULL`).all() as Array<{ id: number; referenced_name: string; caller_file_path: string }>;
+}
+
+/**
  * SQL: SELECT id FROM symbols WHERE name = ? AND kind = ? LIMIT 2
  * Returns the single matching id, or null if zero or more than one match.
  */
 export function findSymbolByNameUnique(conn: DbConnection, name: string, kind: string): { id: number } | null {
     const rows = prepareOrCache(conn, 'SELECT id FROM symbols WHERE name = ? AND kind = ? LIMIT 2').all(name, kind) as { id: number }[];
     return rows.length === 1 ? rows[0]! : null;
+}
+
+/**
+ * Non-unique counterpart to findSymbolByNameUnique: returns EVERY def (or
+ * other-kind) symbol matching `name`, with its id and file_path. No LIMIT — the
+ * full candidate set is intentionally returned so Wave B's resolver (review
+ * #16/#17) can do scope-aware and dot-qualified disambiguation in TypeScript
+ * (e.g. prefer the same-file/module callee, or filter by parent == qualifier).
+ *
+ * SQL: SELECT id, file_path AS filePath FROM symbols WHERE name = ? AND kind = ?
+ */
+export function findDefsByName(conn: DbConnection, name: string, kind = 'def'): { id: number; filePath: string }[] {
+    return prepareOrCache(conn, 'SELECT id, file_path AS filePath FROM symbols WHERE name = ? AND kind = ?')
+        .all(name, kind) as { id: number; filePath: string }[];
 }
 
 /**
@@ -1218,9 +1310,13 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
 // ---------------------------------------------------------------------------
 
 /**
- * SQL: SELECT version FROM schema_version LIMIT 1
+ * Reads the single-row schema_version table (review #5). The id=1 predicate is
+ * the deterministic counterpart to the old LIMIT 1; both return the lone row now
+ * that the table is single-row by construction.
+ *
+ * SQL: SELECT version FROM schema_version WHERE id = 1
  */
 export function getSchemaVersion(conn: DbConnection): number {
-    const row = prepareOrCache(conn, 'SELECT version FROM schema_version LIMIT 1').get() as { version: number } | undefined;
+    const row = prepareOrCache(conn, 'SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
     return row?.version ?? 0;
 }

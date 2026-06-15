@@ -52,10 +52,10 @@ describe('bodySlice', () => {
 // ---------------------------------------------------------------------------
 
 describe('bodyHash', () => {
-    it('returns a 40-character hex string (SHA-1)', () => {
+    it('returns a 64-character hex string (SHA-256)', () => {
         const h = bodyHash('hello world');
-        expect(h).toHaveLength(40);
-        expect(h).toMatch(/^[0-9a-f]{40}$/);
+        expect(h).toHaveLength(64);
+        expect(h).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it('is deterministic — same input always yields same hash', () => {
@@ -71,8 +71,8 @@ describe('bodyHash', () => {
 
     it('handles empty string', () => {
         const h = bodyHash('');
-        expect(h).toHaveLength(40);
-        expect(h).toMatch(/^[0-9a-f]{40}$/);
+        expect(h).toHaveLength(64);
+        expect(h).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it('is sensitive to whitespace differences', () => {
@@ -83,7 +83,7 @@ describe('bodyHash', () => {
         const src = 'line1\nline2\nline3';
         const slice = bodySlice(src, 1, 2);
         const h = bodyHash(slice);
-        expect(h).toHaveLength(40);
+        expect(h).toHaveLength(64);
         expect(h).toBe(bodyHash('line1\nline2'));
     });
 });
