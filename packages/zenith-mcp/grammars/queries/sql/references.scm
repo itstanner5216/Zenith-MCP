@@ -2,18 +2,21 @@
 ; Captures table references in FROM/JOIN and function calls.
 
 ; --- Table references in FROM ---
-(from_clause
+(from
   (object_reference
     name: (identifier) @name.reference.table)) @reference.table
 
 ; --- Table references in JOIN ---
-(join_clause
-  (object_reference
-    name: (identifier) @name.reference.table)) @reference.table
+; join wraps its table in a `relation` node.
+(join
+  (relation
+    (object_reference
+      name: (identifier) @name.reference.table))) @reference.table
 
 ; --- Function calls ---
-(function_call
-  name: (identifier) @name.reference.call) @reference.call
+(invocation
+  (object_reference
+    name: (identifier) @name.reference.call)) @reference.call
 
 ; --- General identifier references ---
 (object_reference

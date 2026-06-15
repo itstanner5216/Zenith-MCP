@@ -10,13 +10,13 @@
 
 ; Variable definitions are local parameters
 (variable_definition
-  variable: (variable
+  (variable
     (name) @local.parameter))
 
 ; Local definition for named fragments
 (fragment_definition
-  name: (name) @local.definition)
+  (fragment_name
+    (name) @local.definition))
 
 ; Name references
 (name) @local.reference
-

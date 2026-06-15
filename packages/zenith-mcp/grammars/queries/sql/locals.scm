@@ -2,14 +2,16 @@
 ; Scopes for SELECT statements and function bodies.
 
 ; --- Scopes ---
-(select_statement) @scope
+(select) @scope
 (subquery) @scope
 
 ; --- CTE definitions (WITH clause) ---
-(cte_definition
+(cte
   (identifier) @local.definition)
 
 ; --- Column aliases ---
-(alias
-  (identifier) @local.definition)
+; In this grammar aliases are expressed via the `alias:` field on a term,
+; not as a standalone `alias` node.
+(term
+  alias: (identifier) @local.definition)
 

@@ -9,7 +9,7 @@
 
 ; Mixin declaration: @mixin name { ... }
 (mixin_statement
-  name: (identifier) @name.definition.mixin) @definition.mixin
+  (name) @name.definition.mixin) @definition.mixin
 
 ; Include as a mixin "definition" target (for cross-referencing)
 ; (no definition — include is a reference)
@@ -19,8 +19,8 @@
   (variable_value) @name.definition.variable) @definition.variable
 
 ; Placeholder selector: %placeholder { ... }
-(placeholder_selector
-  (identifier) @name.definition.placeholder) @definition.placeholder
+(placeholder
+  (name) @name.definition.placeholder) @definition.placeholder
 
 ; Keyframes definition: @keyframes name { ... }
 (keyframes_statement

@@ -15,10 +15,12 @@
 
 ; for-expression loop variable
 (for_tuple_expr
-  (identifier) @local.definition)
+  (for_intro
+    (identifier) @local.definition))
 
 (for_object_expr
-  (identifier) @local.definition)
+  (for_intro
+    (identifier) @local.definition))
 
 ; Identifier used as a value (reference)
 (variable_expr

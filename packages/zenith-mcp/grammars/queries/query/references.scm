@@ -8,8 +8,9 @@
 
 ; Capture used in a predicate argument (reference to a previously-named capture)
 (predicate
-  (capture
-    (identifier) @name.reference.capture) @reference.capture)
+  (parameters
+    (capture
+      name: (identifier) @name.reference.capture) @reference.capture))
 
 ; Anonymous node literal  →  "keyword"
 (anonymous_node

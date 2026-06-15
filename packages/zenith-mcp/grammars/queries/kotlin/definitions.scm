@@ -12,7 +12,7 @@
 
 ; --- Objects (singletons) ---
 (object_declaration
-  (simple_identifier) @name.definition.object) @definition.object
+  (type_identifier) @name.definition.object) @definition.object
 
 ; --- Properties ---
 (property_declaration
@@ -20,5 +20,5 @@
 
 ; --- Type aliases ---
 (type_alias
-  (simple_identifier) @name.definition.type) @definition.type
+  (type_identifier) @name.definition.type) @definition.type
 

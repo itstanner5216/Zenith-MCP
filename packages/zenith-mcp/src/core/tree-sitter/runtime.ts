@@ -218,7 +218,43 @@ export async function loadLanguage(langName: string): Promise<Language | null> {
         }
 
         try {
-            return await Language.load(wasmPath);
+            const language = await Language.load(wasmPath);
+
+            // ABI compatibility probe: verify the grammar's parse driver is
+            // compatible with the bundled web-tree-sitter core WASM.
+            //
+            // Some upstream grammar WASMs (notably prebuilt downloads like
+            // tree-sitter-sql) were compiled against a different tree-sitter
+            // core version than the bundled tree-sitter.wasm. They load
+            // successfully — Language metadata is intact, Query compilation
+            // and node-type enumeration work — but crash at parse-time with a
+            // WASM "function signature mismatch" RuntimeError.
+            //
+            // Parsing an empty string exercises the driver entry points
+            // without touching a real source tree. If it throws, we still
+            // return the language (Query / symbol-metadata features remain
+            // available) but log a clear warning that source parsing is
+            // disabled for this grammar.
+            //
+            // Unlike the PIC side-module guard above, this does NOT return
+            // null: an ABI-mismatched WASM is harmless to the process (no GOT
+            // poisoning), so non-parsing callers should keep working.
+            const probeParser = new Parser();
+            probeParser.setLanguage(language);
+            try {
+                probeParser.parse('');
+            } catch {
+                process.stderr.write(
+                    `[tree-sitter] ${langName} grammar loaded but its parse driver is ` +
+                    `ABI-incompatible with the bundled runtime core (likely built ` +
+                    `against a different tree-sitter version). Query compilation and ` +
+                    `symbol metadata remain available, but source parsing is disabled ` +
+                    `for ${langName}. Rebuild the grammar with the pinned tree-sitter ` +
+                    `CLI to restore parsing.\n`
+                );
+            }
+
+            return language;
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             process.stderr.write(`Failed to load grammar for ${langName}: ${message}\n`);

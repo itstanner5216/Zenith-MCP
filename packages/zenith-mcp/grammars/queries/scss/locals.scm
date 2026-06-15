@@ -22,8 +22,9 @@
 
 ; Mixin parameters
 (mixin_statement
-  (arguments
-    (variable_value) @local.parameter))
+  (parameters
+    (parameter
+      (variable_name) @local.parameter)))
 
 ; Variable references
 (variable_value) @local.reference

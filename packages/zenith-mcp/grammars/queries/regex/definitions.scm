@@ -6,5 +6,5 @@
 
 ; Named capturing group  →  (?<name>...)  or  (?P<name>...)
 (named_capturing_group
-  name: (group_name) @name.definition.group) @definition.group
+  (group_name) @name.definition.group) @definition.group
 

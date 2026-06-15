@@ -8,20 +8,22 @@
 
 ; Fragment spread: ...FragName
 (fragment_spread
-  name: (name) @name.reference.fragment) @reference.fragment
+  (fragment_name
+    (name) @name.reference.fragment)) @reference.fragment
 
 ; Inline fragment on type
 (inline_fragment
-  type_condition: (named_type
-    (name) @name.reference.type)) @reference.type
+  (type_condition
+    (named_type
+      (name) @name.reference.type))) @reference.type
 
 ; Field selection in operation or fragment
 (field
-  name: (name) @name.reference.field) @reference.field
+  (name) @name.reference.field) @reference.field
 
 ; Directive usage: @directive
 (directive
-  name: (name) @name.reference.directive) @reference.directive
+  (name) @name.reference.directive) @reference.directive
 
 ; Variable usage: $var
 (variable
@@ -29,5 +31,4 @@
 
 ; Argument usage: key: value
 (argument
-  name: (name) @name.reference.argument) @reference.argument
-
+  (name) @name.reference.argument) @reference.argument

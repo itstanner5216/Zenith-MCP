@@ -4,7 +4,7 @@
 
 ; Mixin include: @include name
 (include_statement
-  name: (identifier) @name.reference.mixin) @reference.mixin
+  (identifier) @name.reference.mixin) @reference.mixin
 
 ; Variable reference in property value
 (variable_value) @name.reference.variable

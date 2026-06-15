@@ -9,6 +9,5 @@
 
 ; Variable expansion inside RUN / CMD / etc.
 ; $VAR or ${VAR}
-(variable
-  (variable_name) @name.reference.variable) @reference.variable
+(variable) @name.reference.variable @reference.variable
 
