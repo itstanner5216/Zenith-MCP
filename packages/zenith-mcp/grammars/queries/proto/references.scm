@@ -19,3 +19,11 @@
 ; Option name reference (qualified identifier)
 (option
   (full_ident (identifier) @name.reference.option)) @reference.option
+
+; Field option name reference (simple identifier)
+(field_option
+  (identifier) @name.reference.option) @reference.option
+
+; Field option name reference (qualified identifier)
+(field_option
+  (full_ident) @name.reference.option) @reference.option

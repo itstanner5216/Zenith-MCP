@@ -34,5 +34,35 @@
 
 (namespace_use_declaration
   (namespace_use_clause
-    (name) @name.reference.import)) @reference.import
+    (name) @name.reference.import
+    alias: (_))) @reference.import
+
+(namespace_use_declaration
+  (namespace_use_clause
+    (name) @name.reference.import
+    !alias)) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (name) @name.reference.import
+      alias: (_)))) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (name) @name.reference.import
+      !alias))) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (qualified_name) @name.reference.import))) @reference.import
+
+; --- Trait composition uses ---
+(use_declaration
+  (name) @name.reference.import) @reference.import
+
+(use_declaration
+  (qualified_name) @name.reference.import) @reference.import
 

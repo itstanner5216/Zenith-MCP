@@ -40,5 +40,14 @@
   local_declaration: (function_declaration
     name: (identifier) @local.definition))
 
+; Numeric for-loop variable is a local definition
+(for_numeric_clause
+  name: (identifier) @local.definition)
+
+; Generic for-loop variables are local definitions
+(for_generic_clause
+  (variable_list
+    name: (identifier) @local.definition))
+
 ; Identifier references (all unresolved identifiers)
 (identifier) @local.reference

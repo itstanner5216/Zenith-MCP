@@ -15,6 +15,12 @@
   function: (variable_expression
     name: (identifier) @name.reference.function)) @reference.function
 
+; Function application via selected attribute  →  expr.f x
+(apply_expression
+  function: (select_expression
+    attrpath: (attrpath
+      attr: (identifier) @name.reference.function))) @reference.function
+
 ; String interpolation  →  ${expr}
 (interpolation
   expression: (variable_expression
