@@ -1,6 +1,6 @@
 ; SCSS References
 ; tree-sitter-scss grammar
-; CONSERVATIVE: captures mixin includes, variable references, and selector references.
+; Captures mixin includes, variable references, function calls, and selector references.
 
 ; Mixin include: @include name
 (include_statement
@@ -8,6 +8,10 @@
 
 ; Variable reference in property value
 (variable_value) @name.reference.variable
+
+; Function call: name(args)
+(call_expression
+  (function_name) @name.reference.call) @reference.call
 
 ; Class selector reference (used in compound selectors / extends)
 (class_selector
@@ -20,4 +24,3 @@
 
 ; Property name reference
 (property_name) @name.reference.property
-

@@ -15,6 +15,9 @@
 (parameter
   name: (simple_identifier) @local.parameter)
 
+(lambda_parameter
+  name: (simple_identifier) @local.parameter)
+
 ; --- Local variable bindings ---
 ; In `let x = ...` the identifier lives in (pattern bound_identifier:)
 ; inside a property_declaration; value_binding_pattern is just the sibling
@@ -25,4 +28,3 @@
 
 ; --- Local references ---
 (simple_identifier) @local.reference
-

@@ -17,10 +17,3 @@
 ; --- Type references ---
 (user_type
   (type_identifier) @name.reference.type) @reference.type
-
-(user_type
-  (type_arguments
-    (type_projection
-      (user_type
-        (type_identifier) @name.reference.type)))) @reference.type
-

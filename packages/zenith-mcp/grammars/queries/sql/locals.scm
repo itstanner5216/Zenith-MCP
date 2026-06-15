@@ -15,3 +15,7 @@
 (term
   alias: (identifier) @local.definition)
 
+; --- Table aliases ---
+; Table aliases appear as `alias:` field on `relation` nodes in FROM/JOIN.
+(relation
+  alias: (identifier) @local.definition)
