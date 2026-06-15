@@ -198,11 +198,14 @@ describe('DEF_TYPES coverage against shipped *-tags.scm', () => {
         const stat = await fs.stat(QUERIES_DIR);
         expect(stat.isDirectory()).toBe(true);
         const files = (await fs.readdir(QUERIES_DIR)).filter(f => f.endsWith('-tags.scm'));
-        // 36 ships today (bash, c, c_sharp, cpp, csharp, css, dockerfile, go,
+        // 35 ships today (bash, c, c_sharp, cpp, css, dockerfile, go,
         // graphql, hcl, html, java, javascript, json, kotlin, lua, markdown,
         // nix, php, prisma, proto, python, query, regex, ruby, rust, scss,
         // sql, svelte, swift, toml, tsx, typescript, vue, xml, yaml).
-        expect(files.length).toBeGreaterThanOrEqual(36);
+        // The dead duplicate `csharp-tags.scm` was removed — the language key
+        // is `c_sharp` end-to-end (extension map, loader, anchors), so the
+        // `csharp` tag/query/wasm assets were unreachable drift.
+        expect(files.length).toBeGreaterThanOrEqual(35);
     });
 
     it('covers every definition node type used in any shipped tags.scm', async () => {

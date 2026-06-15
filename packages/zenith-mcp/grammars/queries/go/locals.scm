@@ -6,7 +6,7 @@
 (func_literal) @scope
 (if_statement) @scope
 (for_statement) @scope
-(switch_statement) @scope
+(expression_switch_statement) @scope
 (type_switch_statement) @scope
 
 ; --- Parameters ---
