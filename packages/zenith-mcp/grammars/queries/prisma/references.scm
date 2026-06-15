@@ -1,18 +1,35 @@
 ; Prisma Schema References
-; CONSERVATIVE: captures type references and attribute references.
+; captures type references and attribute references.
 
 ; Type reference in field type position (e.g., String, Int, MyModel)
-(type_identifier) @name.reference.type
+(column_type
+  (identifier) @name.reference.type)
 
 ; Attribute reference: @id, @unique, @relation
 (attribute
-  (attribute_name) @name.reference.attribute) @reference.attribute
+  [
+    (identifier) @name.reference.attribute
+    (call_expression
+      (identifier) @name.reference.attribute)
+  ]) @reference.attribute
 
 ; Block attribute: @@index, @@unique
-(block_attribute
-  (attribute_name) @name.reference.attribute) @reference.attribute
+(block_attribute_declaration
+  [
+    (identifier) @name.reference.attribute
+    (call_expression
+      (identifier) @name.reference.attribute)
+  ]) @reference.attribute
 
-; Relation reference (model name used in @relation)
-(argument
+; Identifiers used as call arguments (e.g., model names in @relation)
+(arguments
   (identifier) @name.reference.identifier) @reference.argument
 
+(arguments
+  (array
+    (identifier) @name.reference.identifier)) @reference.argument
+
+(arguments
+  (type_expression
+    (array
+      (identifier) @name.reference.identifier))) @reference.argument

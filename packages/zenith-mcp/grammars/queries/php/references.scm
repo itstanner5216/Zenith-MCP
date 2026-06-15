@@ -22,15 +22,47 @@
 
 ; --- Object creation ---
 (object_creation_expression
-  class: (named_type
-    (name) @name.reference.type)) @reference.type
+  (name) @name.reference.type) @reference.type
 
 (object_creation_expression
-  class: (named_type
-    (qualified_name) @name.reference.type)) @reference.type
+  (qualified_name) @name.reference.type) @reference.type
 
 ; --- Use declarations ---
-(use_declaration
-  (use_declarator
+(namespace_use_declaration
+  (namespace_use_clause
     (qualified_name) @name.reference.import)) @reference.import
+
+(namespace_use_declaration
+  (namespace_use_clause
+    (name) @name.reference.import
+    alias: (_))) @reference.import
+
+(namespace_use_declaration
+  (namespace_use_clause
+    (name) @name.reference.import
+    !alias)) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (name) @name.reference.import
+      alias: (_)))) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (name) @name.reference.import
+      !alias))) @reference.import
+
+(namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause
+      (qualified_name) @name.reference.import))) @reference.import
+
+; --- Trait composition uses ---
+(use_declaration
+  (name) @name.reference.import) @reference.import
+
+(use_declaration
+  (qualified_name) @name.reference.import) @reference.import
 

@@ -33,7 +33,7 @@
 ; --- Constants ---
 (const_declaration
   (const_element
-    name: (name) @name.definition.constant)) @definition.constant
+    (name) @name.definition.constant)) @definition.constant
 
 ; --- Properties ---
 (property_declaration

@@ -1,26 +1,33 @@
 ; Protocol Buffers Definitions
-; CONSERVATIVE: supports tree-sitter-protobuf (mitchellh) and similar grammars.
 ; Captures message, enum, service, rpc, and field definitions.
 
 ; Message definition: message Foo { ... }
 (message
-  (message_name) @name.definition.message) @definition.message
+  (message_name (identifier) @name.definition.message)) @definition.message
 
 ; Enum definition: enum Foo { ... }
 (enum
-  (enum_name) @name.definition.enum) @definition.enum
+  (enum_name (identifier) @name.definition.enum)) @definition.enum
 
 ; Service definition: service Foo { ... }
 (service
-  (service_name) @name.definition.service) @definition.service
+  (service_name (identifier) @name.definition.service)) @definition.service
 
 ; RPC method definition: rpc Method(...) returns (...)
 (rpc
-  (rpc_name) @name.definition.rpc) @definition.rpc
+  (rpc_name (identifier) @name.definition.rpc)) @definition.rpc
 
 ; Message field definition
 (field
-  (field_name) @name.definition.field) @definition.field
+  (identifier) @name.definition.field) @definition.field
+
+; Oneof field definition
+(oneof_field
+  (identifier) @name.definition.field) @definition.field
+
+; Map field definition
+(map_field
+  (identifier) @name.definition.field) @definition.field
 
 ; Enum field/value definition
 (enum_field
@@ -29,4 +36,3 @@
 ; Oneof definition
 (oneof
   (identifier) @name.definition.oneof) @definition.oneof
-

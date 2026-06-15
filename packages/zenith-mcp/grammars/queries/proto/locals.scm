@@ -1,5 +1,5 @@
 ; Protocol Buffers Locals
-; CONSERVATIVE: message and service bodies are scopes.
+; Message/enum/service/oneof/rpc blocks create scopes; fields/enum values are local definitions.
 
 ; Message body is a scope
 (message
@@ -9,21 +9,24 @@
 (enum
   (enum_body) @scope)
 
-; Service body is a scope
-(service
-  (service_body) @scope)
+; Service creates a scope
+(service) @scope
 
-; RPC body is a scope
-(rpc
-  (rpc_body) @scope)
+; RPC creates a scope
+(rpc) @scope
 
-; Oneof body is a scope
-(oneof
-  (oneof_body) @scope)
+; Oneof creates a scope
+(oneof) @scope
 
 ; Field names are local definitions within their scope
 (field
-  (field_name) @local.definition)
+  (identifier) @local.definition)
+
+(oneof_field
+  (identifier) @local.definition)
+
+(map_field
+  (identifier) @local.definition)
 
 ; Enum values are local definitions
 (enum_field
@@ -31,4 +34,3 @@
 
 ; Type references
 (type) @local.reference
-
