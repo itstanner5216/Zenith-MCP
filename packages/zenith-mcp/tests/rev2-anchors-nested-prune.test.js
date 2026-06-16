@@ -68,7 +68,7 @@ const OLD_PARTIAL_DEF_NODE_TYPES = new Set([
     'arrow_function', 'function_expression',
 ]);
 
-describe('rev2 [T] — nested-def pruning uses canonical DEF_TYPES (no leak)', () => {
+describe('rev2 [T] — nested-def pruning uses curated DEF_SCOPE_NODE_TYPES (no leak)', () => {
     it('guards the premise: chosen node types are in DEF_TYPES but were missing from the old local set', () => {
         // If this ever flips, the test below stops exercising the leak path —
         // this guard makes such drift loud instead of silently passing.
