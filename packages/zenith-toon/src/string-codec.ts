@@ -1822,14 +1822,28 @@ export function compressSourceStructured(
  */
 export function compressFile(req: CompressFileRequest): string | null {
   if (req.source.length === 0) return null;
-  if (req.facts.langName === null && req.facts.defs.length === 0) return null;
+  if (req.facts.langName === null && req.facts.defs.length === 0) {
+    // Rule 12: TOON must NEVER deny a compression request. An unsupported
+    // language (no tree-sitter lang, no structural defs) is a MANDATORY
+    // fallback to the unstructured text engine — the same engine
+    // _compressSourceStructured delegates to when structure is empty
+    // (compressString, which auto-detects content type, enforces the 70%
+    // floor, and emits the verbatim/line-number/[TRUNCATED] invariants).
+    // We do NOT early-return null and force the caller into plain truncation.
+    const unstructured = compressString(req.source, req.maxChars);
+    // Match the structured path's usefulness gate: if even the unstructured
+    // output isn't shorter than the source, return null so the caller emits
+    // raw (TOON owns the "not useful" decision; the floor may keep them equal).
+    if (unstructured.length >= req.source.length) return null;
+    return unstructured;
+  }
   const facts: RawFileFacts = req.facts;
   // Public-API hardening: never let facts reference lines the source doesn't
   // contain (callers are contracted to pass the full file, but facts can be
   // momentarily stale across an edit boundary). Window clamp.
   const lineCount = req.source.split('\n').length;
   const structure: StructureBlock[] = facts.defs
-    .filter((d) => d.line - 1 < lineCount)
+    .filter((d) => d.line >= 1 && d.line - 1 < lineCount)
     .map((d) => ({
       name: d.name, kind: d.kind, type: d.type,
       startLine: d.line - 1, endLine: Math.min(d.endLine - 1, lineCount - 1),

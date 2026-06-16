@@ -18,7 +18,7 @@
 import path from 'node:path';
 import { compressFile } from 'zenith-toon';
 import { getLangForFile } from './tree-sitter.js';
-import { findRepoRoot, getDb } from './symbol-index.js';
+import { findRepoRoot, getDb, ensureFreshFromContent } from './symbol-index.js';
 import { getFileFacts, type FileFacts } from './db-adapter.js';
 
 export async function compressForTool(
@@ -30,6 +30,9 @@ export async function compressForTool(
 
     const langName = getLangForFile(validPath);
     const repoRoot = findRepoRoot(validPath);
+    // facts.path crosses the MCP→TOON seam REPO-RELATIVE (Rule 15), never absolute.
+    // Outside any repo there is no repo-relative form, so fall back to the basename.
+    const relPath = repoRoot ? path.relative(repoRoot, validPath) : path.basename(validPath);
 
     // Empty-facts default. TOON tolerates this and falls back to its text path.
     let dbFacts: FileFacts = { defs: [], edges: [], anchors: [], imports: [], injections: [] };
@@ -37,7 +40,12 @@ export async function compressForTool(
     if (repoRoot) {
         try {
             const db = getDb(repoRoot);
-            const relPath = path.relative(repoRoot, validPath);
+            // Content-addressed freshness (C+): index the EXACT bytes we're about to
+            // compress, so the facts describe `rawText` — not whatever is on disk now.
+            // No redundant disk read (we already hold the bytes) and no read-vs-reindex
+            // race. Inside the try so any failure degrades to the empty-facts payload
+            // (Rule 12: TOON still compresses via its text path).
+            await ensureFreshFromContent(db, repoRoot, validPath, rawText);
             dbFacts = getFileFacts(db, relPath);
         } catch { /* DB unavailable — hand TOON the empty-facts payload */ }
     }
@@ -46,7 +54,7 @@ export async function compressForTool(
         source: rawText,
         maxChars,
         facts: {
-            path: validPath,
+            path: relPath,
             langName,
             // A def's `type` is always set from its tree-sitter capture tag
             // (indexing/extract.ts: `type = tag.slice(16)`), so every def row

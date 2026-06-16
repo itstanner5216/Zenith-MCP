@@ -75,15 +75,15 @@ describe('getSchemaVersion', () => {
     });
 
     it('returns 0 on a fresh memory db without init', () => {
-        const db = openMemoryDb();
-        // schema_version table doesn't exist — prepareOrCache will throw,
-        // so we expect getSchemaVersion to either return 0 or throw;
-        // after initSymbolSchema it must be 1.
-        // Just verify the 1-after-init invariant here via makeDb():
-        closeDb(db);
-        const db2 = makeDb();
-        expect(getSchemaVersion(db2)).toBe(1);
-        closeDb(db2);
+        // Fresh db: the schema_version table does not exist yet. getSchemaVersion
+        // must treat the resulting "no such table" as version 0 (the un-migrated
+        // baseline) rather than throwing.
+        const freshDb = openMemoryDb();
+        expect(getSchemaVersion(freshDb)).toBe(0);
+        // After running the migration on the same connection it must report 1.
+        initSymbolSchema(freshDb);
+        expect(getSchemaVersion(freshDb)).toBe(1);
+        closeDb(freshDb);
     });
 });
 

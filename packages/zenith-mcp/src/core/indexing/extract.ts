@@ -145,10 +145,13 @@ export async function extractParsedFile(
             const defAnchors = extractAnchorsForDef(cached.primary, langName, s.line - 1);
             const key = `${s.name}:${s.line}:${s.column}`;
             for (const a of defAnchors) {
-                // a.line is 0-based (anchors.ts contract). Persist 1-based so every line
-                // column in the DB and across the TOON seam shares one unit — compressFile
-                // consumes `a.line - 1`, which today lands one line HIGH on every anchor.
-                const text = lines[a.line]!.slice(0, 80);
+                // a.line is 0-based (anchors.ts contract). We persist it 1-based
+                // (`a.line + 1`) on purpose so every line column in the DB shares one
+                // unit with the rest of the index, and TOON's compressFile converts
+                // back with `a.line - 1` to index the source. The `text` slice below
+                // indexes `lines` by the 0-based a.line — the row the anchor sits on.
+                const lineText = lines[a.line];
+                const text = lineText ? lineText.slice(0, 80) : '';
                 anchors.push({ parentSymbolKey: key, kind: a.kind, line: a.line + 1, priority: a.priority, text });
             }
         }
@@ -167,13 +170,19 @@ export async function extractParsedFile(
         // --- Step 7: Locals (shares rootNode) ---
         const localScopes = await extractLocals(rootNode, langName);
         const locals: LocalScopeRow[] = (localScopes ?? []).map(scope => {
-            let parentKey: string | null = null;
+            // Innermost enclosing def, not first-match. defs is line-sorted, so a
+            // scope nested in a method would otherwise bind to the outer class (which
+            // appears first). Mirror the bestSpan containment used in Step 2 (parent
+            // linkage) and Step 8 (edges): pick the def with the tightest span.
+            let bestParent: SymbolInfo | null = null;
+            let bestSpan = Infinity;
             for (const d of defs) {
                 if (d.line <= scope.startLine && d.endLine >= scope.endLine) {
-                    parentKey = `${d.name}:${d.line}:${d.column}`;
-                    break;
+                    const span = d.endLine - d.line;
+                    if (span < bestSpan) { bestSpan = span; bestParent = d; }
                 }
             }
+            const parentKey = bestParent ? `${bestParent.name}:${bestParent.line}:${bestParent.column}` : null;
             return { parentSymbolKey: parentKey, scopeKind: scope.scopeKind, startLine: scope.startLine, endLine: scope.endLine, parameters: scope.parameters, locals: scope.locals };
         });
 

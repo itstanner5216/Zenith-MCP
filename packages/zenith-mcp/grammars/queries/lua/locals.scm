@@ -29,14 +29,24 @@
 (parameters
   (identifier) @local.parameter)
 
-; Local variable declarations
+; Local variable declarations — initialized form: local x = expr
 (variable_declaration
   (assignment_statement
     (variable_list
-      (identifier) @local.definition)))
+      name: (identifier) @local.definition)))
 
-; Local function is a local definition
+; Local variable declarations — bare form: local x  (no assignment)
+(variable_declaration
+  (variable_list
+    name: (identifier) @local.definition))
+
+; Local function at top level (direct child of chunk)
 (chunk
+  local_declaration: (function_declaration
+    name: (identifier) @local.definition))
+
+; Local function inside a block (nested inside any function/do/if/for/while/repeat)
+(block
   local_declaration: (function_declaration
     name: (identifier) @local.definition))
 

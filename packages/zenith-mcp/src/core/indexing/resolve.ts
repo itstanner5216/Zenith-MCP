@@ -6,8 +6,10 @@
 // Resolution is then decided per edge using its caller's file_path:
 //   - plain name: prefer a unique same-file def (#17 scope-aware); else fall
 //     back to a globally-unique def; else leave unresolved.
-//   - dot-qualified "Foo.bar": keep the `bar` defs whose parent is named "Foo"
-//     (#16); link iff exactly one survives.
+//   - dot-qualified "Outer.Inner.method": keep the `method` defs whose ancestor
+//     CHAIN matches the (possibly multi-level) qualifier — parent named "Inner",
+//     grandparent named "Outer" (#16/#6); link iff exactly one survives. Parent
+//     lookups are memoized for the pass to avoid an N+1 (#61).
 //
 // Concurrency: ON DELETE SET NULL on edges.callee_symbol_id means if a callee
 // file is re-indexed, stale resolutions auto-null. A fresh resolve pass re-reads
@@ -44,6 +46,64 @@ function groupByName(named: Array<{ name: string; edge: PendingEdge }>): Map<str
     return byName;
 }
 
+/** A resolved parent row, or null when the symbol has no parent. */
+type ParentRow = { id: number; name: string } | null;
+
+/**
+ * Memoized parent lookup (review #61, "Performance Is Correctness"). The
+ * dot-qualified branch walks each candidate's parent chain, and the same symbol
+ * id recurs across candidates AND across name groups (a parent is shared by all
+ * its children, and the chain re-visits the same ancestors for sibling
+ * candidates). Without memoization that is an N+1 of findSymbolParent queries
+ * that [M]'s multi-level chain walk only multiplies.
+ *
+ * The memo is created ONCE per resolve pass (resolveAllEdgeTargets /
+ * resolveEdgeTargets) and threaded through resolveNameGroup, so a given symbol's
+ * parent is fetched from the DB at most once for the whole pass. Caching `null`
+ * (the "no parent" answer) is deliberate — a no-parent result is just as
+ * expensive to re-derive and equally stable within one pass.
+ *
+ * Correctness: the cached value is exactly what findSymbolParent would return,
+ * so memoized lookups are observationally identical to direct ones.
+ */
+function memoizedParent(conn: DbConnection, memo: Map<number, ParentRow>, symbolId: number): ParentRow {
+    const cached = memo.get(symbolId);
+    if (cached !== undefined) return cached;
+    const parent = findSymbolParent(conn, symbolId);
+    memo.set(symbolId, parent);
+    return parent;
+}
+
+/**
+ * [M] (review #6) Multi-level qualifier match. For a dot-qualified reference
+ * `Outer.Inner.method`, the qualifier is `Outer.Inner` and the short name is
+ * `method`. A candidate `method` matches iff walking its parent chain
+ * innermost-first yields ancestor names equal to the qualifier segments in
+ * reverse: parent === `Inner`, grandparent === `Outer`. The single-level case
+ * (`Foo.bar`) is just the chain-length-1 instance of this rule.
+ *
+ * Walks via the shared parent memo so each ancestor lookup is cached for the
+ * pass. Returns false as soon as any segment fails to match or the chain runs
+ * out of ancestors before all segments are consumed.
+ */
+function candidateMatchesQualifier(
+    conn: DbConnection,
+    memo: Map<number, ParentRow>,
+    candidateId: number,
+    qualifierSegments: string[]
+): boolean {
+    // Compare each qualifier segment, innermost (closest to the candidate) first,
+    // against the candidate's successive ancestors.
+    let currentId = candidateId;
+    for (let i = qualifierSegments.length - 1; i >= 0; i--) {
+        const parent = memoizedParent(conn, memo, currentId);
+        if (parent === null) return false; // chain ran out before all segments matched
+        if (parent.name !== qualifierSegments[i]) return false; // segment mismatch
+        currentId = parent.id;
+    }
+    return true;
+}
+
 /**
  * Resolve a group of edges that all reference the same `name`. Candidates for
  * `name` are fetched ONCE here (no N+1) and reused across every edge in the
@@ -51,23 +111,27 @@ function groupByName(named: Array<{ name: string; edge: PendingEdge }>): Map<str
  * scope-aware (#17) same-file preference is honoured even when the group spans
  * multiple caller files (the whole-DB batch pass).
  */
-function resolveNameGroup(conn: DbConnection, name: string, edges: PendingEdge[]): void {
+function resolveNameGroup(conn: DbConnection, name: string, edges: PendingEdge[], parentMemo: Map<number, ParentRow>): void {
     const dotIdx = name.lastIndexOf('.');
 
     if (dotIdx > 0) {
-        // --- #16 dot-qualified "Foo.bar" ---------------------------------
+        // --- #16/#6 dot-qualified "Outer.Inner.method" -------------------
         // The qualifier exists PRECISELY because the short name is ambiguous in
         // scope, so the old "shortName must be globally unique" gate was self-
-        // defeating. Instead: take ALL `bar` defs, keep those whose parent
-        // (parent_symbol_id) is named exactly "Foo", and link iff exactly one
-        // survives. (Independent of caller file — qualification is structural.)
+        // defeating. Instead: take ALL `method` defs and keep those whose parent
+        // CHAIN matches the qualifier. [M]: the qualifier may be multi-level
+        // ("Outer.Inner"), so we split on '.' and walk the candidate's ancestor
+        // chain innermost-first (parent===Inner, grandparent===Outer). The
+        // single-level "Foo.bar" case is chain-length-1. Link iff exactly one
+        // candidate's full chain matches. (Independent of caller file —
+        // qualification is structural.)
         const qualifier = name.slice(0, dotIdx);
         const shortName = name.slice(dotIdx + 1);
+        const qualifierSegments = qualifier.split('.');
         const shortCandidates = findDefsByName(conn, shortName, 'def');
-        const underQualifier = shortCandidates.filter((c) => {
-            const parent = findSymbolParent(conn, c.id);
-            return parent !== null && parent.name === qualifier;
-        });
+        const underQualifier = shortCandidates.filter((c) =>
+            candidateMatchesQualifier(conn, parentMemo, c.id, qualifierSegments)
+        );
         if (underQualifier.length !== 1) return; // ambiguous or unmatched → leave null
         const target = underQualifier[0];
         if (!target) return; // defensive: length===1 guarantees this, but no non-null assertion
@@ -121,9 +185,12 @@ export function resolveEdgeTargets(conn: DbConnection, filePath: string): void {
     const named = unresolved.map((e) => ({ name: e.referenced_name, edge: { id: e.id, callerFilePath: filePath } }));
     const byName = groupByName(named);
 
+    // One parent memo for the whole pass (review #61): shared across every name
+    // group so each symbol's parent is fetched at most once.
+    const parentMemo = new Map<number, ParentRow>();
     runTransaction(conn, () => {
         for (const [name, edges] of byName) {
-            resolveNameGroup(conn, name, edges);
+            resolveNameGroup(conn, name, edges, parentMemo);
         }
     });
 }
@@ -146,9 +213,13 @@ export function resolveAllEdgeTargets(conn: DbConnection): void {
     const named = unresolved.map((e) => ({ name: e.referenced_name, edge: { id: e.id, callerFilePath: e.caller_file_path } }));
     const byName = groupByName(named);
 
+    // One parent memo for the whole pass (review #61): shared across every name
+    // group so each symbol's parent is fetched at most once across all
+    // candidates/groups — the in-file N+1 mitigation for [M]'s chain walk.
+    const parentMemo = new Map<number, ParentRow>();
     runTransaction(conn, () => {
         for (const [name, edges] of byName) {
-            resolveNameGroup(conn, name, edges);
+            resolveNameGroup(conn, name, edges, parentMemo);
         }
     });
 }

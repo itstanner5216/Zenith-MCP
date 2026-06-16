@@ -5,7 +5,7 @@ import { randomBytes } from 'crypto';
 import { normalizeLineEndings, createMinimalDiff } from '../core/lib.js';
 import { stashEdits } from '../core/stash.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
-import { getDb, snapshotSymbol, getSessionId } from '../core/symbol-index.js';
+import { getDb, snapshotSymbol, getSessionId, findRepoRoot, ensureFreshFromContent } from '../core/symbol-index.js';
 import { getProjectContext } from '../core/project-context.js';
 import type { ToolContext, ToolServer } from './types.js';
 
@@ -78,6 +78,17 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             catch { }
             throw error;
         }
+        // Keep the symbol index fresh from the bytes we just wrote (C+): index the
+        // edited content directly — no disk re-read, and no stale window before the
+        // next read/compression. Best-effort and mirrors the snapshot block below:
+        // an indexing failure must never fail a successful edit.
+        try {
+            const repoRoot = findRepoRoot(validPath);
+            if (repoRoot) {
+                await ensureFreshFromContent(getDb(repoRoot), repoRoot, validPath, workingContent);
+            }
+        }
+        catch { /* index refresh is best-effort; never fail an edit because of it */ }
         if (pendingSnapshots.length > 0) {
             try {
                 const pc = getProjectContext(ctx);

@@ -133,7 +133,11 @@ export async function loadSymbolInFile(
     // Dot-qualified handling: "Outer.Inner.method" → target is "method",
     // qualifying parents are ["Outer", "Inner"].
     const parts = symbolName.split('.');
-    const targetName = parts[parts.length - 1]!;
+    // split() on any string yields ≥1 element; guard makes the invariant explicit
+    // (Rule 6: no `!` non-null assertions).
+    const lastPart = parts[parts.length - 1];
+    if (lastPart === undefined) return [];
+    const targetName = lastPart;
     const parentNames = parts.slice(0, -1);
 
     let matches = findSymbolsByNameInFile(db, relPath, targetName, kindFilter);
@@ -146,7 +150,10 @@ export async function loadSymbolInFile(
         matches = matches.filter((sym) => {
             let current: IndexedSymbol = sym;
             for (let i = parentNames.length - 1; i >= 0; i--) {
-                const parentName = parentNames[i]!;
+                // i is bounded by parentNames.length; guard makes the invariant
+                // explicit (Rule 6: no `!` non-null assertions).
+                const parentName = parentNames[i];
+                if (parentName === undefined) return false;
                 const parent = allDefs.find(d =>
                     d.name === parentName &&
                     d.line <= current.line &&
@@ -167,13 +174,21 @@ export async function loadSymbolInFile(
         );
     }
 
-    // Honor any extra filters the caller passed (typeFilter / nameFilter /
-    // excludeNames) for shape parity with the prior extractor API. The
-    // kind filter has already been applied above via the SQL query, so
-    // strip it before forwarding to applyFilters. Using rest-destructure
-    // (rather than `{ ...opts, kindFilter: undefined }`) keeps us
-    // compatible with `exactOptionalPropertyTypes: true`.
-    const { kindFilter: _unusedKindFilter, ...restOpts } = opts;
+    // Honor the remaining extra filters the caller passed (typeFilter /
+    // excludeNames) for shape parity with the prior extractor API. Two
+    // filters are deliberately stripped before forwarding to applyFilters:
+    //   - kindFilter: already applied above via the SQL query.
+    //   - nameFilter: this is the EXACT-name lookup path (matches were
+    //     selected by `targetName` via findSymbolsByNameInFile). applyFilters
+    //     does a SUBSTRING nameFilter match, so reapplying it here could hide
+    //     valid exact matches whose name does not contain an incidental
+    //     nameFilter the caller also passed. The prior tree-sitter
+    //     `findSymbol()` stripped nameFilter for exactly this reason
+    //     (see symbols.ts:findSymbol — `const { nameFilter: _, ...restOptions }`),
+    //     so stripping it here preserves findSymbol compatibility.
+    // Using rest-destructure (rather than `{ ...opts, kindFilter: undefined }`)
+    // keeps us compatible with `exactOptionalPropertyTypes: true`.
+    const { kindFilter: _unusedKindFilter, nameFilter: _unusedNameFilter, ...restOpts } = opts;
     return applyFilters(matches, restOpts);
 }
 
@@ -219,7 +234,9 @@ export async function loadFileSymbolSummary(absPath: string): Promise<string | n
 
 function pluralize(type: string): string {
     if (type.endsWith('s')) return type + 'es';
-    if (type.endsWith('y')) return type.slice(0, -1) + 'ies';
+    // y → ies only when the y follows a CONSONANT ("query" → "queries").
+    // A vowel before the y keeps the plain -s form ("key" → "keys").
+    if (type.endsWith('y') && !/[aeiou]y$/.test(type)) return type.slice(0, -1) + 'ies';
     return type + 's';
 }
 

@@ -69,8 +69,15 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
             insertInjection(conn, { filePath: record.relPath, hostLang: inj.hostLang, injectedLang: inj.injectedLang, startLine: inj.startLine, endLine: inj.endLine, startByte: inj.startByte, endByte: inj.endByte });
         }
         // 9. Local scopes
+        //    Skip scopes whose owning symbol does not resolve. local_scopes
+        //    rows are FK'd to symbols(id) ON DELETE CASCADE and consumed
+        //    strictly per-symbol (getLocalScopesForSymbol WHERE symbol_id = ?),
+        //    so a NULL-owner scope is unreachable AND uncleanable — the cascade
+        //    only fires from a deleted owning symbol, leaving owner-less rows to
+        //    accumulate across re-indexes. An owner-less scope has no consumer.
         for (const local of record.locals) {
             const symbolId = local.parentSymbolKey ? (keyToId.get(local.parentSymbolKey) ?? null) : null;
+            if (symbolId === null) continue;
             insertLocalScope(conn, { symbolId, scopeKind: local.scopeKind, startLine: local.startLine, endLine: local.endLine, parametersJson: JSON.stringify(local.parameters), localsJson: JSON.stringify(local.locals) });
         }
     });

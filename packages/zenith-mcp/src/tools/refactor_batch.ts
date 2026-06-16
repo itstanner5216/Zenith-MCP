@@ -981,8 +981,23 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Outlier flagging: compare new targets against the ORIGINAL baseline
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
+            //
+            // Perf (cubic #39 / Performance Is Correctness): targets frequently share
+            // the same symbol name (the whole point of a batch refactor), and
+            // findSymbolStructuresByName returns ALL def rows for a name regardless of
+            // file. Querying per-target re-fetched identical rows N times (N+1). Fetch
+            // each DISTINCT symbol name exactly once into a cache, then read from it —
+            // dropping the query count from O(targets) to O(distinct symbol names). The
+            // per-target struct selection below is byte-for-byte the same set it would
+            // have received from a direct call, so behavior is unchanged.
+            const structsByName = new Map<string, ReturnType<typeof findSymbolStructuresByName>>();
+            for (const t of targets) {
+                if (!structsByName.has(t.symbol)) {
+                    structsByName.set(t.symbol, findSymbolStructuresByName(db, t.symbol));
+                }
+            }
             const structs: (SymbolStructure | null)[] = targets.map(t => {
-                const matches = findSymbolStructuresByName(db, t.symbol);
+                const matches = structsByName.get(t.symbol) ?? [];
                 const match = matches.find(s => s.file_path === t.relFile && s.line === t.line);
                 if (!match)
                     return null;

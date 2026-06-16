@@ -32,6 +32,10 @@
 (else_clause
   (block) @scope)
 
+; Else-if clause body is a scope (@else if $x {} — variables must not leak)
+(else_if_clause
+  (block) @scope)
+
 ; SCSS variable local definitions (declarations with variable_name on LHS)
 (declaration
   (variable_name) @local.definition)

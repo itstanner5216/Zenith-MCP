@@ -32,12 +32,16 @@ function main(): void {
         return;
     }
 
-    const manifest = JSON.parse(fs.readFileSync(pinsPath, 'utf-8'));
-    const pinned = manifest.pinned as Record<string, {
-        sha256: string;
-        source: string;
-        commit: string;
-    }>;
+    const manifest = JSON.parse(fs.readFileSync(pinsPath, 'utf-8')) as {
+        pinned?: Record<string, { sha256: string; source: string; commit: string }>;
+    };
+    // Guard a malformed/empty manifest ({}, {"pinned": null}) before Object.entries,
+    // which would otherwise throw "Cannot convert undefined or null to object".
+    const pinned = manifest.pinned;
+    if (pinned === null || typeof pinned !== 'object') {
+        console.log('No grammar pins found (.grammar-pins.json has no valid "pinned" object). Nothing to verify.');
+        return;
+    }
 
     const entries = Object.entries(pinned);
     if (entries.length === 0) {

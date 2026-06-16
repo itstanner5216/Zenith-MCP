@@ -356,3 +356,104 @@ describe('indexing extract — last-method-ends-on-class-row structure ownership
         expect(lastStruct.params).toContain('typed_parameter');
     });
 });
+
+// ---------------------------------------------------------------------------
+// FIX5 — Local-scope parent = INNERMOST enclosing def, not first-match
+// ---------------------------------------------------------------------------
+
+describe('indexing extract — local scope parent is the innermost enclosing def', () => {
+    it('an inner scope nested in a method binds to the METHOD, not the outer class', async () => {
+        // Fixture: a class containing a method containing a for-loop scope.
+        //   1:  class Service {
+        //   2:      run(items: number[]): number {
+        //   3:          let total = 0;
+        //   4:          for (const n of items) {
+        //   5:              total += n;
+        //   6:          }
+        //   7:          return total;
+        //   8:      }
+        //   9:  }
+        //
+        // The TS locals.scm captures `(class_body) @scope`,
+        // `(statement_block) @scope` and `(for_statement) @scope`. The
+        // for-loop scope (lines 4-6) is strictly enclosed by BOTH the class
+        // (def span 1-9) and the method `run` (def span 2-8).
+        //
+        // `defs` in extract.ts is line-sorted, so the class (line 1) is
+        // visited before the method (line 2). The OLD logic broke on the
+        // FIRST containing def — it bound the for-loop scope to the CLASS and
+        // returned. The bestSpan fix (mirroring Step 2 parent-linkage and
+        // Step 8 edges) instead keeps the def with the tightest span:
+        //   Service span = 9 - 1 = 8
+        //   run     span = 8 - 2 = 6   <-- tighter, wins
+        // so the scope's parentSymbolKey resolves to `run`, the innermost
+        // enclosing def.
+        //
+        // EXPECTED RESULT vs LOGIC:
+        //   - first-match (pre-fix): parentSymbolKey === Service key  -> FAILS this test
+        //   - bestSpan  (post-fix): parentSymbolKey === run key       -> PASSES this test
+        const source = [
+            'class Service {',                  // line 1
+            '    run(items: number[]): number {', // line 2
+            '        let total = 0;',            // line 3
+            '        for (const n of items) {',  // line 4
+            '            total += n;',           // line 5
+            '        }',                          // line 6
+            '        return total;',             // line 7
+            '    }',                              // line 8
+            '}',                                  // line 9
+        ].join('\n');
+
+        const rec = await extractParsedFile(source, 'typescript', 'fix5.ts', 'hash5');
+        expect(rec).not.toBeNull();
+
+        const cls = rec.symbols.find(s => s.name === 'Service' && s.kind === 'def');
+        const method = rec.symbols.find(s => s.name === 'run' && s.kind === 'def');
+
+        expect(cls).toBeTruthy();
+        expect(cls.type).toBe('class');
+        expect(cls.line).toBe(1);
+        expect(cls.endLine).toBe(9);
+
+        expect(method).toBeTruthy();
+        expect(method.line).toBe(2);
+        // The method's own end is line 8 — strictly inside the class's
+        // span, so the class is a valid (but NOT innermost) enclosing def.
+        expect(method.endLine).toBe(8);
+
+        // Keys derived from the found symbols' real coordinates (name:line:column),
+        // never hard-coded — mirrors how the other fixtures build expected keys.
+        const classKey = `Service:${cls.line}:${cls.column}`;
+        const methodKey = `run:${method.line}:${method.column}`;
+
+        // Locate the for-loop scope by its line span (4-6). Every `@scope`
+        // capture yields exactly one LocalScope row regardless of the
+        // (separately owned) locals.ts param/local containment logic, so
+        // selecting by span is robust to that file's concurrent changes.
+        const innerScope = rec.locals.find(
+            l => l.startLine === 4 && l.endLine === 6,
+        );
+        expect(innerScope).toBeTruthy();
+        // `for (const n of items)` parses as for_in_statement in the TS grammar
+        // (for-of/for-in share the node type); the load-bearing assertion is the
+        // parentSymbolKey binding below, not the loop's node-type label.
+        expect(innerScope.scopeKind).toBe('for_in_statement');
+
+        // Load-bearing assertion: the inner scope binds to the INNERMOST
+        // enclosing def (the method), not the outer class. The first-match
+        // logic would have produced classKey here and failed.
+        expect(innerScope.parentSymbolKey).toBe(methodKey);
+        expect(innerScope.parentSymbolKey).not.toBe(classKey);
+
+        // Defensive: NO scope that is strictly inside the method's def span
+        // may ever resolve to the class. This catches any future regression
+        // that reintroduces first-match selection for a different scope kind
+        // (e.g. the method's own statement_block, spanning lines 2-8).
+        for (const l of rec.locals) {
+            if (l.startLine >= method.line && l.endLine <= method.endLine &&
+                (l.startLine > method.line || l.endLine < method.endLine)) {
+                expect(l.parentSymbolKey).not.toBe(classKey);
+            }
+        }
+    });
+});

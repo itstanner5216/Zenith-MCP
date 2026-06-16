@@ -33,9 +33,12 @@ describe('compression core', () => {
         // compressForTool must compress (not return null) and produce a shorter output
         expect(result).not.toBeNull();
         expect(result.length).toBeLessThan(rawText.length);
-        // The 70% floor: result must not be shorter than 70% of rawText
-        const floorChars = Math.floor(rawText.length * 0.70);
-        expect(result.length).toBeGreaterThanOrEqual(floorChars * 0.5); // TOON may add markers; assert sensible range
+        // Documented retention contract: 68–72% acceptable, ">72% not acceptable"
+        // (markers included). Line-granularity + marker accounting puts this fixture
+        // at ~69.7%, so assert a tight, truthful band around the 70% target. The old
+        // `floorChars * 0.5` allowed down to 35% retention and caught nothing.
+        expect(result.length).toBeGreaterThanOrEqual(Math.floor(rawText.length * 0.65));
+        expect(result.length).toBeLessThanOrEqual(Math.floor(rawText.length * 0.72));
     });
 
     it('rejects outputs not compressed enough — returns null when maxChars >= rawText.length', async () => {

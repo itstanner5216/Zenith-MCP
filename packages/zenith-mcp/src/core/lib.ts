@@ -126,10 +126,29 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         normalizePath(absolute);
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
         normalizePath(realAncestor);
-        return missingSegments.reduce(
+        // The nearest existing ancestor is the only segment of a not-yet-existing
+        // target that can be realpath-resolved, so it is the symlink-collapsed
+        // anchor the allowlist must gate — exactly as validatePath gates the
+        // realpath of an ENOENT target's existing parent before returning. When
+        // _allowedDirectories is empty, isInsideAllowed returns true (opt-in
+        // sandbox: no allowlist configured => no enforcement, no behavior change
+        // for the write path).
+        if (!(await isInsideAllowed(realAncestor))) {
+            throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+        }
+        const resolvedTarget = missingSegments.reduce(
             (currentPath, segment) => path.join(currentPath, segment),
             realAncestor,
         );
+        normalizePath(resolvedTarget);
+        // Re-check the reconstructed target itself. With the ancestor already
+        // confirmed inside an allowed dir the descent stays inside it, but
+        // checking the returned path mirrors validatePath gating its returned
+        // realPath and keeps the write contract identical to the read contract.
+        if (!(await isInsideAllowed(resolvedTarget))) {
+            throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+        }
+        return resolvedTarget;
     }
 
     return { getAllowedDirectories, setAllowedDirectories, validatePath, validateNewFilePath };

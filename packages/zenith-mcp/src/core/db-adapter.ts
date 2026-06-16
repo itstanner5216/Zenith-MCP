@@ -608,7 +608,7 @@ export function findSymbolsByNameInFile(
         params.push(kindFilter);
     }
     sql += ' ORDER BY line';
-    return handle(conn).prepare(sql).all(...params) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
+    return prepareOrCache(conn, sql).all(...params) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,9 +1314,20 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
  * the deterministic counterpart to the old LIMIT 1; both return the lone row now
  * that the table is single-row by construction.
  *
+ * On a fresh, un-migrated database the schema_version table does not exist yet,
+ * so the prepare/get below throws "no such table" (review #26, #37). Treat that
+ * as version 0 — the un-migrated baseline — while rethrowing every other error
+ * so genuine failures are never silently swallowed.
+ *
  * SQL: SELECT version FROM schema_version WHERE id = 1
  */
 export function getSchemaVersion(conn: DbConnection): number {
-    const row = prepareOrCache(conn, 'SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
-    return row?.version ?? 0;
+    try {
+        const row = prepareOrCache(conn, 'SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
+        return row?.version ?? 0;
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('no such table')) return 0;
+        throw e;
+    }
 }

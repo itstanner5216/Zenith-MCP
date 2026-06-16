@@ -3,6 +3,21 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+// Compression-module mock. By default it delegates to the REAL compressForTool so
+// every existing test keeps observing real behavior. The boundary test below installs
+// a temporary override (compressOverride) to spy on whether the compression gate is
+// entered for a file whose size === byteLimit. The hoisted holder keeps state the
+// hoisted vi.mock factory can read.
+const compHolder = vi.hoisted(() => ({ override: null }));
+vi.mock('../dist/core/compression.js', async (importActual) => {
+    const actual = await importActual();
+    return {
+        ...actual,
+        compressForTool: (...args) =>
+            compHolder.override ? compHolder.override(...args) : actual.compressForTool(...args),
+    };
+});
+
 function mkTmpDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'rmf-test-'));
 }
@@ -95,21 +110,52 @@ describe('read_multiple_files', () => {
         });
     });
 
-    describe('showLineNumbers', () => {
-        it('prefixes each line with "N:" when showLineNumbers is true', async () => {
+    describe('line numbering (Rule 10: mandatory, no opt-out)', () => {
+        it('ALWAYS prefixes each line with "N:" — there is no way to disable', async () => {
+            // Rule 10: line numbers are MANDATORY structural metadata. The showLineNumbers
+            // opt-out was removed; numbering is unconditional. (Previously this passed
+            // `showLineNumbers: true`; the param no longer exists.)
             const fp = makeFile(tmpDir, 'lines.txt', 'alpha\nbeta\ngamma');
-            const result = await handler({ paths: [fp], showLineNumbers: true });
+            const result = await handler({ paths: [fp], compression: false });
             const text = result.content[0].text;
             expect(text).toContain('1:alpha');
             expect(text).toContain('2:beta');
             expect(text).toContain('3:gamma');
         });
 
-        it('does not prefix lines when showLineNumbers is false', async () => {
+        it('still line-numbers output even when raw (uncompressed) content is requested', async () => {
+            // Rule 10: line numbering cannot be turned off. This case used to assert
+            // showLineNumbers:false produced raw, unprefixed lines ("aaa\nbbb") — that
+            // encoded Rule-10-FORBIDDEN behavior (the anti-pattern table explicitly bans a
+            // showLineNumbers toggle), so it now asserts the mandatory "N:" prefixes.
             const fp = makeFile(tmpDir, 'raw.txt', 'aaa\nbbb');
-            const result = await handler({ paths: [fp], showLineNumbers: false, compression: false });
+            const result = await handler({ paths: [fp], compression: false });
             const text = result.content[0].text;
-            expect(text).toContain('aaa\nbbb');
+            expect(text).toContain('1:aaa');
+            expect(text).toContain('2:bbb');
+            // And the raw, unprefixed body must NOT appear.
+            expect(text).not.toContain('aaa\nbbb');
+        });
+    });
+
+    describe('schema strictness (Rule 9: all schemas strict)', () => {
+        it('rejects an unknown key via .strict()', async () => {
+            // Rule 9: the inputSchema is .strict(), so unknown top-level keys (including the
+            // removed showLineNumbers opt-out) are rejected rather than silently ignored.
+            const { server, calls } = captureHandler();
+            const mod = await importModule();
+            mod.register(server, mkCtx(tmpDir));
+            const inputSchema = calls[0].schema.inputSchema;
+
+            const ok = inputSchema.safeParse({ paths: ['/tmp/x'] });
+            expect(ok.success).toBe(true);
+
+            // The removed opt-out param is now an unknown key → rejected.
+            const bad = inputSchema.safeParse({ paths: ['/tmp/x'], showLineNumbers: true });
+            expect(bad.success).toBe(false);
+
+            const bad2 = inputSchema.safeParse({ paths: ['/tmp/x'], totallyUnknownKey: 1 });
+            expect(bad2.success).toBe(false);
         });
     });
 
@@ -128,6 +174,56 @@ describe('read_multiple_files', () => {
             const result = await handler({ paths: [fp] });
             const text = result.content[0].text;
             expect(text).toContain('- big.txt');
+        });
+
+        // [DD] boundary: a fully-captured file whose size EXACTLY equals byteLimit must
+        // still enter the compression path. byteLimit = perFileBudget * 4, and with
+        // maxCharsPerFile the per-file budget is fixed, so byteLimit is deterministic.
+        //
+        // FAIL-BEFORE: the old gate `bytesRead < byteLimit` is FALSE when bytesRead ===
+        //   byteLimit (the buffer is exactly filled by the whole file), so compression is
+        //   SKIPPED and the spy is never called.
+        // PASS-AFTER: the new gate `fileInfo.size <= byteLimit` is TRUE, so compressForTool
+        //   IS called and its verbatim return is emitted.
+        it('still compresses a file whose size exactly equals byteLimit', async () => {
+            const M = 100;                 // maxCharsPerFile → perFileBudget = 100
+            const byteLimit = M * 4;       // = 400
+            const content = 'a'.repeat(byteLimit); // file size === byteLimit exactly
+            const fp = makeFile(tmpDir, 'bound.txt', content);
+            expect(fs.statSync(fp).size).toBe(byteLimit);
+
+            const spy = vi.fn(() => 'COMPRESSED_SENTINEL');
+            compHolder.override = spy;
+            try {
+                const result = await handler({ paths: [fp], maxCharsPerFile: M });
+                const text = result.content[0].text;
+                // Gate was entered: compressForTool ran and its output was emitted verbatim.
+                expect(spy).toHaveBeenCalledTimes(1);
+                expect(text).toContain('COMPRESSED_SENTINEL');
+            } finally {
+                compHolder.override = null;
+            }
+        });
+
+        // Control for the boundary: a file ONE byte OVER the cap (size > byteLimit) is a
+        // partial window and must SKIP compression in both old and new code, proving the
+        // gate is genuinely size-bounded rather than always-on.
+        it('skips compression when size exceeds byteLimit (partial window)', async () => {
+            const M = 100;
+            const byteLimit = M * 4;       // = 400
+            const content = 'a'.repeat(byteLimit + 1); // 401 bytes > cap
+            const fp = makeFile(tmpDir, 'over.txt', content);
+
+            const spy = vi.fn(() => 'COMPRESSED_SENTINEL');
+            compHolder.override = spy;
+            try {
+                const result = await handler({ paths: [fp], maxCharsPerFile: M });
+                const text = result.content[0].text;
+                expect(spy).not.toHaveBeenCalled();
+                expect(text).not.toContain('COMPRESSED_SENTINEL');
+            } finally {
+                compHolder.override = null;
+            }
         });
     });
 

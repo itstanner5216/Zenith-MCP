@@ -9,7 +9,6 @@ interface ReadMultipleFilesArgs {
     paths: string[];
     maxCharsPerFile?: number;
     compression?: boolean;
-    showLineNumbers?: boolean;
 }
 
 interface FileInfoValid {
@@ -60,8 +59,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 .describe("File paths to read."),
             maxCharsPerFile: z.number().optional().describe("Max characters per file."),
             compression: z.boolean().optional().default(true).describe("Compress file-read output."),
-            showLineNumbers: z.boolean().optional().default(true).describe("Prefix each line with its line number."),
-        }),
+        }).strict(),
         annotations: { readOnlyHint: true }
     }, async (args: ReadMultipleFilesArgs) => {
         const fileCount = args.paths.length;
@@ -142,11 +140,12 @@ export function register(server: ToolServer, ctx: ToolContext) {
 
                 const effectiveBudget = Math.max(0, budget - entryPrefix.length);
 
-                if (args.compression !== false && bytesRead < byteLimit) {
-                    // bytesRead < byteLimit ⇒ the WHOLE file was captured within the IO
-                    // cap, so TOON sees the real source and its line numbers/markers tell
-                    // the truth. Partial windows skip compression (the markers would lie)
-                    // and use the truncate fallback below.
+                if (args.compression !== false && fileInfo.size <= byteLimit) {
+                    // fileInfo.size <= byteLimit ⇒ the WHOLE file was captured within the
+                    // IO cap (bytesRead === byteLimit at the exact boundary still means the
+                    // entire file is in hand), so TOON sees the real source and its line
+                    // numbers/markers tell the truth. Partial windows (size > cap) skip
+                    // compression (the markers would lie) and use the truncate fallback below.
                     // Priority 0.5 seam: TOON gets RAW, FULL text + caller's budget. Its
                     // return is emitted VERBATIM (no "N:" prefixing, no '[truncated]' suffix).
                     const compressed = await compressForTool(validPath, content, effectiveBudget);
@@ -166,9 +165,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const lines = content.split('\n');
                 if (lines[lines.length - 1] === '')
                     lines.pop();
-                content = args.showLineNumbers !== false
-                    ? lines.map((line, i) => `${i + 1}:${line}`).join('\n')
-                    : lines.join('\n');
+                // Rule 10: line numbers are MANDATORY structural metadata — there is no
+                // opt-out. The "N:" prefix is always applied (anti-pattern table forbids a
+                // showLineNumbers toggle).
+                content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
 
                 return truncated
                     ? `${entryPrefix}${content}\n[truncated]`

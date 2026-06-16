@@ -13,7 +13,7 @@ export interface SymbolRow {
     line: number;               // 1-based
     endLine: number;            // 1-based
     column: number;
-    bodyHash: string | null;    // sha1 for defs only
+    bodyHash: string | null;    // sha256 for defs only
     parentSymbolKey: string | null;  // transient FK: `${name}:${line}:${col}`
     visibility: string | null;  // 'public'|'private'|'protected'|'package'|null
 }
@@ -30,7 +30,7 @@ export interface StructureRow {
 export interface AnchorRow {
     parentSymbolKey: string;
     kind: string;
-    line: number;               // 0-based line index
+    line: number;               // 1-based line number (extract.ts persists a.line + 1)
     priority: number;
     text: string;               // first ~80 chars of the anchor line
 }

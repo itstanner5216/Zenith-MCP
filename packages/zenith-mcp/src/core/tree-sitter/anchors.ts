@@ -7,6 +7,31 @@
 // ---------------------------------------------------------------------------
 
 import type { Node } from 'web-tree-sitter';
+// Node types that open a NESTED definition's OWN scope. The in-body anchor
+// walk must not descend into these — their control-flow anchors belong to that
+// inner symbol, not the enclosing one. This is deliberately NOT the canonical
+// DEF_TYPES from symbols.ts: DEF_TYPES is the set of nodes that can HOST a
+// definition *name* across grammars and includes body/structural nodes
+// (block, statement_block, assignment, block_mapping_pair, …) that are part of
+// a def's OWN body — pruning on those drops the def's own anchors (e.g. a
+// function_declaration → block → if_statement would prune at `block`). This is
+// the complete set of function/class/method/type *definition openers* across
+// the supported grammars (a superset of the original 8, fixing the nested-def
+// leak in review #40 without over-pruning bodies).
+const DEF_SCOPE_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+    // functions / methods / closures
+    'function_declaration', 'function_definition', 'function_item',
+    'function_expression', 'arrow_function', 'method_definition',
+    'method_declaration', 'constructor_declaration', 'func_literal',
+    'generator_function', 'generator_function_declaration',
+    // classes / structs / interfaces / enums / traits / modules with bodies
+    'class_declaration', 'class_definition', 'class', 'abstract_class_declaration',
+    'class_specifier', 'struct_specifier', 'struct_item', 'struct_declaration',
+    'interface_declaration', 'enum_declaration', 'enum_item', 'trait_item',
+    'impl_item', 'mod_item', 'module', 'namespace_definition',
+    'namespace_declaration', 'record_declaration', 'object_declaration',
+    'annotation_type_declaration', 'union_item', 'macro_definition',
+]);
 
 export interface AnchorEntry {
     line: number;         // 0-based line index
@@ -223,19 +248,20 @@ const ANCHOR_RULES: Readonly<Record<string, Record<string, AnchorRule>>> = {
 export function extractAnchorsForDef(defNode: Node, langName: string, defStartRow: number): AnchorEntry[] {
     const rules = ANCHOR_RULES[langName];
     if (!rules) return [];
+    // `rules` is provably non-null past the guard above; bind it to a local so
+    // the walk closure references it without a `!` non-null assertion (Rule 6).
+    const ruleTable = rules;
 
     const anchors: AnchorEntry[] = [];
-    const DEF_NODE_TYPES = new Set([
-        'function_declaration', 'function_definition', 'method_definition',
-        'function_item', 'class_declaration', 'class_definition',
-        'arrow_function', 'function_expression',
-    ]);
 
     function walk(node: Node, depth: number): void {
-        // Don't descend into nested definitions
-        if (depth > 0 && DEF_NODE_TYPES.has(node.type)) return;
+        // Don't descend into nested definitions — their anchors belong to that
+        // inner symbol, not this one. Prune only on genuine scope-opening def
+        // nodes (see DEF_SCOPE_NODE_TYPES), NOT canonical DEF_TYPES, which would
+        // also prune the def's own body (block/statement_block/etc.).
+        if (depth > 0 && DEF_SCOPE_NODE_TYPES.has(node.type)) return;
 
-        const rule = rules![node.type];
+        const rule = ruleTable[node.type];
         if (rule && node.startPosition.row > defStartRow) {
             anchors.push({
                 line: node.startPosition.row,

@@ -68,8 +68,13 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
                     if (innerScope === scope) continue;
                     const iStart = innerScope.node.startPosition.row;
                     const iEnd = innerScope.node.endPosition.row;
+                    // Containment by BYTE OFFSETS, not rows: byte indices are unique
+                    // per position, so an inner scope sharing a boundary row with this
+                    // scope (e.g. a single-line nested arrow) is still recognized as
+                    // strictly contained (innerScope !== scope is already excluded above).
                     if (row >= iStart && row <= iEnd &&
-                        iStart > scopeStartRow && iEnd < scopeEndRow) {
+                        innerScope.node.startIndex >= sNode.startIndex &&
+                        innerScope.node.endIndex <= sNode.endIndex) {
                         directChild = false;
                         break;
                     }
@@ -93,8 +98,13 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
                     if (innerScope === scope) continue;
                     const iStart = innerScope.node.startPosition.row;
                     const iEnd = innerScope.node.endPosition.row;
+                    // Containment by BYTE OFFSETS, not rows: byte indices are unique
+                    // per position, so an inner scope sharing a boundary row with this
+                    // scope (e.g. a single-line nested arrow) is still recognized as
+                    // strictly contained (innerScope !== scope is already excluded above).
                     if (row >= iStart && row <= iEnd &&
-                        iStart > scopeStartRow && iEnd < scopeEndRow) {
+                        innerScope.node.startIndex >= sNode.startIndex &&
+                        innerScope.node.endIndex <= sNode.endIndex) {
                         directChild = false;
                         break;
                     }

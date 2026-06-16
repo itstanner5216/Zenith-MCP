@@ -290,7 +290,7 @@ describe('extractAnchorsForDef — c_sharp language rules', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractAnchorsForDef — boundary cases', () => {
-    it('returns empty array for a leaf node (no children)', () => {
+    it('emits an anchor when the def node itself matches an anchor rule', () => {
         const leaf = makeNode('return_statement', 1, 1);
         // leaf IS the def node; walk at depth=0, rule IS checked for depth=0 but
         // defStartRow=0 and row=1 > 0 → would match; however the def-root walk
@@ -307,8 +307,8 @@ describe('extractAnchorsForDef — boundary cases', () => {
         expect(anchors).toHaveLength(0);
     });
 
-    it('handles a completely empty language rule table gracefully (scss)', () => {
-        // scss has rules but is an unusual language — no crash
+    it('applies scss language rules correctly (if_statement is anchored)', () => {
+        // scss HAS anchor rules (if_statement is one) — this checks they apply
         const ifNode = makeNode('if_statement', 2, 4);
         const body = makeNode('mixin_declaration', 0, 6, [ifNode]);
         const anchors = extractAnchorsForDef(body, 'scss', 0);

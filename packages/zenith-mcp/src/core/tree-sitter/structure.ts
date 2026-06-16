@@ -79,6 +79,25 @@ export function paramContainersFor(langName: string): ReadonlySet<string> {
 }
 
 /**
+ * Wrapper definition types → the inner definition node types each may wrap.
+ *
+ * A "wrapper" is a definition node that carries only leading metadata
+ * (decorators / export modifiers) around the real definition that holds the
+ * signature. The indexer passes selectDefinitionNode().spanNode, so a
+ * decorated Python def arrives here as its `decorated_definition` wrapper;
+ * its params live on the inner `function_definition` / `class_definition`.
+ *
+ * This intentionally mirrors the canonical WRAPPER_DEFINITIONS table in
+ * symbols.ts (the authority that produced the spanNode). That table is a
+ * module-private const there, so structure.ts keeps its own copy rather than
+ * widening symbols.ts's public surface. Keep the two in sync; the param test
+ * pins the decorated-def behavior that depends on this entry.
+ */
+const WRAPPER_DEFINITIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
+    ['decorated_definition', new Set<string>(['function_definition', 'class_definition'])],
+]);
+
+/**
  * Per-language modifier-keyword overrides. The global MODIFIER_KEYWORDS set
  * stays as the default. Languages whose modifier vocabulary is materially
  * different (rust's `pub`/`unsafe`, kotlin's `open`/`suspend`/`inline`,
@@ -135,24 +154,53 @@ export function extractStructureForDef(defNode: Node, langName: string): SymbolS
 
     // --- Params ---
     const params: string[] = [];
-    function collectParams(node: Node, isRoot: boolean): boolean {
-        if (!isRoot && DEF_TYPES.has(node.type)) return false;
-        if (paramContainers.has(node.type)) {
-            for (let i = 0; i < node.childCount; i++) {
-                const c = node.child(i);
-                if (!c) continue;
-                if (c.type === '(' || c.type === ')' || c.type === ',') continue;
-                params.push(c.type);
-            }
-            return true;
+
+    // Push the param-bearing children of a single param-container node
+    // (skipping the structural delimiter tokens) into `params`.
+    function collectFromContainer(container: Node): void {
+        for (let i = 0; i < container.childCount; i++) {
+            const c = container.child(i);
+            if (!c) continue;
+            if (c.type === '(' || c.type === ')' || c.type === ',') continue;
+            params.push(c.type);
         }
-        for (let i = 0; i < node.childCount; i++) {
-            const child = node.child(i);
-            if (child && collectParams(child, false)) return true;
-        }
-        return false;
     }
-    collectParams(foundNode, true);
+
+    // The node whose OWN signature we collect. When `foundNode` is a wrapper
+    // (e.g. Python's `decorated_definition`), the real definition — the one
+    // this symbol actually is — is the single inner definition child the
+    // wrapper is known to wrap. Step into it so its params are reached; the
+    // old recursion bailed at that inner DEF_TYPES node and lost every param
+    // of every decorated def (review-2 [Q]).
+    let paramRoot: Node = foundNode;
+    const wrapInners = WRAPPER_DEFINITIONS.get(foundNode.type);
+    if (wrapInners) {
+        for (let i = 0; i < foundNode.childCount; i++) {
+            const child = foundNode.child(i);
+            if (child && wrapInners.has(child.type)) {
+                paramRoot = child;
+                break;
+            }
+        }
+    }
+
+    // Collect ALL param containers in the definition's own signature scope.
+    // In every shipped grammar the signature containers (formal params AND a
+    // sibling type-parameter list, when generic) sit as direct children of
+    // the definition node, with the body block as another direct child. We
+    // therefore scan the direct children only: that captures both containers
+    // of a generic def (review-2 [R] — the old code returned after the first)
+    // while never descending into the body or into nested definitions, whose
+    // params are not this definition's. Nested defs (and the Python `block`
+    // body, itself a DEF_TYPES node) are skipped explicitly.
+    for (let i = 0; i < paramRoot.childCount; i++) {
+        const child = paramRoot.child(i);
+        if (!child) continue;
+        if (DEF_TYPES.has(child.type)) continue;
+        if (paramContainers.has(child.type)) {
+            collectFromContainer(child);
+        }
+    }
 
     // --- Return type ---
     let returnKind: string | null = null;

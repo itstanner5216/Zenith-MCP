@@ -182,7 +182,18 @@ function purgeIndexedPath(db: DbConnection, relPath: string): void {
     });
 }
 
-export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string): Promise<void> {
+/**
+ * Index a single file's symbols into the DB.
+ *
+ * `content` (optional, content-addressed path): when provided, the file's bytes
+ * are taken directly from `content` — NO disk read occurs and `absFilePath` is
+ * used only for path math (relPath / language detection by extension). The
+ * stored file hash is computed from the SAME `content` that is indexed, so a
+ * later content-addressed freshness check (ensureFreshFromContent) matches
+ * exactly. When `content` is omitted, behaviour is unchanged: the source is read
+ * from disk and an unreadable file purges its stale index rows.
+ */
+export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string, content?: string): Promise<void> {
     const relPath = path.relative(repoRoot, absFilePath);
 
     // Guard: reject paths that escape repoRoot
@@ -194,13 +205,21 @@ export async function indexFile(db: DbConnection, repoRoot: string, absFilePath:
     }
 
     let source: string;
-    try {
-        source = await fs.readFile(absFilePath, 'utf-8'); // nosemgrep
-    } catch {
-        purgeIndexedPath(db, relPath);
-        return;
+    if (content !== undefined) {
+        // Content-addressed: the caller already holds the exact bytes. Skip the
+        // disk read entirely (closes the read-vs-reindex race) and index these.
+        source = content;
+    } else {
+        try {
+            source = await fs.readFile(absFilePath, 'utf-8'); // nosemgrep
+        } catch {
+            purgeIndexedPath(db, relPath);
+            return;
+        }
     }
 
+    // Hash the SAME content that is indexed so a content-addressed freshness
+    // check (ensureFreshFromContent) compares like-for-like.
     const hash = hashFileContent(source);
     const existingHash = getFileHash(db, relPath);
     if (existingHash && existingHash === hash) return;
@@ -304,6 +323,48 @@ export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFi
         }
     }
     return reindexed;
+}
+
+/**
+ * Content-addressed freshness for a SINGLE file whose exact bytes the caller
+ * already holds (e.g. read-tool rawText, or post-edit content). Mirrors the
+ * per-file body of {@link ensureIndexFresh} — same shouldIndexFile / purge
+ * guard, same hash-compare-reindex logic, same `number` return (count
+ * reindexed: 0 or 1) — but asks the content-addressed question "do the DB facts
+ * describe THESE bytes?" instead of re-reading disk.
+ *
+ * Why content-addressed (review [#64] → C+): the caller holds the file's exact
+ * bytes already, so re-reading disk to check freshness is both redundant work
+ * and a race — the bytes on disk at check time may differ from the bytes the
+ * caller is about to compress/persist. Hashing the in-hand `content` and, on a
+ * miss, reindexing FROM that same `content` (no disk read) guarantees the
+ * indexed facts describe exactly the bytes the caller will consume.
+ *
+ * Note vs ensureIndexFresh: there is no unreadable-file branch — the bytes are
+ * in-hand by construction, so the only purge path is the shouldIndexFile guard
+ * (unsupported / sensitive / excluded path).
+ *
+ * @returns 1 if the file was (re)indexed from `content`, 0 if facts were
+ *          already fresh (stored hash matched) or the path is not indexable.
+ */
+export async function ensureFreshFromContent(db: DbConnection, repoRoot: string, absFilePath: string, content: string): Promise<number> {
+    const relPath = path.relative(repoRoot, absFilePath);
+
+    // Guard: reject paths that escape repoRoot (mirrors indexFile's containment guard).
+    if (relPath.startsWith('..') || path.isAbsolute(relPath)) return 0;
+
+    if (!shouldIndexFile(repoRoot, absFilePath)) {
+        purgeIndexedPath(db, relPath);
+        return 0;
+    }
+
+    const hash = hashFileContent(content);
+    const existingHash = getFileHash(db, relPath);
+    if (!existingHash || existingHash !== hash) {
+        await indexFile(db, repoRoot, absFilePath, content);
+        return 1;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
