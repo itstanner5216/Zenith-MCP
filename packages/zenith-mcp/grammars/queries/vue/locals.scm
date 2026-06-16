@@ -1,13 +1,8 @@
-; Vue Locals
-; tree-sitter-vue grammar
-; Vue components are scoped; script content is the main local scope.
+; Vue locals
+; Compatible with tree-sitter-grammars/tree-sitter-vue @ ce8011a414fdf8091f4e4071752efc376f4afb08
 
-; The entire component is the top-level scope
-(component) @scope
-
-; Template element is a scope for template-local variables
+(document) @scope
 (template_element) @scope
-
-; Elements create nested scopes
+(script_element) @scope
+(style_element) @scope
 (element) @scope
-

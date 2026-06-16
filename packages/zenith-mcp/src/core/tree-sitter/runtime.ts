@@ -78,10 +78,15 @@ export const _symbolCache: Map<string, SymbolCacheEntry> = new Map();
 // names contain "external_scanner". In the WASM binary, both strings appear
 // as UTF-8 in the imports section. A fast byte-scan detects this reliably.
 //
-// Safety of this heuristic: across all 43 grammar WASMs in this build, only
-// tree-sitter-vue.wasm contains the "GOT.func" byte sequence. All other WASMs
-// that have external scanners compiled them in statically (no GOT imports).
-// False positives are not possible with the current grammar set.
+// Safety of this heuristic: no grammar WASM in the current build is an
+// Emscripten PIC side-module. Every bundled grammar — vue included, now that it
+// is a standalone (non-side-module) build of tree-sitter-grammars/tree-sitter-vue
+// with its scanner linked in statically — keeps its external scanner internal,
+// so none contains the "GOT.func" byte sequence. tree-sitter-vue WAS the
+// historical trigger (an old side-module build poisoned the GOT and was
+// skipped); it now loads cleanly. This pre-screen remains as defense-in-depth
+// against any future side-module wasm. False positives are not possible with
+// the current grammar set.
 //
 // Fix: if a WASM is detected as a PIC side-module before Language.load() is
 // called, we skip the load entirely. The GOT is never touched, so all
@@ -100,7 +105,7 @@ export const _symbolCache: Map<string, SymbolCacheEntry> = new Map();
  * neither appears together in any correctly-built standalone grammar WASM.
  *
  * This is cheaper and safer than a full WASM section parser because:
- *   - vue.wasm is 17 KB — reading it is trivial.
+ *   - grammar WASMs are small (tens of KB) — reading one is trivial.
  *   - The two byte sequences cannot appear together in a well-formed
  *     standalone grammar (confirmed by inspecting all 43 WASMs in the build).
  *   - No WASM spec version dependency; byte scanning is version-agnostic.

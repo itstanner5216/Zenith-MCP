@@ -1,44 +1,95 @@
-; Vue Injections
-; tree-sitter-vue grammar
-; MOST IMPORTANT: inject JavaScript/TypeScript into <script> and CSS into <style>,
-; and HTML into <template>.
+; inherits: html_tags
 
-; <template> — inject HTML
-(template_element
-  (raw_text) @injection.content
-  (#set! injection.language "html"))
-
-; <script> without lang attribute — inject JavaScript
-(script_element
-  (raw_text) @injection.content
-  (#set! injection.language "javascript"))
-
-; <script lang="ts"> — inject TypeScript
-(script_element
+; <style lang="css">
+((style_element
   (start_tag
     (attribute
-      (attribute_name) @_lang_attr
+      (attribute_name) @_lang
       (quoted_attribute_value
-        (attribute_value) @_lang_val
-        (#eq? @_lang_attr "lang")
-        (#eq? @_lang_val "ts"))))
-  (raw_text) @injection.content
-  (#set! injection.language "typescript"))
+        (attribute_value) @injection.language)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#any-of? @injection.language "css" "scss"))
 
-; <style> without lang — inject CSS
-(style_element
-  (raw_text) @injection.content
-  (#set! injection.language "css"))
-
-; <style lang="scss"> — inject SCSS
+; TODO: When nvim-treesitter has postcss and less parsers, use @injection.language and @injection.content instead
+; <style lang="scss">
 (style_element
   (start_tag
     (attribute
-      (attribute_name) @_lang_attr
+      (attribute_name) @_lang
       (quoted_attribute_value
-        (attribute_value) @_lang_val
-        (#eq? @_lang_attr "lang")
-        (#eq? @_lang_val "scss"))))
+        (attribute_value) @_scss)))
   (raw_text) @injection.content
+  (#eq? @_lang "lang")
+  (#any-of? @_scss "less" "postcss" "sass")
   (#set! injection.language "scss"))
 
+; <script lang="js">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_js)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_js "js")
+  (#set! injection.language "javascript"))
+
+; <script lang="ts">
+((script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_lang
+      (quoted_attribute_value
+        (attribute_value) @_ts)))
+  (raw_text) @injection.content)
+  (#eq? @_lang "lang")
+  (#eq? @_ts "ts")
+  (#set! injection.language "typescript"))
+
+; <script lang="tsx">
+; <script lang="jsx">
+(script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_attr
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (#eq? @_attr "lang")
+  (#any-of? @injection.language "tsx" "jsx")
+  (raw_text) @injection.content)
+
+; Bare <script> / <script setup> with no lang attribute — inject JavaScript.
+; Upstream gets this via `inherits: html_tags`; Zenith loads one query per
+; language with no inherit mechanism, so cover the common bare case here.
+; #not-match? on the start-tag text keeps this from double-injecting lang="..." blocks.
+((script_element
+  (start_tag) @_tag
+  (raw_text) @injection.content)
+  (#not-match? @_tag "lang=")
+  (#set! injection.language "javascript"))
+
+; Bare <style> with no lang attribute — inject CSS.
+((style_element
+  (start_tag) @_tag
+  (raw_text) @injection.content)
+  (#not-match? @_tag "lang=")
+  (#set! injection.language "css"))
+
+((interpolation
+  (raw_text) @injection.content)
+  (#set! injection.language "typescript"))
+
+(directive_attribute
+  (quoted_attribute_value
+    (attribute_value) @injection.content
+    (#set! injection.language "typescript")))
+
+(template_element
+  (start_tag
+    (attribute
+      (quoted_attribute_value
+        (attribute_value) @injection.language)))
+  (text) @injection.content
+  (#eq? @injection.language "pug"))

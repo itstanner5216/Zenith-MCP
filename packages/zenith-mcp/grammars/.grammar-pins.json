@@ -14,6 +14,18 @@
       "build_note": "tree-sitter build --wasm fails with E2BIG (Argument list too long) on the 41MB generated parser.c. Direct wasi-sdk clang invocation bypasses the CLI process-spawning limit. wasi-sdk lives at ~/.cache/tree-sitter/wasi-sdk/bin/clang after tree-sitter CLI first use.",
       "pinned_reason": "Prebuilt download from upstream GitHub release was ABI-incompatible with web-tree-sitter@0.26.9 runtime core (loaded OK but Parser.parse() crashed with RuntimeError: function signature mismatch). Must be built from source against the pinned CLI to ensure parse-driver ABI compatibility.",
       "pinned_at": "2026-06-15"
+    },
+    "vue": {
+      "source": "https://github.com/tree-sitter-grammars/tree-sitter-vue",
+      "ref": "main",
+      "commit": "ce8011a414fdf8091f4e4071752efc376f4afb08",
+      "sha256": "94d9292677797c4d0299009885dfca5453513f44b79405efbf9d7dd3e1a1b5a2",
+      "core_abi": "web-tree-sitter@0.26.9",
+      "language_abi": 15,
+      "build_tool": "standalone wasm (non-side-module); pure-C scanner statically linked",
+      "build_note": "scanner.c is pure C and is compiled into the module statically, so the wasm has no GOT.func imports and does not poison web-tree-sitter's process-global GOT.",
+      "pinned_reason": "The previously bundled tree-sitter-vue.wasm was an Emscripten PIC side-module: it imported its external_scanner_* functions via GOT.func, which poisoned web-tree-sitter@0.26.9's process-global GOT on Language.load() and broke every subsequent grammar load. runtime.ts pre-screened and SKIPPED it, so vue was unavailable. Replaced with a standalone build of the maintained tree-sitter-grammars/tree-sitter-vue grammar (ABI 15, root node 'document') that loads cleanly. Pinned to prevent regression to a side-module build.",
+      "pinned_at": "2026-06-16"
     }
   }
 }
