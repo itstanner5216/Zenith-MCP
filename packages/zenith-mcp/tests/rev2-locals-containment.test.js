@@ -137,4 +137,54 @@ describe('locals.ts nested-scope containment (review-2 [H])', () => {
             parser.delete();
         }
     });
+
+    it('does not mis-attribute the OUTER param/local across same-line scopes (byte-membership)', async () => {
+        // Companion to the [H] guard above, covering the direction the original
+        // tests missed. Pre-fix, scope MEMBERSHIP was row-based, so on a single
+        // line every symbol counted as "in range" of every same-line scope. The
+        // result for `const f = (a) => (b) => a + b;` was one arrow grabbing BOTH
+        // params (params=[a,b], locals=[f]) while the other arrow got nothing —
+        // the outer param 'a' and the top-level local 'f' leaked into the inner
+        // arrow's byte range, where they do not belong.
+        //
+        //   pre-fix (row membership): some scope has BOTH a and b  -> FAILS here
+        //   post-fix (byte membership): a and b live in different scopes; f in neither arrow
+        const source = 'const f = (a) => (b) => a + b;\n';
+        const { tree, parser, root } = await parseSource(source, 'typescript');
+
+        try {
+            const scopes = await extractLocals(root, 'typescript');
+            expect(Array.isArray(scopes)).toBe(true);
+
+            // Each param is attributed to exactly one scope...
+            const scopesWithA = scopes.filter(s => s.parameters.some(p => p.name === 'a'));
+            const scopesWithB = scopes.filter(s => s.parameters.some(p => p.name === 'b'));
+            expect(scopesWithA, "outer param 'a' must be attributed to exactly one scope").toHaveLength(1);
+            expect(scopesWithB, "inner param 'b' must be attributed to exactly one scope").toHaveLength(1);
+
+            // ...and 'a' and 'b' are params of DIFFERENT arrows. The precise
+            // statement of the bug: no single scope may own both.
+            const bothInOneScope = scopes.some(s => {
+                const names = s.parameters.map(p => p.name);
+                return names.includes('a') && names.includes('b');
+            });
+            expect(
+                bothInOneScope,
+                "REGRESSION: a single scope owns BOTH 'a' and 'b' — row-based membership has " +
+                'leaked the outer param into the inner arrow. Membership must be tested by byte span.',
+            ).toBe(false);
+
+            // The top-level local 'f' must not leak into either arrow's byte range.
+            const arrowScopesWithF = scopes.filter(
+                s => s.scopeKind === 'arrow_function' && s.locals.some(l => l.name === 'f'),
+            );
+            expect(
+                arrowScopesWithF,
+                "REGRESSION: top-level local 'f' leaked into an arrow scope it does not lie within.",
+            ).toHaveLength(0);
+        } finally {
+            tree?.delete();
+            parser.delete();
+        }
+    });
 });

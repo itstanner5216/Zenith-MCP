@@ -60,21 +60,27 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
 
         const scopeParams: LocalSymbol[] = [];
         for (const p of params) {
-            const row = p.node.startPosition.row;
-            if (row >= scopeStartRow && row <= scopeEndRow) {
-                // Check that this param is directly in THIS scope (not a nested one)
+            const pStart = p.node.startIndex;
+            const pEnd = p.node.endIndex;
+            // Membership by BYTE OFFSETS, not rows: on a single line every symbol
+            // shares its row with every same-line scope, so a row test lets outer
+            // params leak into inner scopes (and vice-versa). Byte spans are unique
+            // per position, so this is correct even when scopes share a start/end
+            // row (e.g. single-line nested arrows).
+            if (pStart >= sNode.startIndex && pEnd <= sNode.endIndex) {
+                // Direct child of THIS scope unless a STRICTLY-nested inner scope
+                // also contains the param by byte span. Equal-range scopes are NOT
+                // treated as nesting (they would otherwise steal each other's symbols).
                 let directChild = true;
                 for (const innerScope of scopes) {
                     if (innerScope === scope) continue;
-                    const iStart = innerScope.node.startPosition.row;
-                    const iEnd = innerScope.node.endPosition.row;
-                    // Containment by BYTE OFFSETS, not rows: byte indices are unique
-                    // per position, so an inner scope sharing a boundary row with this
-                    // scope (e.g. a single-line nested arrow) is still recognized as
-                    // strictly contained (innerScope !== scope is already excluded above).
-                    if (row >= iStart && row <= iEnd &&
-                        innerScope.node.startIndex >= sNode.startIndex &&
-                        innerScope.node.endIndex <= sNode.endIndex) {
+                    const iNode = innerScope.node;
+                    const innerStrictlyInside =
+                        iNode.startIndex >= sNode.startIndex &&
+                        iNode.endIndex <= sNode.endIndex &&
+                        (iNode.startIndex > sNode.startIndex || iNode.endIndex < sNode.endIndex);
+                    const paramInsideInner = pStart >= iNode.startIndex && pEnd <= iNode.endIndex;
+                    if (innerStrictlyInside && paramInsideInner) {
                         directChild = false;
                         break;
                     }
@@ -82,7 +88,7 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
                 if (directChild) {
                     scopeParams.push({
                         name: p.node.text,
-                        line: row + 1,
+                        line: p.node.startPosition.row + 1,
                         column: p.node.startPosition.column,
                     });
                 }
@@ -91,20 +97,21 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
 
         const scopeDefs: LocalSymbol[] = [];
         for (const d of defs) {
-            const row = d.node.startPosition.row;
-            if (row >= scopeStartRow && row <= scopeEndRow) {
+            const dStart = d.node.startIndex;
+            const dEnd = d.node.endIndex;
+            // Membership by BYTE OFFSETS, not rows: see the parameter loop above —
+            // a row test mis-attributes definitions across same-line scopes.
+            if (dStart >= sNode.startIndex && dEnd <= sNode.endIndex) {
                 let directChild = true;
                 for (const innerScope of scopes) {
                     if (innerScope === scope) continue;
-                    const iStart = innerScope.node.startPosition.row;
-                    const iEnd = innerScope.node.endPosition.row;
-                    // Containment by BYTE OFFSETS, not rows: byte indices are unique
-                    // per position, so an inner scope sharing a boundary row with this
-                    // scope (e.g. a single-line nested arrow) is still recognized as
-                    // strictly contained (innerScope !== scope is already excluded above).
-                    if (row >= iStart && row <= iEnd &&
-                        innerScope.node.startIndex >= sNode.startIndex &&
-                        innerScope.node.endIndex <= sNode.endIndex) {
+                    const iNode = innerScope.node;
+                    const innerStrictlyInside =
+                        iNode.startIndex >= sNode.startIndex &&
+                        iNode.endIndex <= sNode.endIndex &&
+                        (iNode.startIndex > sNode.startIndex || iNode.endIndex < sNode.endIndex);
+                    const defInsideInner = dStart >= iNode.startIndex && dEnd <= iNode.endIndex;
+                    if (innerStrictlyInside && defInsideInner) {
                         directChild = false;
                         break;
                     }
@@ -112,7 +119,7 @@ export async function extractLocals(rootNode: Node, langName: string): Promise<L
                 if (directChild) {
                     scopeDefs.push({
                         name: d.node.text,
-                        line: row + 1,
+                        line: d.node.startPosition.row + 1,
                         column: d.node.startPosition.column,
                     });
                 }

@@ -85,7 +85,7 @@ export interface RawFileFacts {
     langName: string | null;      // tree-sitter language name, or null if unsupported
     defs: Array<{
         name: string;
-        kind: string;             // always 'def' on this payload
+        kind: 'def';              // always 'def' on this payload
         type: string;             // e.g. 'function', 'method', 'class'
         line: number;             // 1-based
         endLine: number;          // 1-based
