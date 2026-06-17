@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned to packageManager field in root package.json
+          version: "11.5.1"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Pinned to engines.node in packages/zenith-mcp/package.json
+          node-version: "26.3.0"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        # Builds zenith-toon first (workspace dep), then zenith-mcp.
+        # tsc --build also performs full type-checking — no separate typecheck step needed.
+        run: pnpm build
+
+      - name: Test (with coverage)
+        # Tests import from dist/, so build must precede this step.
+        run: pnpm --filter zenith-mcp run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: packages/zenith-mcp/coverage/
+          retention-days: 14
+          if-no-files-found: warn
