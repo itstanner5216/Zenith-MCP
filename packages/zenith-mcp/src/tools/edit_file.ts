@@ -85,6 +85,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         try {
             const repoRoot = findRepoRoot(validPath);
             if (repoRoot) {
+                await ctx.validatePath(repoRoot);
                 await ensureFreshFromContent(getDb(repoRoot), repoRoot, validPath, workingContent);
             }
         }

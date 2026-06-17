@@ -54,9 +54,11 @@ describe('Grammar ABI compatibility probe', () => {
 
             // This is the only loadLanguage('sql') call in this process,
             // so the module-level cache is empty — the probe runs.
-            language = await loadLanguage('sql');
-
-            process.stderr.write = originalStderrWrite;
+            try {
+                language = await loadLanguage('sql');
+            } finally {
+                process.stderr.write = originalStderrWrite;
+            }
         });
 
         afterAll(() => {

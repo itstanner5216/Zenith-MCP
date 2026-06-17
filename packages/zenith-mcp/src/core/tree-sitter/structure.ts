@@ -204,8 +204,8 @@ export function extractStructureForDef(defNode: Node, langName: string): SymbolS
 
     // --- Return type ---
     let returnKind: string | null = null;
-    for (let i = 0; i < foundNode.childCount; i++) {
-        const c = foundNode.child(i);
+    for (let i = 0; i < paramRoot.childCount; i++) {
+        const c = paramRoot.child(i);
         if (!c) continue;
         if (c.type === 'type_annotation' || c.type === 'return_type') {
             returnKind = c.type;

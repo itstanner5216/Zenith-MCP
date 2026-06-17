@@ -379,10 +379,9 @@ describe('kotlin/definitions.scm — type_identifier fixes for object_declaratio
         // New: (object_declaration (type_identifier) @name.definition.object)
         // The name.definition.object capture must use type_identifier, not simple_identifier.
         const objectDeclMatch = raw.match(/\(object_declaration[\s\S]*?@name\.definition\.object/);
-        if (objectDeclMatch) {
-            expect(objectDeclMatch[0]).toContain('(type_identifier)');
-            expect(objectDeclMatch[0]).not.toContain('(simple_identifier) @name.definition.object');
-        }
+        expect(objectDeclMatch, 'object_declaration capture block must exist').not.toBeNull();
+        expect(objectDeclMatch[0]).toContain('(type_identifier)');
+        expect(objectDeclMatch[0]).not.toContain('(simple_identifier) @name.definition.object');
     });
 
     it('kotlin/definitions.scm uses (type_identifier) for type_alias (not simple_identifier)', async () => {
@@ -390,10 +389,9 @@ describe('kotlin/definitions.scm — type_identifier fixes for object_declaratio
         // Old: (type_alias (simple_identifier) @name.definition.type)
         // New: (type_alias (type_identifier) @name.definition.type)
         const typeAliasMatch = raw.match(/\(type_alias[\s\S]*?@name\.definition\.type/);
-        if (typeAliasMatch) {
-            expect(typeAliasMatch[0]).toContain('(type_identifier)');
-            expect(typeAliasMatch[0]).not.toContain('(simple_identifier) @name.definition.type');
-        }
+        expect(typeAliasMatch, 'type_alias capture block must exist').not.toBeNull();
+        expect(typeAliasMatch[0]).toContain('(type_identifier)');
+        expect(typeAliasMatch[0]).not.toContain('(simple_identifier) @name.definition.type');
     });
 });
 

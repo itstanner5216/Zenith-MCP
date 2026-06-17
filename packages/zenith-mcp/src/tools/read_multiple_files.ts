@@ -60,7 +60,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             maxCharsPerFile: z.number().optional().describe("Max characters per file."),
             compression: z.boolean().optional().default(true).describe("Compress file-read output."),
         }).strict(),
-        annotations: { readOnlyHint: true }
+        annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false }
     }, async (args: ReadMultipleFilesArgs) => {
         const fileCount = args.paths.length;
         // Phase 1: Validate paths and get file sizes
