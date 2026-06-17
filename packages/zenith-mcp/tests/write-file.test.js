@@ -118,6 +118,14 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         expect(fs.readFileSync(filePath, 'utf-8')).toBe('deep content');
     });
 
+    it('reports write failures with the underlying error code and stash id', async () => {
+        const filePath = path.join(repoDir, 'directory-target');
+        fs.mkdirSync(filePath);
+
+        await expect(handler({ path: filePath, content: 'cannot replace directory' }))
+            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:/);
+    });
+
     it('normalizes CRLF to LF on write', async () => {
         const filePath = path.join(repoDir, 'crlf.txt');
         await handler({ path: filePath, content: 'line1\r\nline2\r\n' });

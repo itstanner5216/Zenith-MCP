@@ -85,12 +85,17 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             await fs.rename(tempPath, validPath);
         }
         catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            const message = errorMessage(error);
+            void message;
             try {
                 await fs.unlink(tempPath);
             }
             catch (err) { void err; /* temp file cleanup after failed write */ }
             const stashId = stashWrite(ctx, validPath, normalizedContent, args.append ? 'append' : 'write');
-            throw new Error(`Write failed. Cached as stash:${stashId}.`);
+            throw new Error(code
+                ? `Write failed (${code}). Cached as stash:${stashId}.`
+                : `Write failed. Cached as stash:${stashId}.`);
         }
         let message;
         if (args.append) {
