@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+import { loadDotEnvFiles } from '../core/env-loader.js';
+
+// Load `.env` files BEFORE any other import touches `process.env`. The
+// shared loader walks cwd → package root → workspace root and honours the
+// `ZENITH_ENV_FILE` override. stdio remains key-free; this only surfaces
+// configuration env vars that the rest of the server reads at import time.
+loadDotEnvFiles(import.meta.url);
+
 // ---------------------------------------------------------------------------
 // cli/stdio.ts — stdio MCP entrypoint
 //

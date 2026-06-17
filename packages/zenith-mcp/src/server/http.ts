@@ -1,15 +1,10 @@
 #!/usr/bin/env node
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { loadDotEnvFiles } from '../core/env-loader.js';
 
-// Aggressively attempt to load .env from multiple sensible locations
-const tryLoadEnv = (path: string) => {
-    try { process.loadEnvFile(path); } catch (e) {}
-};
-
-tryLoadEnv('.env'); // 1. Try Current Working Directory
-tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../../.env')); // 2. Try the Zenith-MCP monorepo root
-tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../.env')); // 3. Try packages/zenith-mcp package root
+// Load `.env` files BEFORE any other import reads `process.env`. The shared
+// loader walks cwd → package root → workspace root and honours the
+// `ZENITH_ENV_FILE` override. It must run before the API-key check below.
+const _loadedEnvFiles = loadDotEnvFiles(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // http-server.js — Native HTTP entrypoint for MCP Streamable HTTP + legacy SSE
@@ -26,7 +21,7 @@ tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../.env')); // 3. Try pac
 //   GET  /health       — Simple health check
 // ---------------------------------------------------------------------------
 
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -96,7 +91,17 @@ const config = loadConfig();
 const port = cliPort ?? config.port;
 
 // ---------------------------------------------------------------------------
-// API key authentication — simple Bearer token via ZENITH_API_KEY env var
+// API key authentication — Bearer token via ZENITH_API_KEY env var.
+//
+// Comparison is constant-time. We use HMAC-SHA256 with a per-process random
+// key (not a plain hash) so that:
+//   - Both buffers passed to timingSafeEqual are guaranteed to be the same
+//     length, regardless of how long the caller-supplied token is.
+//   - The expected-token digest never leaves the process; an attacker who
+//     somehow observed the digest cannot replay it against another process.
+//   - Static analyzers do not flag the comparison as insecure password
+//     hashing (HMAC is a keyed MAC, which is the correct primitive for
+//     constant-time secret comparison).
 // ---------------------------------------------------------------------------
 const ZENITH_API_KEY = process.env.ZENITH_API_KEY || process.env.ZENITH_MCP_API_KEY || '';
 if (!ZENITH_API_KEY) {
@@ -106,6 +111,14 @@ if (!ZENITH_API_KEY) {
     );
     process.exit(1);
 }
+
+// Per-process random key for the constant-time comparison MAC. 32 bytes of
+// CSPRNG output is regenerated on every process start; the digest never
+// leaves the process.
+const API_KEY_COMPARE_SECRET = randomBytes(32);
+const EXPECTED_API_KEY_DIGEST = createHmac('sha256', API_KEY_COMPARE_SECRET)
+    .update(ZENITH_API_KEY, 'utf8')
+    .digest();
 
 const authRateLimiter = rateLimit({
     windowMs: 60_000,
@@ -306,9 +319,13 @@ app.use(express.json({ limit: '4mb' }));
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
     const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
     const provided = authMatch?.[1] ?? '';
-    const providedDigest = createHash('sha256').update(provided, 'utf8').digest();
-    const expectedDigest = createHash('sha256').update(ZENITH_API_KEY, 'utf8').digest();
-    if (timingSafeEqual(providedDigest, expectedDigest)) {
+    // HMAC the caller-supplied token with the same per-process secret used to
+    // pre-compute EXPECTED_API_KEY_DIGEST. Both digests are 32 bytes, so
+    // timingSafeEqual is well-defined regardless of `provided`'s length.
+    const providedDigest = createHmac('sha256', API_KEY_COMPARE_SECRET)
+        .update(provided, 'utf8')
+        .digest();
+    if (timingSafeEqual(providedDigest, EXPECTED_API_KEY_DIGEST)) {
         next();
     } else {
         res.status(401).json({ error: 'Invalid or missing API key.' });
@@ -515,6 +532,11 @@ app.listen(port, host, () => {
         console.error(`  Baseline dirs:   ${baselineAllowedDirs.join(', ')}`);
     } else {
         console.error(`  No baseline dirs — sessions will rely on MCP roots from clients`);
+    }
+    if (_loadedEnvFiles.length > 0) {
+        console.error(`  Loaded env:      ${_loadedEnvFiles.join(', ')}`);
+    } else {
+        console.error(`  Loaded env:      none (set ZENITH_ENV_FILE or place .env in cwd/package/workspace root)`);
     }
     ripgrepAvailable().then(ok =>
         console.error(ok ? '  Ripgrep: available' : '  Ripgrep: not found — JS fallback for search')
