@@ -5,13 +5,18 @@ import { randomBytes, createHash } from 'crypto';
 import type { ToolServer, ToolContext } from './types.js';
 import { getProjectContext } from '../core/project-context.js';
 import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, findRepoRoot, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
-import { getLangForFile, findSymbol, checkSyntaxErrors, } from '../core/tree-sitter.js';
+import { getLangForFile, checkSyntaxErrors } from '../core/tree-sitter.js';
+// Refactor-batch is a SYMBOL-FACT CONSUMER — per docs/toon-constraints
+// §0.5 symbol lookups come from the DB-backed adapter, never the
+// tree-sitter extractor directly. Indexing is on-demand via
+// `ensureIndexFresh` inside `loadSymbolInFile`.
+import { loadSymbolInFile } from '../core/indexed-symbols.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
-import { getFileCount, getFilePaths, findSymbolFiles, getFileHash } from '../core/db-adapter.js';
+import { getFileCount, getFilePaths, findSymbolFiles, getFileHash, findSymbolStructuresByName } from '../core/db-adapter.js';
 // ---------------------------------------------------------------------------
 // Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
@@ -437,7 +442,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 const langName = getLangForFile(validPath);
                 if (!langName)
                     continue;
-                const matches = await findSymbol(source, langName, symbol, { kindFilter: 'def' });
+                const matches = await loadSymbolInFile(validPath, symbol, { kindFilter: 'def' });
                 if (!matches || !matches.length)
                     continue;
                 const sourceLines = source.split('\n');
@@ -468,8 +473,13 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const [symName, group] of bySymbol) {
                 if (group.length < 2)
                     continue;
-                const structs: (SymbolStructure | null)[] = [];
-                // TODO: Populate actual SymbolStructure from AST for each occurrence in group
+                const dbStructs = findSymbolStructuresByName(db, symName);
+                const structs: (SymbolStructure | null)[] = group.map(occ => {
+                    const match = dbStructs.find(s => s.file_path === occ.relFile && s.line === occ.line);
+                    if (!match)
+                        return null;
+                    return { params: match.params, returnKind: match.returnText, parentKind: match.parentKind, decorators: match.decorators, modifiers: match.modifiers };
+                });
                 const modal = findModal(structs);
                 if (!modal)
                     continue;
@@ -946,7 +956,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     const langName = getLangForFile(validPath);
                     if (!langName)
                         continue;
-                    const matches = await findSymbol(source, langName, symName, { kindFilter: 'def' });
+                    const matches = await loadSymbolInFile(validPath, symName, { kindFilter: 'def' });
                     if (!matches || !matches.length)
                         continue;
                     for (const m of matches) {
@@ -971,8 +981,28 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Outlier flagging: compare new targets against the ORIGINAL baseline
             // structure (cached from the initial loadDiff). If no baseline is cached
             // (single-symbol apply), fall back to comparing targets to each other.
-            const structs: (SymbolStructure | null)[] = [];
-            // TODO: Populate actual SymbolStructure from AST for each target
+            //
+            // Perf (cubic #39 / Performance Is Correctness): targets frequently share
+            // the same symbol name (the whole point of a batch refactor), and
+            // findSymbolStructuresByName returns ALL def rows for a name regardless of
+            // file. Querying per-target re-fetched identical rows N times (N+1). Fetch
+            // each DISTINCT symbol name exactly once into a cache, then read from it —
+            // dropping the query count from O(targets) to O(distinct symbol names). The
+            // per-target struct selection below is byte-for-byte the same set it would
+            // have received from a direct call, so behavior is unchanged.
+            const structsByName = new Map<string, ReturnType<typeof findSymbolStructuresByName>>();
+            for (const t of targets) {
+                if (!structsByName.has(t.symbol)) {
+                    structsByName.set(t.symbol, findSymbolStructuresByName(db, t.symbol));
+                }
+            }
+            const structs: (SymbolStructure | null)[] = targets.map(t => {
+                const matches = structsByName.get(t.symbol) ?? [];
+                const match = matches.find(s => s.file_path === t.relFile && s.line === t.line);
+                if (!match)
+                    return null;
+                return { params: match.params, returnKind: match.returnText, parentKind: match.parentKind, decorators: match.decorators, modifiers: match.modifiers };
+            });
             {
                 const baseline = cachedPayload.modalStructure;
                 const modal = baseline || (targets.length >= 2 ? findModal(structs) : null);
@@ -1189,7 +1219,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!langName) {
                 return { content: [{ type: 'text' as const, text: `${args.symbol}: unsupported language for ${relPath}.` }] };
             }
-            const matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' });
+            const matches = await loadSymbolInFile(absPath, args.symbol, { kindFilter: 'def' });
             if (!matches?.length) {
                 return { content: [{ type: 'text' as const, text: `${args.symbol}: not found in ${relPath}.` }] };
             }

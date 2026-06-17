@@ -1,6 +1,20 @@
 import path from 'path';
 import { normalizeLineEndings } from '../core/lib.js';
-import { getLangForFile, findSymbol, checkSyntaxErrors } from '../core/tree-sitter.js';
+import { getLangForFile, checkSyntaxErrors } from '../core/tree-sitter.js';
+// Edit-engine is a SYMBOL-FACT CONSUMER. Per docs/toon-constraints §0.5
+// symbol facts come from the DB-backed adapter, never the tree-sitter
+// extractor. The only call site allowed to extract directly is the
+// ingestion path in `./symbol-index.ts`.
+//
+// Known limitation: this consumer applies edits to an in-flight buffer
+// (`workingContent`) that mutates between symbol-mode edits in the
+// same applyEditList run. The DB reflects the last-indexed disk state,
+// not the in-memory buffer, so successive symbol-mode edits in one run
+// may target lines that have shifted. That is an edit-engine concern
+// to address separately (e.g. pre-resolve all symbol ranges before any
+// edit applies, with line-shift accounting between iterations) and is
+// NOT a license to keep this site on direct extraction.
+import { loadSymbolInFile } from '../core/indexed-symbols.js';
 
 // ---------------------------------------------------------------------------
 // Edit interfaces
@@ -198,6 +212,40 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
     const errors: EditError[] = [];
     const pendingSnapshots: PendingSnapshot[] = [];
 
+    // DB-backed symbol lookups return DISK-frame coordinates; every prior splice in
+    // this batch shifts the working frame. Replaying the splice ledger maps a disk
+    // line into the current frame — without it, the second symbol edit in a batch
+    // splices pre-batch coordinates (the silent corruption PR #20 documented as a
+    // known limitation; fixed here).
+    //
+    // Each ledger entry records the 1-based first-replaced line in the working
+    // frame at the time of the splice, the line-count delta (added - removed),
+    // and `removed` (the line count of the replaced span). `removed` is what
+    // makes the inside-replaced-range sentinel possible: a disk line that
+    // falls inside a prior shift's replaced span no longer exists in the
+    // current working frame, so mapDiskLine returns -1 and symbol mode fails
+    // closed with the same overlap error shape (Finding N5 — strengthens the
+    // overlap guard from the bare `mappedEnd < mappedStart` clamp).
+    const lineShifts: Array<{ start: number; delta: number; removed: number }> = [];
+    const mapDiskLine = (line: number): number => {
+        let mapped = line;
+        for (const s of lineShifts) {
+            // Sentinel: the disk line was INSIDE this shift's replaced span
+            // (lines s.start .. s.start + s.removed - 1 inclusive), so the
+            // original line no longer exists in the working frame. Symbol mode
+            // treats -1 as fail-closed (overlap error). Boundaries matter:
+            // the FIRST replaced line must poison (a miss there silently
+            // splices replaced territory), while the first SURVIVING line
+            // (s.start + s.removed) must map normally (a false reject there
+            // blocks legitimate adjacent batches).
+            if (mapped >= s.start && mapped < s.start + s.removed) {
+                return -1;
+            }
+            if (mapped > s.start) mapped += s.delta;
+        }
+        return mapped;
+    };
+
     for (const [i, edit] of edits.entries()) {
         const tag = isBatch ? `#${i + 1}: ` : '';
 
@@ -288,7 +336,10 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
 
             const normalizedNew = normalizeLineEndings(edit.replacement_block);
-            lines.splice(chosen.start, chosen.end - chosen.start + 1, ...normalizedNew.split('\n'));
+            const blockAddedLines = normalizedNew.split('\n');
+            const blockRemovedCount = chosen.end - chosen.start + 1;
+            lines.splice(chosen.start, blockRemovedCount, ...blockAddedLines);
+            lineShifts.push({ start: chosen.start + 1, delta: blockAddedLines.length - blockRemovedCount, removed: blockRemovedCount });
             workingContent = lines.join('\n');
             continue;
         }
@@ -297,6 +348,17 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
         if (edit.mode === 'symbol') {
             const dis = disambiguations?.get(i);
             const nearLine = dis?.nearLine ?? edit.nearLine;
+            // Symbol-mode edits require a file path: the DB-backed lookup
+            // below (`loadSymbolInFile`) needs an absolute on-disk path to
+            // identify the file in the symbol index. Previously this was
+            // implicit — `getLangForFile(undefined)` would have returned
+            // null and triggered the same "Unsupported file type" branch.
+            // Now we surface the precondition explicitly so the type
+            // system can prove it before the DB call.
+            if (filePath === undefined) {
+                errors.push({ i, msg: `${tag}Unsupported file type.` });
+                continue;
+            }
             const langName = getLangForFile(filePath);
             if (!langName) {
                 errors.push({ i, msg: `${tag}Unsupported file type.` });
@@ -304,16 +366,16 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
             const findSymbolOpts: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (nearLine !== undefined) findSymbolOpts.nearLine = nearLine;
-            const symbolMatches = await findSymbol(workingContent, langName, edit.symbol!, findSymbolOpts);
-            // findSymbol returns null when the language has no compiled tags
-            // query (grammar present, query file missing or unloadable —
-            // common for parse-capable-only languages like cmake/make/dart/
-            // elixir/ini/perl/r/regex). Distinguish that from a real empty
-            // match set so the user gets actionable guidance rather than a
-            // misleading "Symbol not found" for a language that doesn't
-            // support symbol queries at all.
+            // DB-backed read: locate the symbol via the indexed
+            // symbol-index for `filePath`. `loadSymbolInFile` ensures the
+            // file is freshly indexed (re-parses if the on-disk hash
+            // changed) before querying. Returns null when no repo root
+            // can be located for the file (e.g. file outside any known
+            // project) — that's the same user-facing surface as the
+            // prior "symbol queries not available" branch.
+            const symbolMatches = await loadSymbolInFile(filePath, edit.symbol!, findSymbolOpts);
             if (symbolMatches === null) {
-                errors.push({ i, msg: `${tag}Symbol queries not available for ${langName} (grammar present, tags query missing). Use block or content mode instead.` });
+                errors.push({ i, msg: `${tag}Symbol queries not available for ${langName}. Use block or content mode instead.` });
                 continue;
             }
             if (symbolMatches.length === 0) {
@@ -329,15 +391,32 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                 errors.push({ i, msg: `${tag}Symbol not found.` });
                 continue;
             }
+            const startLine = mapDiskLine(sym.line);
+            const endLine = mapDiskLine(sym.endLine);
+            // Fail closed under three conditions, all using the same overlap
+            // error shape (Locked Decision #13 + Finding N5 strengthening):
+            //   - startLine === -1: the symbol's first disk line was inside a
+            //     prior shift's replaced span — that span no longer exists.
+            //   - endLine === -1: same for the last disk line. (Either end
+            //     poisoned means the splice cannot proceed honestly.)
+            //   - endLine < startLine: classic post-shift inversion (a prior
+            //     shrink swung the end past the start).
+            if (startLine === -1 || endLine === -1 || endLine < startLine) {
+                errors.push({ i, msg: `${tag}Overlapping batch edits target '${edit.symbol}'. Split the batch.` });
+                continue;
+            }
             const lines = workingContent.split('\n');
-            const originalText = lines.slice(sym.line - 1, sym.endLine).join('\n');
+            const originalText = lines.slice(startLine - 1, endLine).join('\n');
             const normalizedNew = normalizeLineEndings(edit.newText!);
-            lines.splice(sym.line - 1, sym.endLine - (sym.line - 1), ...normalizedNew.split('\n'));
+            const symAddedLines = normalizedNew.split('\n');
+            const symRemovedCount = endLine - (startLine - 1);
+            lines.splice(startLine - 1, symRemovedCount, ...symAddedLines);
+            lineShifts.push({ start: startLine, delta: symAddedLines.length - symRemovedCount, removed: symRemovedCount });
             workingContent = lines.join('\n');
             pendingSnapshots.push({
                 symbol: edit.symbol!,
                 originalText,
-                line: sym.line,
+                line: startLine,
                 filePath: filePath,
             });
             continue;
@@ -353,6 +432,21 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                 continue;
             }
             const normalizedNew = normalizeLineEndings(edit.newContent!);
+            // Finding N1: content-mode mutates `workingContent` via string
+            // splicing (no `lines.splice`), but the replacement can still
+            // change the line count — and the ledger must record every
+            // mutation that can shift subsequent symbol-mode lookups, not
+            // just `lines.splice` sites. Compute the 1-based first-replaced
+            // line from the match offset (the line containing match.index),
+            // the replaced-text line count, and the new-text line count
+            // BEFORE mutating so the ledger reflects the pre-mutation frame
+            // — symbol-mode mapDiskLine then sees this entry just like a
+            // block/symbol splice. The indent-stripped branch re-indents
+            // line-by-line (no line-count change relative to normalizedNew),
+            // so a single line-count derivation covers both branches.
+            const contentStart = workingContent.slice(0, match.index).split('\n').length;
+            const contentRemoved = match.matchedText.split('\n').length;
+            const contentAdded = normalizedNew.split('\n').length;
             if (match.strategy === 'indent-stripped') {
                 const matchedLines = match.matchedText.split('\n');
                 const newLines = normalizedNew.split('\n');
@@ -368,6 +462,7 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             } else {
                 workingContent = workingContent.slice(0, match.index) + normalizedNew + workingContent.slice(match.index + match.matchedText.length);
             }
+            lineShifts.push({ start: contentStart, delta: contentAdded - contentRemoved, removed: contentRemoved });
             continue;
         }
     }

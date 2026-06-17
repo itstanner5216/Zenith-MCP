@@ -4,9 +4,8 @@
 ; =============================================================================
 
 ; Numbered backreference  →  \1
-(backreference) @name.reference.backref @reference.backref
+(decimal_escape) @name.reference.backref @reference.backref
 
-; Named backreference  →  \k<name>  (if grammar exposes group_name here)
-(named_backreference
-  name: (group_name) @name.reference.group) @reference.group
-
+; Named backreference  →  \k<name>
+(backreference_escape
+  (group_name) @name.reference.group) @reference.group

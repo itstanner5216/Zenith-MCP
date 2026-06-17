@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
-import { getSymbols, getLangForFile, isSupported } from './tree-sitter.js';
+import { getLangForFile, isSupported } from './tree-sitter.js';
 import { getDefaultExcludes, isSensitive, getRefactorVersionTtlMs } from './shared.js';
 import { minimatch } from 'minimatch';
 import {
@@ -12,16 +12,13 @@ import {
     closeDb,
     initSymbolSchema,
     getFileHash,
-    upsertFile,
     deleteFile,
     getFilesByPrefix,
-    insertSymbol,
     deleteSymbolsByFile,
     getCallers,
     getCallees,
     getCallersFiltered,
     getCalleesFiltered,
-    insertEdge,
     snapshotVersion,
     getVersionHistory as adapterGetVersionHistory,
     getVersionText as adapterGetVersionText,
@@ -30,7 +27,11 @@ import {
     pruneOtherSessions,
     runTransaction,
     findSymbolFiles,
+    upsertProjectRoot,
 } from './db-adapter.js';
+import { extractParsedFile } from './indexing/extract.js';
+import { persistParsedFile } from './indexing/persist.js';
+import { resolveAllEdgeTargets } from './indexing/resolve.js';
 
 // ---------------------------------------------------------------------------
 // Repo root detection
@@ -122,6 +123,9 @@ export function getDb(repoRoot: string): DbConnection {
     }
 
     _dbCache.set(repoRoot, conn);
+    try {
+        upsertProjectRoot(conn, { rootPath: repoRoot, name: path.basename(repoRoot), createdAt: Date.now() });
+    } catch { /* registry upsert is best-effort; must not break getDb */ }
     return conn;
 }
 
@@ -151,15 +155,6 @@ function hashFileContent(content: string): string {
 // Indexing
 // ---------------------------------------------------------------------------
 
-interface SymbolLike {
-    kind: string;
-    name: string;
-    type: string;
-    line: number;
-    endLine: number;
-    column: number;
-}
-
 function shouldIndexFile(repoRoot: string, absPath: string): boolean {
     if (!isSupported(absPath)) return false;
     if (isSensitive(absPath)) return false;
@@ -187,7 +182,18 @@ function purgeIndexedPath(db: DbConnection, relPath: string): void {
     });
 }
 
-export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string): Promise<void> {
+/**
+ * Index a single file's symbols into the DB.
+ *
+ * `content` (optional, content-addressed path): when provided, the file's bytes
+ * are taken directly from `content` — NO disk read occurs and `absFilePath` is
+ * used only for path math (relPath / language detection by extension). The
+ * stored file hash is computed from the SAME `content` that is indexed, so a
+ * later content-addressed freshness check (ensureFreshFromContent) matches
+ * exactly. When `content` is omitted, behaviour is unchanged: the source is read
+ * from disk and an unreadable file purges its stale index rows.
+ */
+export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string, content?: string): Promise<void> {
     const relPath = path.relative(repoRoot, absFilePath);
 
     // Guard: reject paths that escape repoRoot
@@ -199,13 +205,21 @@ export async function indexFile(db: DbConnection, repoRoot: string, absFilePath:
     }
 
     let source: string;
-    try {
-        source = await fs.readFile(absFilePath, 'utf-8'); // nosemgrep
-    } catch {
-        purgeIndexedPath(db, relPath);
-        return;
+    if (content !== undefined) {
+        // Content-addressed: the caller already holds the exact bytes. Skip the
+        // disk read entirely (closes the read-vs-reindex race) and index these.
+        source = content;
+    } else {
+        try {
+            source = await fs.readFile(absFilePath, 'utf-8'); // nosemgrep
+        } catch {
+            purgeIndexedPath(db, relPath);
+            return;
+        }
     }
 
+    // Hash the SAME content that is indexed so a content-addressed freshness
+    // check (ensureFreshFromContent) compares like-for-like.
     const hash = hashFileContent(source);
     const existingHash = getFileHash(db, relPath);
     if (existingHash && existingHash === hash) return;
@@ -216,61 +230,12 @@ export async function indexFile(db: DbConnection, repoRoot: string, absFilePath:
         return;
     }
 
-    const symbols = await getSymbols(source, langName);
-    if (!symbols) {
+    const parsed = await extractParsedFile(source, langName, relPath, hash);
+    if (!parsed) {
         purgeIndexedPath(db, relPath);
         return;
     }
-
-    const defs = symbols.filter((s: SymbolLike) => s.kind === 'def');
-    const refs = symbols.filter((s: SymbolLike) => s.kind === 'ref');
-
-    runTransaction(db, () => {
-        deleteSymbolsByFile(db, relPath);
-        upsertFile(db, relPath, hash, Date.now());
-
-        const defIds: Array<{ id: number; line: number; endLine: number }> = [];
-        for (const sym of defs) {
-            const rowId = insertSymbol(db, {
-                name: sym.name,
-                kind: sym.kind,
-                type: sym.type,
-                filePath: relPath,
-                line: sym.line,
-                endLine: sym.endLine,
-                column: sym.column
-            });
-            defIds.push({ id: rowId, line: sym.line, endLine: sym.endLine });
-        }
-
-        for (const ref of refs) {
-            insertSymbol(db, {
-                name: ref.name,
-                kind: ref.kind,
-                type: ref.type,
-                filePath: relPath,
-                line: ref.line,
-                endLine: ref.endLine,
-                column: ref.column
-            });
-
-            // Find innermost containing def (smallest span that contains this ref)
-            let bestDef: { id: number; line: number; endLine: number } | null = null;
-            let bestSpan = Infinity;
-            for (const def of defIds) {
-                if (ref.line >= def.line && ref.line <= def.endLine) {
-                    const span = def.endLine - def.line;
-                    if (span < bestSpan) {
-                        bestSpan = span;
-                        bestDef = def;
-                    }
-                }
-            }
-            if (bestDef) {
-                insertEdge(db, bestDef.id, ref.name);
-            }
-        }
-    });
+    persistParsedFile(db, parsed);
 }
 
 interface IndexDirectoryOpts {
@@ -324,6 +289,16 @@ export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath
         const batch = filePaths.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(f => indexFile(db, repoRoot, f)));
     }
+
+    // Resolve pass: now that all defs across the directory are indexed,
+    // resolve unresolved edge targets to their definition sites in ONE pass over
+    // the whole DB (review #18, "Performance Is Correctness"). The previous code
+    // looped resolveEdgeTargets per file — re-querying and re-resolving for each
+    // file, an N+1. resolveAllEdgeTargets fetches all unresolved edges once,
+    // groups by name, and fetches each name's candidate set once. The healing
+    // semantics are unchanged: stale rows nulled by ON DELETE SET NULL are
+    // re-read and re-resolved on the next sweep.
+    resolveAllEdgeTargets(db);
 }
 
 export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFilePaths: string[]): Promise<number> {
@@ -348,6 +323,48 @@ export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFi
         }
     }
     return reindexed;
+}
+
+/**
+ * Content-addressed freshness for a SINGLE file whose exact bytes the caller
+ * already holds (e.g. read-tool rawText, or post-edit content). Mirrors the
+ * per-file body of {@link ensureIndexFresh} — same shouldIndexFile / purge
+ * guard, same hash-compare-reindex logic, same `number` return (count
+ * reindexed: 0 or 1) — but asks the content-addressed question "do the DB facts
+ * describe THESE bytes?" instead of re-reading disk.
+ *
+ * Why content-addressed (review [#64] → C+): the caller holds the file's exact
+ * bytes already, so re-reading disk to check freshness is both redundant work
+ * and a race — the bytes on disk at check time may differ from the bytes the
+ * caller is about to compress/persist. Hashing the in-hand `content` and, on a
+ * miss, reindexing FROM that same `content` (no disk read) guarantees the
+ * indexed facts describe exactly the bytes the caller will consume.
+ *
+ * Note vs ensureIndexFresh: there is no unreadable-file branch — the bytes are
+ * in-hand by construction, so the only purge path is the shouldIndexFile guard
+ * (unsupported / sensitive / excluded path).
+ *
+ * @returns 1 if the file was (re)indexed from `content`, 0 if facts were
+ *          already fresh (stored hash matched) or the path is not indexable.
+ */
+export async function ensureFreshFromContent(db: DbConnection, repoRoot: string, absFilePath: string, content: string): Promise<number> {
+    const relPath = path.relative(repoRoot, absFilePath);
+
+    // Guard: reject paths that escape repoRoot (mirrors indexFile's containment guard).
+    if (relPath.startsWith('..') || path.isAbsolute(relPath)) return 0;
+
+    if (!shouldIndexFile(repoRoot, absFilePath)) {
+        purgeIndexedPath(db, relPath);
+        return 0;
+    }
+
+    const hash = hashFileContent(content);
+    const existingHash = getFileHash(db, relPath);
+    if (!existingHash || existingHash !== hash) {
+        await indexFile(db, repoRoot, absFilePath, content);
+        return 1;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------

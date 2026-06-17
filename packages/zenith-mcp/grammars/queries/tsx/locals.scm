@@ -14,17 +14,11 @@
 (jsx_element) @scope
 
 ; --- Parameters ---
-
-(formal_parameters
-  (identifier) @local.parameter)
-
-(formal_parameters
-  (assignment_pattern
-    left: (identifier) @local.parameter))
-
-(formal_parameters
-  (rest_pattern
-    (identifier) @local.parameter))
+; In the TSX grammar every parameter is wrapped in required_parameter /
+; optional_parameter (there is no bare identifier directly under
+; formal_parameters), so the parameter captures live in the section below. The
+; bare (formal_parameters (identifier) ...) patterns are JavaScript-grammar
+; shapes that are invalid here and made the whole query fail to compile.
 
 ; --- Required parameters (TypeScript typed) ---
 

@@ -1,7 +1,6 @@
 ; SCSS Definitions
 ; tree-sitter-scss grammar (serenadeai/tree-sitter-scss)
-; CONSERVATIVE: extends CSS patterns with SCSS-specific constructs.
-; Captures rule sets, mixins, functions, and variable declarations.
+; Captures rule sets, mixins, functions, variables, placeholders, keyframes, selectors.
 
 ; Rule set selector — the selectors node is the "name"
 (rule_set
@@ -9,18 +8,20 @@
 
 ; Mixin declaration: @mixin name { ... }
 (mixin_statement
-  name: (identifier) @name.definition.mixin) @definition.mixin
+  (name) @name.definition.mixin) @definition.mixin
 
-; Include as a mixin "definition" target (for cross-referencing)
-; (no definition — include is a reference)
+; Function declaration: @function name($params) { ... }
+(function_statement
+  (name) @name.definition.function) @definition.function
 
 ; SCSS variable declaration: $var: value;
+; Variable declarations have (variable_name) as the first child of (declaration)
 (declaration
-  (variable_value) @name.definition.variable) @definition.variable
+  (variable_name) @name.definition.variable) @definition.variable
 
 ; Placeholder selector: %placeholder { ... }
-(placeholder_selector
-  (identifier) @name.definition.placeholder) @definition.placeholder
+(placeholder
+  (name) @name.definition.placeholder) @definition.placeholder
 
 ; Keyframes definition: @keyframes name { ... }
 (keyframes_statement
@@ -33,4 +34,3 @@
 ; ID selector
 (id_selector
   (id_name) @name.definition.id) @definition.id
-

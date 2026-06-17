@@ -41,6 +41,6 @@
 ; --- Class literals ---
 
 (class_literal
-  name: (identifier) @name.reference.class
+  (type_identifier) @name.reference.class
 ) @reference.class
 

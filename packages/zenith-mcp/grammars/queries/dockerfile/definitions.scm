@@ -18,8 +18,7 @@
 ; FROM … AS alias — defines a build-stage alias
 ; FROM image AS myalias  →  name node is image_alias, full node is from_instruction
 (from_instruction
-  alias: (image_alias
-    (unquoted_string) @name.definition.stage)) @definition.stage
+  as: (image_alias) @name.definition.stage) @definition.stage
 
 ; LABEL instruction — defines metadata key(s)
 (label_instruction

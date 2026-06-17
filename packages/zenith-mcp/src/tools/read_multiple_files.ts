@@ -2,7 +2,7 @@ import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
 import { getCharBudget } from '../core/shared.js';
-import { compressTextFile, truncateToBudget } from '../core/compression.js';
+import { compressForTool } from '../core/compression.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 interface ReadMultipleFilesArgs {
@@ -59,8 +59,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 .describe("File paths to read."),
             maxCharsPerFile: z.number().optional().describe("Max characters per file."),
             compression: z.boolean().optional().default(true).describe("Compress file-read output."),
-        }),
-        annotations: { readOnlyHint: true }
+        }).strict(),
+        annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false }
     }, async (args: ReadMultipleFilesArgs) => {
         const fileCount = args.paths.length;
         // Phase 1: Validate paths and get file sizes
@@ -99,14 +99,17 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const file of sortedBySize) {
                 const share = Math.floor(remainingBudget / remainingFiles);
                 const needed = Math.min(Math.ceil(file.size * 1.15), share);
-                budgets.set(file.requestedPath, needed);
+                // The fileCount*200 reservation pre-subtracted from totalBudget pays for
+                // per-entry overhead (the "- name\n" label + per-line "N:" prefixes).
+                // Credit it back per file — `needed` covers content bytes only.
+                budgets.set(file.requestedPath, needed + 200);
                 remainingBudget -= needed;
                 remainingFiles--;
             }
             perFileBudget = null;
             fileInfos.forEach(f => {
                 if (f.error === null) {
-                    f.budget = budgets.get(f.requestedPath) || Math.floor(totalBudget / fileCount);
+                    f.budget = budgets.get(f.requestedPath) || Math.floor(totalBudget / fileCount) + 200;
                 }
             });
         }
@@ -118,15 +121,17 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return `${fileLabel}\nERROR: ${fileInfo.error}`;
             }
             const validPath: string = fileInfo.validPath;
-            const budget = perFileBudget !== null ? perFileBudget : (fileInfo.budget || Math.floor(totalBudget / fileCount));
+            const budget = perFileBudget !== null ? perFileBudget : (fileInfo.budget || Math.floor(totalBudget / fileCount) + 200);
             const entryPrefix = `${fileLabel}\n`;
             try {
                 const byteLimit = budget * 4;
                 const fd = await fs.open(validPath, 'r');
                 let content: string;
+                let bytesRead: number;
                 try {
                     const buf = Buffer.allocUnsafe(byteLimit);
-                    const { bytesRead } = await fd.read(buf, 0, byteLimit, 0);
+                    const readResult = await fd.read(buf, 0, byteLimit, 0);
+                    bytesRead = readResult.bytesRead;
                     content = buf.slice(0, bytesRead).toString('utf8');
                 }
                 finally {
@@ -134,21 +139,36 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 }
 
                 const effectiveBudget = Math.max(0, budget - entryPrefix.length);
-                const truncatedResult = truncateToBudget(content, effectiveBudget);
-                content = truncatedResult.text;
-                const truncated = truncatedResult.truncated;
+
+                if (args.compression !== false && fileInfo.size <= byteLimit) {
+                    // fileInfo.size <= byteLimit ⇒ the WHOLE file was captured within the
+                    // IO cap (bytesRead === byteLimit at the exact boundary still means the
+                    // entire file is in hand), so TOON sees the real source and its line
+                    // numbers/markers tell the truth. Partial windows (size > cap) skip
+                    // compression (the markers would lie) and use the truncate fallback below.
+                    // Priority 0.5 seam: TOON gets RAW, FULL text + caller's budget. Its
+                    // return is emitted VERBATIM (no "N:" prefixing, no '[truncated]' suffix).
+                    const compressed = await compressForTool(validPath, content, effectiveBudget);
+                    if (compressed !== null) {
+                        return `${entryPrefix}${compressed}`;
+                    }
+                }
+
+                let truncated = false;
+                if (content.length > effectiveBudget) {
+                    let cutoff = content.lastIndexOf('\n', effectiveBudget);
+                    if (cutoff === -1) cutoff = effectiveBudget;
+                    content = content.slice(0, cutoff);
+                    truncated = true;
+                }
 
                 const lines = content.split('\n');
                 if (lines[lines.length - 1] === '')
                     lines.pop();
+                // Rule 10: line numbers are MANDATORY structural metadata — there is no
+                // opt-out. The "N:" prefix is always applied (anti-pattern table forbids a
+                // showLineNumbers toggle).
                 content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
-
-                if (args.compression !== false) {
-                    const compressed = await compressTextFile(validPath, content, effectiveBudget);
-                    if (compressed !== null) {
-                        content = compressed.text;
-                    }
-                }
 
                 return truncated
                     ? `${entryPrefix}${content}\n[truncated]`

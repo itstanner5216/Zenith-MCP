@@ -5,11 +5,25 @@ import { Dirent } from "fs";
 import { minimatch } from "minimatch";
 import { formatSize } from '../core/lib.js';
 import { getDefaultExcludes, isSensitive } from '../core/shared.js';
-import { isSupported, getFileSymbolSummary, getFileSymbols } from '../core/tree-sitter.js';
+import { isSupported } from '../core/tree-sitter.js';
+// Directory listings are a SYMBOL-FACT CONSUMER (they render summaries
+// from indexed symbol data). Per docs/toon-constraints §0.5 consumers
+// read from the DB-backed adapter — never the tree-sitter extractor.
+// Indexing is on-demand via `ensureIndexFresh` inside these helpers.
+import { loadFileDefinitions, loadFileSymbolSummary } from '../core/indexed-symbols.js';
 import type { ToolServer, ToolContext } from './types.js';
 
 const LIST_CAP = 250;
 const TREE_MAX_ENTRIES = 500;
+// Size cap for the symbol-summary path (review [V], cubic #36 — "Performance Is
+// Correctness"). loadFileDefinitions/loadFileSymbolSummary index+parse the file
+// via the DB-backed loaders; without a cap a single very large file in a listed
+// directory triggers unbounded parse/index work. Files over this threshold still
+// LIST — only their symbol summary is skipped. The value reuses the repo-wide
+// symbol/text-fact bound (search_files.ts and core/shared.ts both gate the SAME
+// loaders / file reads at `512 * 1024`), so directory listing and the other
+// symbol-fact consumers agree on what is "too big to parse".
+const MAX_FILE_SIZE = 512 * 1024;
 
 interface FileTreeEntry {
     name: string;
@@ -193,17 +207,33 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     const fullPath = path.join(currentPath, entry.name);
                     if (!isSupported(fullPath))
                         return [entry.name, null, null];
+                    // Size cap (review [V]): skip the symbol summary for files that
+                    // are too large to parse/index cheaply. The entry still lists —
+                    // we just return null symbols. Mirrors search_files.ts, which
+                    // gates the SAME loaders behind this stat. A stat failure is
+                    // treated as "skip symbols" (the entry still appears) rather
+                    // than silently parsing an unbounded file.
+                    let fileSize: number;
+                    try {
+                        const stats = await fs.stat(fullPath);
+                        fileSize = stats.size;
+                    }
+                    catch {
+                        return [entry.name, null, null];
+                    }
+                    if (fileSize > MAX_FILE_SIZE)
+                        return [entry.name, null, null];
                     try {
                         if (showSymbolNames) {
-                            const symbols = await getFileSymbols(fullPath, { kindFilter: 'def' });
+                            const symbols = await loadFileDefinitions(fullPath);
                             if (!symbols || symbols.length === 0)
                                 return [entry.name, null, null];
                             const names = symbols.slice(0, 50).map(s => `${s.name} (${s.type})`);
-                            const summary = await getFileSymbolSummary(fullPath);
+                            const summary = await loadFileSymbolSummary(fullPath);
                             return [entry.name, summary, names];
                         }
                         else {
-                            const summary = await getFileSymbolSummary(fullPath);
+                            const summary = await loadFileSymbolSummary(fullPath);
                             return [entry.name, summary, null];
                         }
                     }

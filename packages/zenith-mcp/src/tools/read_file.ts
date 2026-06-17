@@ -3,7 +3,7 @@ import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { readFileContent } from '../core/lib.js';
 import { getCharBudget } from '../core/shared.js';
-import { compressTextFile, truncateToBudget } from '../core/compression.js';
+import { compressForTool } from '../core/compression.js';
 import { ToolServer, ToolContext } from './types.js';
 
 interface LineWindow {
@@ -97,25 +97,33 @@ export function register(server: ToolServer, ctx: ToolContext) {
         }
 
         let content = await readFileContent(validPath);
-        let truncated = false;
-        if (content.length > maxChars) {
-            const truncatedResult = truncateToBudget(content, maxChars);
-            content = truncatedResult.text;
-            truncated = true;
-        }
 
-        const lines = content.split('\n');
-        if (lines[lines.length - 1] === '')
-            lines.pop();
-        content = lines.map((line: string, i: number) => `${i + 1}:${line}`).join('\n');
-
-        if (args.compression) {
-            const compressed = await compressTextFile(validPath, content, maxChars);
+        // Transport/IO bound (same ×4 family as read_multiple_files' byteLimit): the
+        // engine's intentional 70% retention floor can exceed the requested budget,
+        // so cap the attempt at 4× — beyond it the truncate fallback below applies.
+        // This is a transport ceiling, not a compression decision (TOON still owns
+        // usefulness for everything within the bound).
+        if (args.compression && content.length <= maxChars * 4) {
+            // Priority 0.5 seam: TOON gets the RAW, FULL text and the caller's budget.
+            // It owns every compression decision, including fit (returns null when its
+            // best view doesn't serve this request) — and its return is emitted
+            // VERBATIM: no "N:" prefixing, no '[truncated]' suffix, no re-truncation.
+            const compressed = await compressForTool(validPath, content, maxChars);
             if (compressed !== null) {
-                content = compressed.text;
+                return { content: [{ type: "text" as const, text: compressed }] };
             }
         }
 
+        let truncated = false;
+        if (content.length > maxChars) {
+            let cutoff = content.lastIndexOf('\n', maxChars);
+            if (cutoff === -1) cutoff = maxChars;
+            content = content.slice(0, cutoff);
+            truncated = true;
+        }
+        const lines = content.split('\n');
+        if (lines[lines.length - 1] === '') lines.pop();
+        content = lines.map((line: string, i: number) => `${i + 1}:${line}`).join('\n');
         const text = truncated ? `${content}\n[truncated]` : content;
         return {
             content: [{ type: "text" as const, text }],

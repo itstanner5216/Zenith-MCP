@@ -16,12 +16,18 @@ function hasCode(e: unknown): e is { code: string } {
 export interface FilesystemContext {
     getAllowedDirectories(): string[];
     setAllowedDirectories(directories: string[]): void;
+    setSandboxEnabled(enabled: boolean): void;
     validatePath(requestedPath: string): Promise<string>;
     validateNewFilePath(requestedPath: string): Promise<string>;
 }
 
 export function createFilesystemContext(initialAllowedDirectories: string[] = []): FilesystemContext {
     let _allowedDirectories = [...initialAllowedDirectories];
+    // Access enforcement is OPT-IN. Default off so allowed directories stay
+    // project-context hints (the historical "Zenith is intentionally not a
+    // sandbox" behavior) until an operator explicitly enables the `sandbox`
+    // config flag — registerEnabledTools wires that flag in via setSandboxEnabled().
+    let _sandboxEnabled = false;
 
     function getAllowedDirectories() {
         return [..._allowedDirectories];
@@ -31,6 +37,45 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         _allowedDirectories = [...directories];
     }
 
+    function setSandboxEnabled(enabled: boolean) {
+        _sandboxEnabled = enabled;
+    }
+
+    async function isInsideAllowed(candidate: string): Promise<boolean> {
+        // Access enforcement is OPT-IN via the `sandbox` config flag. When it is
+        // disabled (the default), allowed directories are project-context hints
+        // only and never block filesystem access — this decouples "which dirs are
+        // known" (always populated from CLI args / MCP roots) from "is access
+        // enforced" (only when the operator opts in). Historically these were
+        // conflated: any configured dir silently turned enforcement on.
+        if (!_sandboxEnabled) return true;
+        // Sandbox enabled but no allowlist configured: nothing to gate against, so
+        // stay permissive for callers (CLIs, tests) that enable the sandbox without
+        // supplying dirs. When directories ARE supplied, the candidate must resolve
+        // inside one of them — checked with realpath on BOTH sides and a
+        // path-separator boundary so '/tmp/foo' does not match '/tmp/foobar'.
+        if (_allowedDirectories.length === 0) return true;
+        for (const allowed of _allowedDirectories) {
+            const expanded = expandHome(allowed);
+            const absoluteAllowed = path.isAbsolute(expanded)
+                ? path.resolve(expanded)
+                : path.resolve(process.cwd(), expanded);
+            let realAllowed: string;
+            try {
+                realAllowed = await fs.realpath(absoluteAllowed);
+            } catch {
+                // Allowed dir is missing or unreadable: fall back to lexical resolve
+                // so the allowlist is still meaningful when symlink resolution fails.
+                realAllowed = absoluteAllowed;
+            }
+            const withSep = realAllowed.endsWith(path.sep) ? realAllowed : realAllowed + path.sep;
+            if (candidate === realAllowed || candidate.startsWith(withSep)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     async function validatePath(requestedPath: string) {
         const expandedPath = expandHome(requestedPath);
         const absolute = path.isAbsolute(expandedPath)
@@ -38,20 +83,30 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
             : path.resolve(process.cwd(), expandedPath);
         normalizePath(absolute);
 
-        // Zenith is intentionally not a sandbox. MCP roots / CLI directories are kept
-        // as project-context hints only; they must never block filesystem access.
         try {
             const realPath = await fs.realpath(absolute);
             normalizePath(realPath);
+            if (!(await isInsideAllowed(realPath))) {
+                throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+            }
             return realPath;
         } catch (error: unknown) {
+            if (error instanceof Error && error.message.startsWith('Access denied')) {
+                throw error;
+            }
             if (hasCode(error) && error.code === 'ENOENT') {
                 const parentDir = path.dirname(absolute);
                 try {
                     const realParentPath = await fs.realpath(parentDir);
                     normalizePath(realParentPath);
+                    if (!(await isInsideAllowed(realParentPath))) {
+                        throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+                    }
                     return absolute;
                 } catch (parentError) {
+                    if (parentError instanceof Error && parentError.message.startsWith('Access denied')) {
+                        throw parentError;
+                    }
                     // Re-throw access-denied and other non-filesystem errors unchanged.
                     // Wrap filesystem errors (ENOENT, EACCES, etc.) with a friendlier message.
                     if (!hasCode(parentError)) throw parentError;
@@ -88,13 +143,32 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         normalizePath(absolute);
         const { realAncestor, missingSegments } = await resolveNearestExistingAncestor(absolute);
         normalizePath(realAncestor);
-        return missingSegments.reduce(
+        // The nearest existing ancestor is the only segment of a not-yet-existing
+        // target that can be realpath-resolved, so it is the symlink-collapsed
+        // anchor the allowlist must gate — exactly as validatePath gates the
+        // realpath of an ENOENT target's existing parent before returning. When
+        // _allowedDirectories is empty, isInsideAllowed returns true (opt-in
+        // sandbox: no allowlist configured => no enforcement, no behavior change
+        // for the write path).
+        if (!(await isInsideAllowed(realAncestor))) {
+            throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+        }
+        const resolvedTarget = missingSegments.reduce(
             (currentPath, segment) => path.join(currentPath, segment),
             realAncestor,
         );
+        normalizePath(resolvedTarget);
+        // Re-check the reconstructed target itself. With the ancestor already
+        // confirmed inside an allowed dir the descent stays inside it, but
+        // checking the returned path mirrors validatePath gating its returned
+        // realPath and keeps the write contract identical to the read contract.
+        if (!(await isInsideAllowed(resolvedTarget))) {
+            throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
+        }
+        return resolvedTarget;
     }
 
-    return { getAllowedDirectories, setAllowedDirectories, validatePath, validateNewFilePath };
+    return { getAllowedDirectories, setAllowedDirectories, setSandboxEnabled, validatePath, validateNewFilePath };
 }
 
 export function formatSize(bytes: number): string {

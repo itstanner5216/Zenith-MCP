@@ -3,27 +3,27 @@
 ; Captures table, function, view, index, and type definitions.
 
 ; --- CREATE TABLE ---
-(create_table_statement
+(create_table
   (object_reference
     name: (identifier) @name.definition.table)) @definition.table
 
 ; --- CREATE FUNCTION ---
-(create_function_statement
+(create_function
   (object_reference
     name: (identifier) @name.definition.function)) @definition.function
 
 ; --- CREATE VIEW ---
-(create_view_statement
+(create_view
   (object_reference
     name: (identifier) @name.definition.view)) @definition.view
 
 ; --- CREATE INDEX ---
-(create_index_statement
+(create_index
   (object_reference
     name: (identifier) @name.definition.index)) @definition.index
 
 ; --- CREATE TYPE ---
-(create_type_statement
+(create_type
   (object_reference
     name: (identifier) @name.definition.type)) @definition.type
 

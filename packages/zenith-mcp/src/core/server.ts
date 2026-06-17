@@ -137,6 +137,13 @@ export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): 
     patchToolsInConfig(syncedConfig.tools);
   }
 
+  // ── Sandbox enforcement is OPT-IN via config (default off) ───────────
+  // Wire the explicit `sandbox` flag into the filesystem context so access
+  // enforcement is governed by operator intent, NOT by the mere presence of
+  // allowed directories (those are always populated from CLI args / MCP roots
+  // and exist purely as project-context hints). Set before any tool registers.
+  ctx.setSandboxEnabled?.(syncedConfig.sandbox);
+
   // ── Auto-write adapter setup (guarded by config flag) ────────────────
   if (syncedConfig.auto_write.status) {
     const resolvedBackupDir = syncedConfig.auto_write.backup_dir

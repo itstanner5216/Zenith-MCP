@@ -174,6 +174,137 @@ export function initSymbolSchema(conn: DbConnection): void {
             throw error;
         }
     }
+
+    // --- Schema version + migration ladder ---
+    //
+    // schema_version is a single-row table keyed on id=1 (review #5). The CHECK
+    // constraint + ON CONFLICT(id) write make the version strictly deterministic:
+    // there is exactly one row, ever. A pre-existing database may still carry the
+    // OLD shape `schema_version(version INTEGER NOT NULL)` with no `id` column —
+    // `CREATE TABLE IF NOT EXISTS` will NOT alter that existing table, so we detect
+    // the old shape explicitly and migrate it in place before reading the version.
+    const currentVersion = normalizeSchemaVersionTable(db);
+
+    if (currentVersion < 1) {
+        // v0 → v1: extended symbol columns + new child tables.
+        //
+        // Review #6: the entire v0→v1 ladder (column ALTERs + child-table DDL +
+        // the schema_version write) runs inside one transaction. SQLite DDL is
+        // transactional, so a crash mid-migration rolls the whole ladder back and
+        // the version is NOT advanced — leaving currentVersion at 0 so the next
+        // init re-runs the migration cleanly. The id=1 row is only written after
+        // every statement below has succeeded.
+        runTransaction(conn, () => {
+            const columnMigrations = [
+                'ALTER TABLE symbols ADD COLUMN capture_tag TEXT',
+                'ALTER TABLE symbols ADD COLUMN body_hash TEXT',
+                'ALTER TABLE symbols ADD COLUMN parent_symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE',
+                'ALTER TABLE symbols ADD COLUMN visibility TEXT',
+                'ALTER TABLE edges ADD COLUMN callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL',
+            ];
+            for (const sql of columnMigrations) {
+                try {
+                    db.exec(sql);
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw e;
+                }
+            }
+            db.exec(`
+            CREATE TABLE IF NOT EXISTS symbol_structures (
+                symbol_id INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
+                params_json TEXT, return_text TEXT, decorators_json TEXT,
+                modifiers_json TEXT, generics_text TEXT, parent_kind TEXT, parent_name TEXT
+            );
+            CREATE TABLE IF NOT EXISTS anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+                kind TEXT, line INTEGER, text TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_anchors_symbol ON anchors(symbol_id);
+            CREATE TABLE IF NOT EXISTS imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
+                module TEXT, imported_names_json TEXT, line INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
+            CREATE INDEX IF NOT EXISTS idx_imports_module ON imports(module);
+            CREATE TABLE IF NOT EXISTS local_scopes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+                scope_kind TEXT, start_line INTEGER, end_line INTEGER,
+                parameters_json TEXT, locals_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_local_scopes_symbol ON local_scopes(symbol_id);
+            CREATE TABLE IF NOT EXISTS injections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
+                host_lang TEXT, injected_lang TEXT,
+                start_line INTEGER, end_line INTEGER, start_byte INTEGER, end_byte INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_injections_file ON injections(file_path);
+            CREATE INDEX IF NOT EXISTS idx_edges_callee ON edges(callee_symbol_id);
+            -- v3 remediation: project_roots is also a v1 addition (project-DB registry,
+            -- not the dormant initGlobalSchema variant). Idempotent CREATE; safe if a
+            -- prior partial run already added it.
+            CREATE TABLE IF NOT EXISTS project_roots (
+                root_path TEXT PRIMARY KEY,
+                name TEXT,
+                created_at INTEGER
+            );
+            `);
+            // Advance to v1 idempotently against the single-row table. ON CONFLICT(id)
+            // upserts the lone id=1 row, so re-running this never accumulates rows and
+            // never needs a separate INSERT-vs-UPDATE branch.
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(1);
+        });
+    }
+}
+
+/**
+ * Normalizes the `schema_version` table to its single-row shape and returns the
+ * current schema version (0 if the table was just created or held no row).
+ *
+ * Single-row shape (review #5):
+ *   schema_version(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)
+ *
+ * Old shape that may already exist on disk:
+ *   schema_version(version INTEGER NOT NULL)   -- no `id` column, no PK/UNIQUE
+ *
+ * Because `CREATE TABLE IF NOT EXISTS` is a no-op when a table already exists, an
+ * old-shape table would silently survive. We therefore inspect the live columns
+ * via PRAGMA table_info: if an `id` column is absent we read the highest stored
+ * version (collapsing any duplicate rows the old shape allowed), drop the table,
+ * recreate it single-row, and reinsert that version on the id=1 row. The whole
+ * normalization is wrapped in a transaction so a crash cannot leave the table
+ * dropped-but-not-recreated.
+ */
+function normalizeSchemaVersionTable(db: DatabaseSync): number {
+    const columns = db.prepare('PRAGMA table_info(schema_version)').all() as Array<{ name: string }>;
+    const tableExists = columns.length > 0;
+    const hasIdColumn = columns.some((c) => c.name === 'id');
+
+    if (tableExists && !hasIdColumn) {
+        // Old shape detected: migrate in place, preserving the recorded version.
+        const legacyRow = db.prepare('SELECT MAX(version) AS version FROM schema_version').get() as { version: number | null } | undefined;
+        const legacyVersion = legacyRow && legacyRow.version !== null ? legacyRow.version : 0;
+        db.exec('BEGIN');
+        try {
+            db.exec('DROP TABLE schema_version');
+            db.exec('CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?)').run(legacyVersion);
+            db.exec('COMMIT');
+        } catch (e) {
+            db.exec('ROLLBACK');
+            throw e;
+        }
+        return legacyVersion;
+    }
+
+    // Fresh table (or already single-row): create-if-missing then read id=1.
+    db.exec('CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL)');
+    const row = db.prepare('SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
+    return row ? row.version : 0;
 }
 
 /**
@@ -435,6 +566,51 @@ export function findStructuralCandidates(
         .all(...params) as { name: string; file_path: string; line: number; end_line: number }[];
 }
 
+/**
+ * Get all symbols (defs and refs) for a single file with the full
+ * tree-sitter symbol shape: name, kind, type, line, endLine, column.
+ *
+ * SQL: SELECT name, kind, type, line, end_line AS endLine, column FROM
+ *      symbols WHERE file_path = ? ORDER BY line
+ *
+ * This is the DB-backed counterpart to the tree-sitter `getSymbols()`
+ * extractor — consumers should call `ensureIndexFresh()` first to
+ * guarantee the rows reflect the current file content.
+ */
+export function getSymbolsInFile(
+    conn: DbConnection,
+    filePath: string
+): Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }> {
+    return prepareOrCache(
+        conn,
+        `SELECT name, kind, type, line, end_line AS endLine, column FROM symbols WHERE file_path = ? ORDER BY line`
+    ).all(filePath) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
+}
+
+/**
+ * Find symbols by exact name within a single file, optionally filtered
+ * by kind. Used by consumers that previously called the tree-sitter
+ * `findSymbol()` extractor for single-file symbol lookup.
+ *
+ * SQL: SELECT name, kind, type, line, end_line AS endLine, column FROM
+ *      symbols WHERE file_path = ? AND name = ? [AND kind = ?] ORDER BY line
+ */
+export function findSymbolsByNameInFile(
+    conn: DbConnection,
+    filePath: string,
+    name: string,
+    kindFilter?: string
+): Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }> {
+    let sql = `SELECT name, kind, type, line, end_line AS endLine, column FROM symbols WHERE file_path = ? AND name = ?`;
+    const params: string[] = [filePath, name];
+    if (kindFilter !== undefined) {
+        sql += ' AND kind = ?';
+        params.push(kindFilter);
+    }
+    sql += ' ORDER BY line';
+    return prepareOrCache(conn, sql).all(...params) as Array<{ name: string; kind: string; type: string; line: number; endLine: number; column: number }>;
+}
+
 // ---------------------------------------------------------------------------
 // Edges Table Operations
 // ---------------------------------------------------------------------------
@@ -511,7 +687,7 @@ export function getFileBlockEdges(
             edges.push({
                 from: fromIdx,
                 to: toIdx,
-                weight: Math.sqrt(row.call_count), // Diminishing returns for many calls
+                weight: row.call_count, // Raw call count; sqrt damping is TOON's responsibility
                 kind: 'call'
             });
         } else {
@@ -840,4 +1016,318 @@ export function execRaw(conn: DbConnection, sql: string): void {
  */
 export function queryRaw(conn: DbConnection, sql: string, ...params: any[]): any[] {
     return handle(conn).prepare(sql).all(...params);
+}
+
+// ---------------------------------------------------------------------------
+// Symbol Extended Columns (v0 → v1)
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: UPDATE symbols SET capture_tag = ?, body_hash = ?, parent_symbol_id = ?, visibility = ? WHERE id = ?
+ */
+export function updateSymbolExtras(
+    conn: DbConnection,
+    symbolId: number,
+    extras: { captureTag?: string | null; bodyHash?: string | null; parentSymbolId?: number | null; visibility?: string | null }
+): void {
+    prepareOrCache(conn,
+        'UPDATE symbols SET capture_tag = ?, body_hash = ?, parent_symbol_id = ?, visibility = ? WHERE id = ?'
+    ).run(extras.captureTag ?? null, extras.bodyHash ?? null, extras.parentSymbolId ?? null, extras.visibility ?? null, symbolId);
+}
+
+// ---------------------------------------------------------------------------
+// Symbol Structures Table Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: INSERT OR REPLACE INTO symbol_structures (symbol_id, params_json, return_text, decorators_json, modifiers_json, generics_text, parent_kind, parent_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ */
+export function insertSymbolStructure(
+    conn: DbConnection,
+    row: { symbolId: number; paramsJson: string; returnText: string | null; decoratorsJson: string; modifiersJson: string; genericsText: string | null; parentKind: string | null; parentName: string | null }
+): void {
+    prepareOrCache(conn,
+        'INSERT OR REPLACE INTO symbol_structures (symbol_id, params_json, return_text, decorators_json, modifiers_json, generics_text, parent_kind, parent_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(row.symbolId, row.paramsJson, row.returnText, row.decoratorsJson, row.modifiersJson, row.genericsText, row.parentKind, row.parentName);
+}
+
+export interface SymbolStructureRow {
+    symbol_id: number;
+    params: string[];
+    returnText: string | null;
+    decorators: string[];
+    modifiers: string[];
+    genericsText: string | null;
+    parentKind: string | null;
+    parentName: string | null;
+}
+
+/**
+ * SQL: SELECT * FROM symbol_structures WHERE symbol_id = ?
+ */
+export function getSymbolStructure(conn: DbConnection, symbolId: number): SymbolStructureRow | null {
+    const row = prepareOrCache(conn, 'SELECT * FROM symbol_structures WHERE symbol_id = ?').get(symbolId) as {
+        symbol_id: number;
+        params_json: string;
+        return_text: string | null;
+        decorators_json: string;
+        modifiers_json: string;
+        generics_text: string | null;
+        parent_kind: string | null;
+        parent_name: string | null;
+    } | undefined;
+    if (!row) return null;
+    return {
+        symbol_id: row.symbol_id,
+        params: JSON.parse(row.params_json || '[]'),
+        returnText: row.return_text,
+        decorators: JSON.parse(row.decorators_json || '[]'),
+        modifiers: JSON.parse(row.modifiers_json || '[]'),
+        genericsText: row.generics_text,
+        parentKind: row.parent_kind,
+        parentName: row.parent_name,
+    };
+}
+
+/**
+ * SQL: SELECT ss.*, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def' [AND s.type = ?]
+ */
+export function findSymbolStructuresByName(conn: DbConnection, name: string, kind?: string): Array<SymbolStructureRow & { file_path: string; line: number; end_line: number }> {
+    let sql = `SELECT ss.*, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def'`;
+    const params: string[] = [name];
+    if (kind) { sql += ' AND s.type = ?'; params.push(kind); }
+    // NOTE (v3 remediation): use prepareOrCache for uniformity with every other
+    // adapter function in this file. Dynamic SQL is still cached — the cache key is
+    // the final SQL string, so the 1-param and 2-param shapes get distinct slots.
+    const rows = prepareOrCache(conn, sql).all(...params) as Array<{
+        symbol_id: number;
+        params_json: string;
+        return_text: string | null;
+        decorators_json: string;
+        modifiers_json: string;
+        generics_text: string | null;
+        parent_kind: string | null;
+        parent_name: string | null;
+        file_path: string;
+        line: number;
+        end_line: number;
+    }>;
+    return rows.map(row => ({
+        symbol_id: row.symbol_id,
+        params: JSON.parse(row.params_json || '[]'),
+        returnText: row.return_text,
+        decorators: JSON.parse(row.decorators_json || '[]'),
+        modifiers: JSON.parse(row.modifiers_json || '[]'),
+        genericsText: row.generics_text,
+        parentKind: row.parent_kind,
+        parentName: row.parent_name,
+        file_path: row.file_path,
+        line: row.line,
+        end_line: row.end_line,
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Anchors Table Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: INSERT INTO anchors (symbol_id, kind, line, text) VALUES (?, ?, ?, ?)
+ */
+export function insertAnchor(conn: DbConnection, row: { symbolId: number; kind: string; line: number; text: string }): void {
+    prepareOrCache(conn, 'INSERT INTO anchors (symbol_id, kind, line, text) VALUES (?, ?, ?, ?)').run(row.symbolId, row.kind, row.line, row.text);
+}
+
+/**
+ * SQL: SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line
+ */
+export function getAnchorsForFile(conn: DbConnection, filePath: string): Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; text: string }> {
+    return prepareOrCache(conn, `SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; text: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Imports Table Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: INSERT INTO imports (file_path, module, imported_names_json, line) VALUES (?, ?, ?, ?)
+ */
+export function insertImport(conn: DbConnection, row: { filePath: string; module: string; importedNamesJson: string; line: number }): void {
+    prepareOrCache(conn, 'INSERT INTO imports (file_path, module, imported_names_json, line) VALUES (?, ?, ?, ?)').run(row.filePath, row.module, row.importedNamesJson, row.line);
+}
+
+/**
+ * SQL: SELECT module, imported_names_json, line FROM imports WHERE file_path = ? ORDER BY line
+ */
+export function getImportsForFile(conn: DbConnection, filePath: string): Array<{ module: string; importedNames: string[]; line: number }> {
+    const rows = prepareOrCache(conn, 'SELECT module, imported_names_json, line FROM imports WHERE file_path = ? ORDER BY line').all(filePath) as Array<{ module: string; imported_names_json: string; line: number }>;
+    return rows.map(r => ({ module: r.module, importedNames: JSON.parse(r.imported_names_json || '[]'), line: r.line }));
+}
+
+/**
+ * SQL: SELECT DISTINCT file_path FROM imports WHERE module = ?
+ */
+export function getFilesImporting(conn: DbConnection, module: string): { file_path: string }[] {
+    return prepareOrCache(conn, 'SELECT DISTINCT file_path FROM imports WHERE module = ?').all(module) as { file_path: string }[];
+}
+
+// ---------------------------------------------------------------------------
+// Injections Table Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: INSERT INTO injections (file_path, host_lang, injected_lang, start_line, end_line, start_byte, end_byte) VALUES (?, ?, ?, ?, ?, ?, ?)
+ */
+export function insertInjection(conn: DbConnection, row: { filePath: string; hostLang: string; injectedLang: string; startLine: number; endLine: number; startByte: number; endByte: number }): void {
+    prepareOrCache(conn, 'INSERT INTO injections (file_path, host_lang, injected_lang, start_line, end_line, start_byte, end_byte) VALUES (?, ?, ?, ?, ?, ?, ?)').run(row.filePath, row.hostLang, row.injectedLang, row.startLine, row.endLine, row.startByte, row.endByte);
+}
+
+/**
+ * SQL: SELECT host_lang, injected_lang, start_line, end_line, start_byte, end_byte FROM injections WHERE file_path = ?
+ */
+export function getInjectionsForFile(conn: DbConnection, filePath: string): Array<{ host_lang: string; injected_lang: string; start_line: number; end_line: number; start_byte: number; end_byte: number }> {
+    return prepareOrCache(conn, 'SELECT host_lang, injected_lang, start_line, end_line, start_byte, end_byte FROM injections WHERE file_path = ?').all(filePath) as Array<{ host_lang: string; injected_lang: string; start_line: number; end_line: number; start_byte: number; end_byte: number }>;
+}
+
+// ---------------------------------------------------------------------------
+// Local Scopes Table Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: INSERT INTO local_scopes (symbol_id, scope_kind, start_line, end_line, parameters_json, locals_json) VALUES (?, ?, ?, ?, ?, ?)
+ */
+export function insertLocalScope(conn: DbConnection, row: { symbolId: number | null; scopeKind: string; startLine: number; endLine: number; parametersJson: string; localsJson: string }): void {
+    prepareOrCache(conn, 'INSERT INTO local_scopes (symbol_id, scope_kind, start_line, end_line, parameters_json, locals_json) VALUES (?, ?, ?, ?, ?, ?)').run(row.symbolId, row.scopeKind, row.startLine, row.endLine, row.parametersJson, row.localsJson);
+}
+
+/**
+ * SQL: SELECT scope_kind, start_line, end_line, parameters_json, locals_json FROM local_scopes WHERE symbol_id = ?
+ */
+export function getLocalScopesForSymbol(conn: DbConnection, symbolId: number): Array<{ scope_kind: string; start_line: number; end_line: number; parameters: unknown[]; locals: unknown[] }> {
+    const rows = prepareOrCache(conn, 'SELECT scope_kind, start_line, end_line, parameters_json, locals_json FROM local_scopes WHERE symbol_id = ?').all(symbolId) as Array<{ scope_kind: string; start_line: number; end_line: number; parameters_json: string; locals_json: string }>;
+    return rows.map(r => ({ scope_kind: r.scope_kind, start_line: r.start_line, end_line: r.end_line, parameters: JSON.parse(r.parameters_json || '[]'), locals: JSON.parse(r.locals_json || '[]') }));
+}
+
+// ---------------------------------------------------------------------------
+// Edge Resolution (callee_symbol_id)
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: SELECT e.id, e.referenced_name FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.file_path = ? AND e.callee_symbol_id IS NULL
+ */
+export function getUnresolvedEdges(conn: DbConnection, filePath: string): Array<{ id: number; referenced_name: string }> {
+    return prepareOrCache(conn, `SELECT e.id, e.referenced_name FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.file_path = ? AND e.callee_symbol_id IS NULL`).all(filePath) as Array<{ id: number; referenced_name: string }>;
+}
+
+/**
+ * Whole-DB counterpart to getUnresolvedEdges (review #18, "Performance Is
+ * Correctness"): returns EVERY unresolved edge in one query so the resolver can
+ * sweep the entire database in a single pass instead of re-querying per file
+ * (the N+1 the per-file loop caused). The "unresolved" predicate mirrors
+ * getUnresolvedEdges exactly — `e.callee_symbol_id IS NULL` — minus the
+ * per-file filter. The container symbol's file_path is projected as
+ * `caller_file_path` so scope-aware resolution (#17) can prefer same-file
+ * callees without a second query per edge.
+ *
+ * SQL: SELECT e.id, e.referenced_name, s.file_path AS caller_file_path FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.callee_symbol_id IS NULL
+ */
+export function getAllUnresolvedEdges(conn: DbConnection): Array<{ id: number; referenced_name: string; caller_file_path: string }> {
+    return prepareOrCache(conn, `SELECT e.id, e.referenced_name, s.file_path AS caller_file_path FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE e.callee_symbol_id IS NULL`).all() as Array<{ id: number; referenced_name: string; caller_file_path: string }>;
+}
+
+/**
+ * SQL: SELECT id FROM symbols WHERE name = ? AND kind = ? LIMIT 2
+ * Returns the single matching id, or null if zero or more than one match.
+ */
+export function findSymbolByNameUnique(conn: DbConnection, name: string, kind: string): { id: number } | null {
+    const rows = prepareOrCache(conn, 'SELECT id FROM symbols WHERE name = ? AND kind = ? LIMIT 2').all(name, kind) as { id: number }[];
+    return rows.length === 1 ? rows[0]! : null;
+}
+
+/**
+ * Non-unique counterpart to findSymbolByNameUnique: returns EVERY def (or
+ * other-kind) symbol matching `name`, with its id and file_path. No LIMIT — the
+ * full candidate set is intentionally returned so Wave B's resolver (review
+ * #16/#17) can do scope-aware and dot-qualified disambiguation in TypeScript
+ * (e.g. prefer the same-file/module callee, or filter by parent == qualifier).
+ *
+ * SQL: SELECT id, file_path AS filePath FROM symbols WHERE name = ? AND kind = ?
+ */
+export function findDefsByName(conn: DbConnection, name: string, kind = 'def'): { id: number; filePath: string }[] {
+    return prepareOrCache(conn, 'SELECT id, file_path AS filePath FROM symbols WHERE name = ? AND kind = ?')
+        .all(name, kind) as { id: number; filePath: string }[];
+}
+
+/**
+ * Look up the parent definition of a symbol via parent_symbol_id.
+ * Used by resolve.ts to enforce the strict dot-qualified rule:
+ *   "Foo.bar" only links if shortTarget(bar).parent.name === "Foo".
+ * Returns null if the symbol has no parent or the parent row is missing.
+ */
+export function findSymbolParent(conn: DbConnection, symbolId: number): { id: number; name: string } | null {
+    const row = prepareOrCache(conn,
+        'SELECT p.id AS id, p.name AS name FROM symbols c JOIN symbols p ON p.id = c.parent_symbol_id WHERE c.id = ?'
+    ).get(symbolId) as { id: number; name: string } | undefined;
+    return row ?? null;
+}
+
+/**
+ * SQL: UPDATE edges SET callee_symbol_id = ? WHERE id = ?
+ */
+export function updateEdgeCalleeSymbol(conn: DbConnection, edgeId: number, calleeSymbolId: number): void {
+    prepareOrCache(conn, 'UPDATE edges SET callee_symbol_id = ? WHERE id = ?').run(calleeSymbolId, edgeId);
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate Facts Read (for TOON integration)
+// ---------------------------------------------------------------------------
+
+export interface FileFacts {
+    // NOTE: defs carries `captureTag` so the compression seam can forward it to
+    // zenith-toon without a second query. Sourced from the v0→v1 `capture_tag`
+    // column on `symbols`.
+    defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
+    edges: Array<{ caller_name: string; callee_name: string; call_count: number }>;
+    anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
+    imports: Array<{ module: string; importedNames: string[]; line: number }>;
+    injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
+}
+
+export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
+    const defs = prepareOrCache(conn,
+        `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
+         FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
+    ).all(filePath) as FileFacts['defs'];
+    const edges = prepareOrCache(conn, `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count FROM edges e JOIN symbols caller ON caller.id = e.container_def_id WHERE caller.file_path = ? AND caller.kind = 'def' GROUP BY caller.name, e.referenced_name`).all(filePath) as FileFacts['edges'];
+    const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
+    const imports = getImportsForFile(conn, filePath);
+    const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];
+    return { defs, edges, anchors, imports, injections };
+}
+
+// ---------------------------------------------------------------------------
+// Schema Version
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads the single-row schema_version table (review #5). The id=1 predicate is
+ * the deterministic counterpart to the old LIMIT 1; both return the lone row now
+ * that the table is single-row by construction.
+ *
+ * On a fresh, un-migrated database the schema_version table does not exist yet,
+ * so the prepare/get below throws "no such table" (review #26, #37). Treat that
+ * as version 0 — the un-migrated baseline — while rethrowing every other error
+ * so genuine failures are never silently swallowed.
+ *
+ * SQL: SELECT version FROM schema_version WHERE id = 1
+ */
+export function getSchemaVersion(conn: DbConnection): number {
+    try {
+        const row = prepareOrCache(conn, 'SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
+        return row?.version ?? 0;
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('no such table')) return 0;
+        throw e;
+    }
 }

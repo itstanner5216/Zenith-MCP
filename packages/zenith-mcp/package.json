@@ -30,7 +30,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "start": "node dist/cli/stdio.js",
-    "start:http": "node dist/server/http.js"
+    "start:http": "node dist/server/http.js",
+    "verify-grammar-pins": "node dist/scripts/verify-grammar-pins.js"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",

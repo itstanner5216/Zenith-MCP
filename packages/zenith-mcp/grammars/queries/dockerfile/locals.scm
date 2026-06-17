@@ -17,6 +17,5 @@
     name: (unquoted_string) @local.definition))
 
 ; Variable usage
-(variable
-  (variable_name) @local.reference)
+(variable) @local.reference
 

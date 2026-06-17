@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { openMemoryDb, closeDb, execRaw, queryRaw } from '../dist/core/db-adapter.js';
+import { openMemoryDb, closeDb, execRaw, queryRaw, initSymbolSchema } from '../dist/core/db-adapter.js';
 
 function mkTmpGitRepo() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'symidx-test-'));
@@ -247,28 +247,7 @@ describe('symbol-index — ensureIndexFresh stale purge', () => {
     beforeEach(() => {
         repoDir = mkTmpGitRepo();
         db = openMemoryDb();
-        execRaw(db, `
-            CREATE TABLE IF NOT EXISTS files (
-                path TEXT PRIMARY KEY,
-                hash TEXT,
-                last_indexed INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS symbols (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                kind TEXT,
-                type TEXT,
-                file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
-                line INTEGER,
-                end_line INTEGER,
-                column INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS edges (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                container_def_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
-                referenced_name TEXT
-            );
-        `);
+        initSymbolSchema(db);
     });
 
     afterEach(() => {

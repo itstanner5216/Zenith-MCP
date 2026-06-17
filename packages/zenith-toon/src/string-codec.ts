@@ -9,7 +9,7 @@
 
 import { blake2bHash, NORMALIZERS } from './utils.js';
 import { SageRank } from './sagerank.js';
-import type { StructureBlock, ASTEdge, CompressionContext } from './types.js';
+import type { StructureBlock, Anchor, ASTEdge, CompressionContext, RawFileFacts, CompressFileRequest } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Detection patterns
@@ -60,7 +60,7 @@ const _SOURCE_IMPORT_RE = /^\s*(?:from\s+\S|\bimport\s|\brequire\(|export\s*\{)/
 const _DECORATOR_RE = /^\s*@\w+/;
 const _DOC_TAG_RE = /^\s*(?:\*\s*)?@(?:param|returns?|type|template|typedef|property|throws?)\b/;
 
-const _MIN_OMISSION_THRESHOLD = 10;
+const _MIN_OMISSION_THRESHOLD = 6;
 
 // ---------------------------------------------------------------------------
 // Content Type Detection
@@ -180,10 +180,11 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     other.push([i, line]);
   }
 
-  // Phase 2: Calculate header cost (headers always included)
+  // Phase 2: Calculate header cost (headers always included).
+  // Cost includes the `N. ` prefix width emitted per shown line.
   let headerCost = 0;
-  for (const [, line] of headers) {
-    headerCost += line.length + 1;
+  for (const [hi, line] of headers) {
+    headerCost += line.length + (String(hi + 1).length + 2) + 1;
   }
   const frameBudget = Math.max(0, budget - headerCost);
 
@@ -195,7 +196,7 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     selectedFrameIndices = [];
     let used = 0;
     for (let fi = 0; fi < frames.length; fi++) {
-      const lineLen = frames[fi]![1].length + 1;
+      const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
       if (used + lineLen <= frameBudget) {
         selectedFrameIndices.push(fi);
         used += lineLen;
@@ -233,13 +234,13 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     
     // First pass: add SageRank-selected frames
     for (const fi of result.selectedIndices) {
-      const lineLen = frames[fi]![1].length + 1;
+      const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
       if (used + lineLen <= frameBudget) {
         selectedFrameIndices.push(fi);
         used += lineLen;
       }
     }
-    
+
     // Second pass: if budget remains, fill with highest-scored non-selected
     if (used < frameBudget) {
       const scores = result.scores;
@@ -248,9 +249,9 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
         .map((_, i) => i)
         .filter(i => !selectedSet.has(i))
         .sort((a, b) => scores[b]! - scores[a]!);
-      
+
       for (const fi of remaining) {
-        const lineLen = frames[fi]![1].length + 1;
+        const lineLen = frames[fi]![1].length + (String(frames[fi]![0] + 1).length + 2) + 1;
         if (used + lineLen <= frameBudget) {
           selectedFrameIndices.push(fi);
           used += lineLen;
@@ -260,7 +261,7 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
   }
 
   // Phase 4: Build final selection (headers + selected frames, in original order)
-  const selected: Array<[number, string]> = [...headers];
+  let selected: Array<[number, string]> = [...headers];
   for (const fi of selectedFrameIndices) {
     selected.push(frames[fi]!);
   }
@@ -283,44 +284,300 @@ function _compressStackTrace(text: string, budget: number, maxUserFrames: number
     }
   }
 
-  // Add tiny gap lines to selected (within budget)
-  let usedAfterGaps = selected.reduce((sum, [, line]) => sum + line.length + 1, 0);
+  // Add tiny gap lines to selected (within budget). Prefix width charged.
+  let usedAfterGaps = selected.reduce((sum, [idx, line]) => sum + line.length + (String(idx + 1).length + 2) + 1, 0);
   for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
-    const lineLen = lines[idx]!.length + 1;
+    const lineLen = lines[idx]!.length + (String(idx + 1).length + 2) + 1;
     if (usedAfterGaps + lineLen <= budget) {
       selected.push([idx, lines[idx]!]);
       usedAfterGaps += lineLen;
     }
   }
+
+  // Backfill non-selected non-blank lines (skipped frames + context "other")
+  // toward the retention floor. Headers+early-selected frames can leave real
+  // budget unused while many candidates were dropped wholesale — measured:
+  // JVM chained-exception case emitted at ~59% (no "other" lines, but the
+  // greedy frameBudget cap skipped tail frames); Python tracebacks left every
+  // context line untouched. The single crossing line is permitted while the
+  // result stays within the 0.75 ceiling. NOTE (deviation from plan literal):
+  // the plan snippet iterated `other` only — extended here to ALL unselected
+  // non-blank lines (frames + other in line order) because the failing test
+  // (JVM) has zero `other` lines, and the same "budget unused while
+  // candidates were dropped" reasoning applies symmetrically to skipped
+  // frames. Without this, JVM stays at 196/333 = 0.589 < 0.65 floor.
+  const retentionCeiling = Math.floor(text.length * 0.75);
+  const selectedIdxSet = new Set(selected.map(([idx]) => idx));
+  const backfillCandidates: Array<[number, string]> = [...frames, ...other].sort((a, b) => a[0] - b[0]);
+  for (const [oi, oline] of backfillCandidates) {
+    if (selectedIdxSet.has(oi)) continue;
+    const lineLen = oline.length + (String(oi + 1).length + 2) + 1;
+    if (usedAfterGaps + lineLen <= budget ||
+        (usedAfterGaps < budget && usedAfterGaps + lineLen <= retentionCeiling)) {
+      selected.push([oi, oline]);
+      selectedIdxSet.add(oi);
+      usedAfterGaps += lineLen;
+    }
+  }
+
+  // Header-preserving tiling rework. Per the wave-gate ruling, the swap/closing
+  // passes must NEVER trade away header lines (the "always keep" classification
+  // from Phase 1 — the single most valuable line of a stack trace, e.g.
+  // `TypeError:` or `Traceback`). The prior edge-swap dropped lines without
+  // header awareness; here we precompute the header index set and reject any
+  // drop that would remove a header. Tail-side trades are preferred over
+  // leading trades (see swap pass below).
+  const headerIdxSet = new Set<number>(headers.map(([i]) => i));
+  // Closing pass: enforce Priority-0 tiling on the remaining selection. For
+  // every residual sub-threshold INTERNAL gap (0 < gap < _MIN_OMISSION_THRESHOLD,
+  // between two consecutive selected indices), either:
+  //   (a) show the gap lines if total stays within retentionCeiling, or
+  //   (b) drop the SHORTER adjacent kept-run (by character cost) so the gap
+  //       merges into a markable (>= threshold) omission.
+  // Iterates until no sub-threshold internal gap remains.
+  //
+  // Guard: dropping is gated on retentionFloor — if dropping would push
+  // total retention below 0.65 of the original input, the fixture genuinely
+  // cannot satisfy both the band and the tiling rule under its budget (the
+  // documented STOP condition). Leave the violation rather than break the
+  // band; record-keepers note this conflict explicitly in the proof.
+  // Also gated on header preservation: any candidate drop that contains a
+  // header index is rejected outright. If both adjacent runs include a header,
+  // (b) abstains and the gap stays for the swap pass to consider.
+  // Leading/trailing sub-threshold gaps are NOT enforced here: Priority-0's
+  // "every gap between consecutive selected indices" rule does not cover
+  // gaps outside the selected range.
+  const retentionFloor = Math.floor(text.length * 0.65);
   selected.sort((a, b) => a[0] - b[0]);
+  let tilingChanged = true;
+  let tilingIters = 0;
+  while (tilingChanged && tilingIters++ < 100) {
+    tilingChanged = false;
+    const idxs = selected.map(([i]) => i);
+    for (let gi = 0; gi < idxs.length - 1; gi++) {
+      const prev = idxs[gi]!;
+      const next = idxs[gi + 1]!;
+      const gap = next - prev - 1;
+      if (gap <= 0 || gap >= _MIN_OMISSION_THRESHOLD) continue;
+      // Sub-threshold internal gap. Try (a): fit gap lines within ceiling.
+      let gapCost = 0;
+      for (let g = prev + 1; g < next; g++) {
+        gapCost += lines[g]!.length + (String(g + 1).length + 2) + 1;
+      }
+      if (usedAfterGaps + gapCost <= retentionCeiling) {
+        for (let g = prev + 1; g < next; g++) {
+          selected.push([g, lines[g]!]);
+          selectedIdxSet.add(g);
+        }
+        usedAfterGaps += gapCost;
+        selected.sort((a, b) => a[0] - b[0]);
+        tilingChanged = true;
+        break;
+      }
+      // (b) Drop shorter adjacent kept-run (by character cost).
+      // Find run boundaries in idxs around gi/gi+1 (consecutive indices form a run).
+      let prevRunStart = gi;
+      while (prevRunStart > 0 && idxs[prevRunStart - 1]! === idxs[prevRunStart]! - 1) prevRunStart--;
+      let nextRunEnd = gi + 1;
+      while (nextRunEnd < idxs.length - 1 && idxs[nextRunEnd + 1]! === idxs[nextRunEnd]! + 1) nextRunEnd++;
+      // Header check: a run that includes any header index is OFF-LIMITS for
+      // dropping. Identify which side(s) are droppable.
+      let prevHasHeader = false;
+      for (let k = prevRunStart; k <= gi; k++) {
+        if (headerIdxSet.has(idxs[k]!)) { prevHasHeader = true; break; }
+      }
+      let nextHasHeader = false;
+      for (let k = gi + 1; k <= nextRunEnd; k++) {
+        if (headerIdxSet.has(idxs[k]!)) { nextHasHeader = true; break; }
+      }
+      if (prevHasHeader && nextHasHeader) continue; // neither side droppable
+      let prevRunCost = 0;
+      for (let k = prevRunStart; k <= gi; k++) {
+        const li = idxs[k]!;
+        prevRunCost += lines[li]!.length + (String(li + 1).length + 2) + 1;
+      }
+      let nextRunCost = 0;
+      for (let k = gi + 1; k <= nextRunEnd; k++) {
+        const li = idxs[k]!;
+        nextRunCost += lines[li]!.length + (String(li + 1).length + 2) + 1;
+      }
+      // Choose which side to drop: must be header-free; among header-free
+      // candidates pick the cheaper (smaller cost = less retention loss).
+      let dropPrev: boolean;
+      if (prevHasHeader) dropPrev = false;
+      else if (nextHasHeader) dropPrev = true;
+      else dropPrev = prevRunCost <= nextRunCost;
+      const dropCost = dropPrev ? prevRunCost : nextRunCost;
+      // Guard: don't drop if doing so would push retention below the 0.65
+      // floor — that's the STOP condition the plan describes for genuinely
+      // unsolvable fixtures (e.g. 9-line traces of 70+ char frames where no
+      // selection can satisfy both the band and the tiling rule under the
+      // budget). Accept the Priority-0 violation in this fixture rather than
+      // bend the retention band.
+      if (usedAfterGaps - dropCost < retentionFloor) continue;
+      const dropStart = dropPrev ? prevRunStart : gi + 1;
+      const dropEnd = dropPrev ? gi : nextRunEnd;
+      const dropSet = new Set<number>();
+      for (let k = dropStart; k <= dropEnd; k++) dropSet.add(idxs[k]!);
+      selected = selected.filter(([i]) => !dropSet.has(i));
+      for (const di of dropSet) selectedIdxSet.delete(di);
+      usedAfterGaps -= dropCost;
+      tilingChanged = true;
+      break;
+    }
+  }
+  selected.sort((a, b) => a[0] - b[0]);
+
+  // Edge-trim + gap-fill swap pass: handles fixtures where the closing pass
+  // was blocked by the retention-floor guard but a contiguous middle-section
+  // selection would satisfy all constraints. For each remaining sub-threshold
+  // internal gap, attempt to swap an OUTERMOST non-header kept-edge line
+  // (walked inward past any header — header lines are NEVER traded per the
+  // wave-gate ruling) for the gap content. Tail-side trades are preferred;
+  // leading swaps are only attempted if no trailing swap suffices.
+  let swapChanged = true;
+  let swapIters = 0;
+  while (swapChanged && swapIters++ < 100) {
+    swapChanged = false;
+    const idxs = selected.map(([i]) => i);
+    if (idxs.length < 2) break;
+    for (let gi = 0; gi < idxs.length - 1; gi++) {
+      const prev = idxs[gi]!;
+      const next = idxs[gi + 1]!;
+      const gap = next - prev - 1;
+      if (gap <= 0 || gap >= _MIN_OMISSION_THRESHOLD) continue;
+      // Sub-threshold internal gap remains. Compute gap-fill cost.
+      let gapCost = 0;
+      for (let g = prev + 1; g < next; g++) {
+        gapCost += lines[g]!.length + (String(g + 1).length + 2) + 1;
+      }
+      // We need (ceiling - usedAfterGaps + edgeDrops) >= gapCost.
+      const needToFree = Math.max(0, usedAfterGaps + gapCost - retentionCeiling);
+      if (needToFree === 0) {
+        // No edge drop needed; the closing pass should have fit it already.
+        continue;
+      }
+      // Walk inward from each side past any header to find the OUTERMOST
+      // non-header kept line as the swap candidate. firstPos/lastPos are
+      // positions into idxs; firstIdx/lastIdx are the underlying line indices.
+      let firstPos = 0;
+      while (firstPos < idxs.length && headerIdxSet.has(idxs[firstPos]!)) firstPos++;
+      let lastPos = idxs.length - 1;
+      while (lastPos >= 0 && headerIdxSet.has(idxs[lastPos]!)) lastPos--;
+      // Also: the candidate must not be on the gap boundary (would be a no-op
+      // swap that re-creates the same gap). And both candidates must be > the
+      // gap boundary so we're truly dropping at an edge of the kept selection.
+      const firstIdx = firstPos < idxs.length ? idxs[firstPos]! : -1;
+      const lastIdx = lastPos >= 0 ? idxs[lastPos]! : -1;
+      const firstCost = firstIdx >= 0
+        ? lines[firstIdx]!.length + (String(firstIdx + 1).length + 2) + 1 : 0;
+      const lastCost = lastIdx >= 0
+        ? lines[lastIdx]!.length + (String(lastIdx + 1).length + 2) + 1 : 0;
+      const tryDropLeading =
+        firstIdx >= 0 && firstIdx !== prev && firstIdx !== next &&
+        firstIdx < prev &&  // must be on the leading side of the gap
+        usedAfterGaps - firstCost + gapCost <= retentionCeiling &&
+        usedAfterGaps - firstCost + gapCost >= retentionFloor;
+      const tryDropTrailing =
+        lastIdx >= 0 && lastIdx !== prev && lastIdx !== next &&
+        lastIdx > next &&  // must be on the trailing side of the gap
+        usedAfterGaps - lastCost + gapCost <= retentionCeiling &&
+        usedAfterGaps - lastCost + gapCost >= retentionFloor;
+      const tryDropBoth =
+        firstIdx >= 0 && lastIdx >= 0 &&
+        firstIdx !== prev && firstIdx !== next &&
+        lastIdx !== prev && lastIdx !== next &&
+        firstIdx !== lastIdx && firstIdx < prev && lastIdx > next &&
+        usedAfterGaps - firstCost - lastCost + gapCost <= retentionCeiling &&
+        usedAfterGaps - firstCost - lastCost + gapCost >= retentionFloor;
+      // Prefer tail-side trades: try drop-trailing first, then drop-leading,
+      // then drop-both. Per the wave-gate ruling — trailing context is the
+      // weakest signal of a stack trace; leading context (the exception
+      // header + first user frame) is the strongest.
+      let dropEdges: number[] | null = null;
+      if (tryDropTrailing && lastCost >= needToFree) {
+        dropEdges = [lastIdx];
+      } else if (tryDropLeading && firstCost >= needToFree) {
+        dropEdges = [firstIdx];
+      } else if (tryDropBoth && firstCost + lastCost >= needToFree) {
+        dropEdges = [firstIdx, lastIdx];
+      }
+      if (dropEdges === null) continue;
+      const dropSet = new Set(dropEdges);
+      selected = selected.filter(([i]) => !dropSet.has(i));
+      let droppedCost = 0;
+      for (const di of dropEdges) {
+        droppedCost += lines[di]!.length + (String(di + 1).length + 2) + 1;
+        selectedIdxSet.delete(di);
+      }
+      usedAfterGaps -= droppedCost;
+      for (let g = prev + 1; g < next; g++) {
+        selected.push([g, lines[g]!]);
+        selectedIdxSet.add(g);
+      }
+      usedAfterGaps += gapCost;
+      selected.sort((a, b) => a[0] - b[0]);
+      swapChanged = true;
+      break;
+    }
+  }
+  selected.sort((a, b) => a[0] - b[0]);
+
+  if (selected.length === 0 && lines.length > 0) {
+    return `[TRUNCATED: lines 1-${lines.length}]`;
+  }
   const finalKeptIndices = selected.map(([idx]) => idx);
 
-  // Phase 6: Build result with markers only for gaps >= threshold
+  // Phase 6: Build result. Every shown line is `${idx+1}. <verbatim>`; gaps >=
+  // threshold become a single flush-left `[TRUNCATED: lines X-Y]`. The
+  // emit bound is aligned to selection via emitBudget = max(budget,
+  // usedAfterGaps): the backfill above is permitted to push the selection
+  // past `budget` by one ceiling-bounded line, and emission must follow that
+  // decision — using the smaller `budget` here would strand a
+  // selected-but-unemitted line behind a marker that claims it was shown.
+  const emitBudget = Math.max(budget, usedAfterGaps);
   const resultParts: string[] = [];
+  let emittedUsed = 0;
 
   // Check for leading gap
   if (finalKeptIndices[0]! >= _MIN_OMISSION_THRESHOLD) {
-    resultParts.push(`[TRUNCATED: lines 1-${finalKeptIndices[0]!}]`);
+    const leadMarker = `[TRUNCATED: lines 1-${finalKeptIndices[0]!}]`;
+    resultParts.push(leadMarker);
+    emittedUsed += leadMarker.length + 1;
   }
 
   for (let i = 0; i < selected.length; i++) {
-    resultParts.push(selected[i]![1]);
+    const [idx, line] = selected[i]!;
+    const shown = `${idx + 1}. ${line}`;
+    if (emittedUsed + shown.length + 1 > emitBudget) break;
+    resultParts.push(shown);
+    emittedUsed += shown.length + 1;
 
     if (i < selected.length - 1) {
       const currentIdx = finalKeptIndices[i]!;
       const nextIdx = finalKeptIndices[i + 1]!;
       const gap = nextIdx - currentIdx - 1;
       if (gap >= _MIN_OMISSION_THRESHOLD) {
-        resultParts.push(`[TRUNCATED: lines ${currentIdx + 2}-${nextIdx}]`);
+        const gapMarker = `[TRUNCATED: lines ${currentIdx + 2}-${nextIdx}]`;
+        if (emittedUsed + gapMarker.length + 1 > emitBudget) break;
+        resultParts.push(gapMarker);
+        emittedUsed += gapMarker.length + 1;
       }
     }
   }
 
-  // Check for trailing gap
+  // Check for trailing gap. Per the wave-gate ruling, trailing omissions get
+  // a `[TRUNCATED: lines X-Y]` marker REGARDLESS of size — a single trailing
+  // marker cannot fragment content (the sub-threshold-sliver anti-pattern
+  // targets gaps BETWEEN markers), and without one the model cannot know the
+  // trace continues. emitBudget already includes a relaxation past `budget`
+  // up to usedAfterGaps; expand it once more so the marker always fits when a
+  // trailing omission exists.
   const lastKept = finalKeptIndices[finalKeptIndices.length - 1]!;
   const trailingGap = lines.length - 1 - lastKept;
-  if (trailingGap >= _MIN_OMISSION_THRESHOLD) {
-    resultParts.push(`[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`);
+  if (trailingGap >= 1) {
+    const trailMarker = `[TRUNCATED: lines ${lastKept + 2}-${lines.length}]`;
+    resultParts.push(trailMarker);
   }
 
   return resultParts.join('\n');
@@ -559,12 +816,12 @@ function _compressLog(text: string, budget: number): string {
 
   for (const idx of rankedIndices) {
     const pattern = uniquePatterns[idx]!;
-    const lineCost = pattern.firstEntry.line.length + 1;
-    const repeatMarkerCost = pattern.count > 1 ? `  [repeated ${pattern.count} times]`.length : 0;
+    const fe = pattern.firstEntry;
+    const lineCost = fe.line.length + (String(fe.originalIdx + 1).length + 2) + 1;
 
-    if (used + lineCost + repeatMarkerCost > budget) continue;
+    if (used + lineCost > budget) continue;
     selectedPatterns.push(pattern);
-    used += lineCost + repeatMarkerCost;
+    used += lineCost;
   }
 
   // Phase 5: For patterns with multiple occurrences, also try to include last occurrence
@@ -580,7 +837,7 @@ function _compressLog(text: string, budget: number): string {
     // Include last if different and budget allows
     if (entries.length > 1) {
       const lastEntry = entries[entries.length - 1]!;
-      const lastCost = lastEntry.line.length + 1;
+      const lastCost = lastEntry.line.length + (String(lastEntry.originalIdx + 1).length + 2) + 1;
       if (used + lastCost <= budget && !includedIndices.has(lastEntry.originalIdx)) {
         finalEntries.push(lastEntry);
         includedIndices.add(lastEntry.originalIdx);
@@ -589,25 +846,29 @@ function _compressLog(text: string, budget: number): string {
     }
   }
 
-  // Phase 6: Sort by original position and build output
+  // Phase 6: Sort by original position and build output. Every shown line is
+  // `${idx+1}. <verbatim>` (no `[repeated N]` suffix — Priority-0 forbids
+  // appended annotations); gaps >= threshold get a flush-left
+  // `[TRUNCATED: lines X-Y]`. Budget-break keeps output within budget.
   finalEntries.sort((a, b) => a.originalIdx - b.originalIdx);
 
   const outputParts: string[] = [];
-  const patternCounts = new Map<string, number>();
-  for (const pattern of selectedPatterns) {
-    if (pattern.count > 1) {
-      patternCounts.set(pattern.normHash, pattern.count);
-    }
-  }
+  let emittedUsed = 0;
+  let prevIdx = -1;
 
   for (const entry of finalEntries) {
-    const count = patternCounts.get(entry.normHash);
-    if (count !== undefined) {
-      outputParts.push(`${entry.line}  [repeated ${count} times]`);
-      patternCounts.delete(entry.normHash); // Only annotate once
-    } else {
-      outputParts.push(entry.line);
+    if (prevIdx >= 0 && entry.originalIdx - prevIdx - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const gapMarker = `[TRUNCATED: lines ${prevIdx + 2}-${entry.originalIdx}]`;
+      if (emittedUsed + gapMarker.length + 1 <= budget) {
+        outputParts.push(gapMarker);
+        emittedUsed += gapMarker.length + 1;
+      }
     }
+    const shown = `${entry.originalIdx + 1}. ${entry.line}`;
+    if (emittedUsed + shown.length + 1 > budget) break;
+    outputParts.push(shown);
+    emittedUsed += shown.length + 1;
+    prevIdx = entry.originalIdx;
   }
 
   // Phase 7: Add truncation marker if needed
@@ -785,7 +1046,8 @@ function _compressSourceCode(text: string, budget: number): string {
     if (line === undefined) {
       throw new Error(`invariant: lc called with out-of-range index ${idx}`);
     }
-    return line.length + 1;
+    // Cost includes the `N. ` prefix width emitted per shown line.
+    return line.length + (String(idx + 1).length + 2) + 1;
   };
 
   let mandatoryChars = 0;
@@ -856,54 +1118,85 @@ function _compressSourceCode(text: string, budget: number): string {
     }
   }
 
-  // Reconstruct in original line order
+  // Reconstruct in original line order. Every shown line is `${idx+1}. <verbatim>`;
+  // every omitted gap becomes a single flush-left `[TRUNCATED: lines X-Y]`
+  // (1-based inclusive). Budget-break keeps output within budget.
   const allIncluded = new Set<number>([...mandatory, ...includedBody]);
   const result: string[] = [];
+  let emittedUsed = 0;
+
+  const pushShown = (idx: number, line: string): boolean => {
+    const shown = `${idx + 1}. ${line}`;
+    if (emittedUsed + shown.length + 1 > budget) return false;
+    result.push(shown);
+    emittedUsed += shown.length + 1;
+    return true;
+  };
+  const pushMarker = (x: number, y: number): boolean => {
+    const marker = `[TRUNCATED: lines ${x}-${y}]`;
+    if (emittedUsed + marker.length + 1 > budget) return false;
+    result.push(marker);
+    emittedUsed += marker.length + 1;
+    return true;
+  };
 
   // Module docstring block
+  let broke = false;
   for (const idx of modDocKeep) {
     const line = lines[idx];
     if (line === undefined) continue;
-    result.push(line);
+    if (!pushShown(idx, line)) { broke = true; break; }
   }
-  if (modDocOmitted > 0) {
+  if (!broke && modDocOmitted > 0) {
     // modDocKeep has the kept indices, modDocIndices has all docstring indices
     const docOmitStart = modDocKeep[modDocKeep.length - 1]! + 1;
     const docOmitEnd = modDocIndices[modDocIndices.length - 1]!;
-    result.push(`[TRUNCATED: lines ${docOmitStart + 1}-${docOmitEnd + 1}]`);
+    if (!pushMarker(docOmitStart + 1, docOmitEnd + 1)) broke = true;
   }
 
-  // Scan remaining lines in order, inserting omission markers at cut points
-  let pendingBlanks: string[] = [];
+  // Scan remaining lines in order, inserting omission markers at cut points.
+  // Blank indices are buffered so they can be numbered when emitted.
+  let pendingBlankIdx: number[] = [];
   let omitStart = -1;  // Track where omission began (0-indexed)
-  let omitIndent = '    ';
 
   for (const [idx, line] of lines.entries()) {
+    if (broke) break;
     if (modDocSet.has(idx)) continue;
 
     if (!line.trim()) {
-      pendingBlanks.push(line);
+      pendingBlankIdx.push(idx);
       continue;
     }
 
     if (allIncluded.has(idx)) {
       if (omitStart >= 0) {
-        // Emit marker for lines omitStart through idx-1 (1-based)
-        result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${idx}]`);
+        // Emit marker for lines omitStart through (last omitted, exclusive of
+        // any buffered blanks). When pendingBlankIdx is non-empty, those blanks
+        // sit at indices [pendingBlankIdx[0]..pendingBlankIdx.at(-1)] and are
+        // about to be SHOWN next — the marker must STOP at the line before the
+        // first buffered blank, otherwise the marker range overlaps a visible
+        // line number (BUG 4a). With no buffered blanks, omission runs to
+        // idx-1 (0-based), i.e. line `idx` in 1-based.
+        const omitEndOneBased = pendingBlankIdx.length > 0
+          ? pendingBlankIdx[0]!  // 1-based number of (firstBlankIdx - 1) === firstBlankIdx
+          : idx;
+        if (!pushMarker(omitStart + 1, omitEndOneBased)) { broke = true; break; }
         omitStart = -1;
       }
-      result.push(...pendingBlanks);
-      pendingBlanks = [];
-      result.push(line);
-      omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
+      for (const bi of pendingBlankIdx) {
+        if (!pushShown(bi, lines[bi]!)) { broke = true; break; }
+      }
+      pendingBlankIdx = [];
+      if (broke) break;
+      if (!pushShown(idx, line)) { broke = true; break; }
     } else {
-      pendingBlanks = []; // discard blanks belonging to omitted section
+      pendingBlankIdx = []; // discard blanks belonging to omitted section
       if (omitStart < 0) omitStart = idx;  // Start new omission range
     }
   }
 
-  if (omitStart >= 0) {
-    result.push(`${omitIndent}[TRUNCATED: lines ${omitStart + 1}-${lines.length}]`);
+  if (!broke && omitStart >= 0) {
+    pushMarker(omitStart + 1, lines.length);
   }
 
   return result.join('\n');
@@ -1110,9 +1403,9 @@ function _compressSourceStructured(
       .map((s) => s.block);
   }
 
-  const lineCost = (idx: number): number => lineAt(idx).length + 1;
-  const renderedSignature = (idx: number): string => lineAt(idx) + `  # L${idx + 1}`;
-  const renderedSignatureCost = (idx: number): number => renderedSignature(idx).length + 1;
+  // Per-line emit cost INCLUDES the `N. ` prefix width so budget accounting
+  // matches what is actually emitted (Priority-0 / anti-bloat).
+  const lineCost = (idx: number): number => lineAt(idx).length + (String(idx + 1).length + 2) + 1;
 
   for (const block of sortedBlocks) {
     const start = Math.max(0, block.startLine);
@@ -1123,22 +1416,20 @@ function _compressSourceStructured(
       .filter((i) => !resultLines.has(i));
     if (newIndices.length === 0) continue;
 
-    const sigText = renderedSignature(start);
-    const sigSize = renderedSignatureCost(start);
-    const newSize = sigSize + newIndices.filter((i) => i !== start).reduce((sum, i) => sum + lineCost(i), 0);
-    const rangeMarker = `    # ... [lines ${start + 2}-${end + 1} omitted]`;
+    const sigSize = lineCost(start);
+    const newSize = newIndices.reduce((sum, i) => sum + lineCost(i), 0);
+    const rangeMarker = `[TRUNCATED: lines ${start + 2}-${end + 1}]`;
     const rangeMarkerCost = rangeMarker.length + 1;
 
     if (used + newSize <= budget) {
       for (const i of newIndices) {
         resultLines.set(i, lineAt(i));
       }
-      resultLines.set(start, sigText);
       used += newSize;
     } else if (!resultLines.has(start) && used + sigSize + rangeMarkerCost <= budget) {
       const bodyIndices = newIndices.filter((i) => i !== start);
-      
-      const MARKER_COST = 45;
+
+      const MARKER_COST = rangeMarkerCost;
       const selectedSet = new Set<number>();
       let selectedBodyCost = 0;
       const remaining = budget - used - sigSize;
@@ -1153,8 +1444,9 @@ function _compressSourceStructured(
       if (selectedSet.size > 0) {
         const omittedLines = bodyIndices.filter((idx) => !selectedSet.has(idx));
         const omittedCount = omittedLines.length;
-        
-        // Never truncate tiny blocks, even if it puts us slightly over budget
+
+        // Never truncate tiny blocks (gap < threshold): include the omitted
+        // lines so no sub-threshold gap is left inside this block.
         if (omittedCount > 0 && omittedCount < _MIN_OMISSION_THRESHOLD) {
           for (const idx of omittedLines) {
             selectedSet.add(idx);
@@ -1162,72 +1454,205 @@ function _compressSourceStructured(
           }
         }
 
-        resultLines.set(start, sigText);
+        resultLines.set(start, lineAt(start));
         for (const idx of selectedSet) {
           resultLines.set(idx, lineAt(idx));
         }
         used += sigSize + selectedBodyCost;
       } else {
-        resultLines.set(start, sigText);
-        const markerLine = start + 1;
-        if (markerLine <= end && !resultLines.has(markerLine)) {
-          // Instead of adding rangeMarker to resultLines (which causes issues in the loop),
-          // we just omit the rest. The reassembly loop will naturally emit an omission marker!
-        }
+        // Signature only; the rest of the block falls into a gap and is marked
+        // by the emit walk below.
+        resultLines.set(start, lineAt(start));
         used += sigSize;
       }
     }
   }
 
-  // Reassemble in original line order with gap markers exactly like text version
-  const output: string[] = [];
-  let omitCount = 0;
-  let omitIndent = '    ';
-  let pendingBlanks: string[] = [];
-
-  for (let idx = 0; idx < n; idx++) {
-    const line = lines[idx];
-    if (line === undefined) continue;
-
-    if (!line.trim()) {
-      pendingBlanks.push(line);
-      continue;
-    }
-
-    if (resultLines.has(idx)) {
-      if (omitCount > 0) {
-        // If we skipped a small amount of lines that somehow bypassed the threshold logic
-        if (omitCount < _MIN_OMISSION_THRESHOLD) {
-          for (let prevIdx = idx - omitCount; prevIdx < idx; prevIdx++) {
-            if (lines[prevIdx] && lines[prevIdx]!.trim()) {
-              output.push(lines[prevIdx]!);
-            }
-          }
-        } else {
-          output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
-        }
-        omitCount = 0;
+  // Fill sub-threshold gaps between consecutive selected indices: a gap < the
+  // threshold cannot earn a marker, so (Priority-0) its lines must be shown.
+  if (resultLines.size >= 2) {
+    const tinyGapLines = new Set<number>();
+    const keys = [...resultLines.keys()].sort((a, b) => a - b);
+    let prev = keys[0]!;
+    for (let ki = 1; ki < keys.length; ki++) {
+      const ln = keys[ki]!;
+      const gap = ln - prev - 1;
+      if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
+        for (let g = prev + 1; g < ln; g++) tinyGapLines.add(g);
       }
-      output.push(...pendingBlanks);
-      pendingBlanks = [];
-      output.push(resultLines.get(idx)!);
-      omitIndent = ' '.repeat(line.length - line.trimStart().length + 4);
-    } else {
-      pendingBlanks = []; // discard blanks belonging to omitted section
-      omitCount++;
+      prev = ln;
+    }
+    for (const idx of [...tinyGapLines].sort((a, b) => a - b)) {
+      if (!resultLines.has(idx) && used + lineCost(idx) <= budget) {
+        resultLines.set(idx, lineAt(idx));
+        used += lineCost(idx);
+      }
     }
   }
 
-  if (omitCount > 0) {
-    if (omitCount < _MIN_OMISSION_THRESHOLD) {
-      for (let prevIdx = n - omitCount; prevIdx < n; prevIdx++) {
-        if (lines[prevIdx] && lines[prevIdx]!.trim()) {
-          output.push(lines[prevIdx]!);
+  // Settle interior slivers: any run of selected lines bounded on BOTH sides by
+  // a gap >= threshold (so it would sit between two markers) with fewer than the
+  // threshold of non-blank shown lines is dropped (merged into the surrounding
+  // truncation), per the constraint resolution for unimportant slivers. This
+  // guarantees no two markers ever sandwich a sub-threshold sliver.
+  {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const keys = [...resultLines.keys()].sort((a, b) => a - b);
+      // Partition selected indices into maximal contiguous runs.
+      const runs: number[][] = [];
+      let run: number[] = [];
+      for (const k of keys) {
+        if (run.length === 0 || k === run[run.length - 1]! + 1) {
+          run.push(k);
+        } else {
+          runs.push(run);
+          run = [k];
         }
       }
-    } else {
-      output.push(`${omitIndent}# ... [${omitCount} lines omitted]`);
+      if (run.length > 0) runs.push(run);
+
+      for (let r = 0; r < runs.length; r++) {
+        // The emit walk emits NO leading/trailing marker, so only runs with a
+        // real run on BOTH sides can ever sit between two markers.
+        if (r === 0 || r === runs.length - 1) continue;
+        const cur = runs[r]!;
+        const first = cur[0]!;
+        const last = cur[cur.length - 1]!;
+        const gapBefore = first - runs[r - 1]![runs[r - 1]!.length - 1]! - 1;
+        const gapAfter = runs[r + 1]![0]! - last - 1;
+        const boundedBefore = gapBefore >= _MIN_OMISSION_THRESHOLD;
+        const boundedAfter = gapAfter >= _MIN_OMISSION_THRESHOLD;
+        if (!boundedBefore || !boundedAfter) continue;
+        const nonBlankShown = cur.filter((i) => lineAt(i).trim() !== '').length;
+        if (nonBlankShown < _MIN_OMISSION_THRESHOLD) {
+          for (const i of cur) {
+            used -= lineCost(i);
+            resultLines.delete(i);
+          }
+          changed = true;
+          break;
+        }
+      }
     }
+  }
+
+  // Final convergence: settle every remaining sub-threshold gap (BUG 4b).
+  // The tinyGapLines fill may have been budget-limited (some gap lines could
+  // not fit), and the sliver-settle above only drops slivers bounded on BOTH
+  // sides by >= threshold gaps. Anything else — a sub-threshold gap between
+  // two long runs, a sliver bounded on one side by a sub-threshold gap, a
+  // partially-filled tiny gap — can still leak through and trip the Phase-H
+  // assertion downstream. Iterate to total convergence: at each step, find any
+  // sub-threshold gap between consecutive selected indices, try to fill it in
+  // full (budget may have freed up from a prior drop in this loop); if budget
+  // still cannot accommodate, drop one boundary index of the gap on the side
+  // whose contiguous run is shorter — this merges the gap with the larger
+  // adjacent omission and either resolves the violation or shifts it to be
+  // picked up on the next iteration. Termination: each pass either fills the
+  // gap (eliminating it) or drops a selected index (strictly shrinking
+  // resultLines), so the loop runs at most O(N) times.
+  {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const keys = [...resultLines.keys()].sort((a, b) => a - b);
+      // Phase A: try to fill any remaining sub-threshold gap now that other
+      // settlements may have freed budget.
+      let filled = false;
+      for (let ki = 1; ki < keys.length; ki++) {
+        const ln = keys[ki]!;
+        const prev = keys[ki - 1]!;
+        const gap = ln - prev - 1;
+        if (gap <= 0 || gap >= _MIN_OMISSION_THRESHOLD) continue;
+        let fillCost = 0;
+        for (let g = prev + 1; g < ln; g++) fillCost += lineCost(g);
+        if (used + fillCost <= budget) {
+          for (let g = prev + 1; g < ln; g++) {
+            resultLines.set(g, lineAt(g));
+          }
+          used += fillCost;
+          filled = true;
+          changed = true;
+          break;
+        }
+      }
+      if (filled) continue;
+      // Phase B: cannot fill — drop one boundary index of any remaining
+      // sub-threshold gap. Choose the side whose contiguous run is the SHORTER
+      // (drop the smaller side first, merging the gap with the larger
+      // adjacent omission). Tiebreak: drop the prev side (lower index).
+      for (let ki = 1; ki < keys.length; ki++) {
+        const ln = keys[ki]!;
+        const prev = keys[ki - 1]!;
+        const gap = ln - prev - 1;
+        if (gap <= 0 || gap >= _MIN_OMISSION_THRESHOLD) continue;
+        // Measure the contiguous-run length on each side of the gap.
+        let prevRunLen = 1;
+        for (let j = ki - 2; j >= 0; j--) {
+          if (keys[j]! === keys[j + 1]! - 1) prevRunLen++;
+          else break;
+        }
+        let nextRunLen = 1;
+        for (let j = ki + 1; j < keys.length; j++) {
+          if (keys[j]! === keys[j - 1]! + 1) nextRunLen++;
+          else break;
+        }
+        const dropIdx = prevRunLen <= nextRunLen ? prev : ln;
+        used -= lineCost(dropIdx);
+        resultLines.delete(dropIdx);
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  // Phase H: inline assertion over the final selected set (Priority-0).
+  {
+    const finalKeys = [...resultLines.keys()].sort((a, b) => a - b);
+    for (let ki = 0; ki < finalKeys.length; ki++) {
+      const idx = finalKeys[ki]!;
+      if (idx < 0 || idx >= n) {
+        throw new Error(`Priority-0 violation: selected index ${idx} out of range (n=${n})`);
+      }
+      if (ki > 0) {
+        const prevIdx = finalKeys[ki - 1]!;
+        if (idx <= prevIdx) {
+          throw new Error(`Priority-0 violation: selected indices not strictly ascending (${prevIdx} >= ${idx})`);
+        }
+        const gap = idx - prevIdx - 1;
+        if (gap > 0 && gap < _MIN_OMISSION_THRESHOLD) {
+          throw new Error(`Priority-0 violation: gap ${prevIdx + 2}-${idx} is ${gap} lines (< ${_MIN_OMISSION_THRESHOLD}) but not fully selected`);
+        }
+      }
+    }
+  }
+
+  // Emit in original line order. Every shown line is `${idx+1}. <verbatim>`;
+  // every gap >= threshold becomes a single flush-left `[TRUNCATED: lines X-Y]`
+  // (1-based inclusive). The budget-break keeps output within budget.
+  const output: string[] = [];
+  const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
+  let prev = -1;
+  let actualUsed = 0;
+
+  for (const ln of sortedKeys) {
+    const lineText = `${ln + 1}. ${resultLines.get(ln)!}`;
+    const lineSize = lineText.length + 1;
+    if (prev >= 0 && ln - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const gapMarker = `[TRUNCATED: lines ${prev + 2}-${ln}]`;
+      const gapMarkerSize = gapMarker.length + 1;
+      // The marker is mandatory for a >= threshold gap; if it (plus the line)
+      // cannot fit, stop here rather than emit an unmarked discontinuity.
+      if (actualUsed + gapMarkerSize + lineSize > budget) break;
+      output.push(gapMarker);
+      actualUsed += gapMarkerSize;
+    }
+    if (actualUsed + lineSize > budget) break;
+    output.push(lineText);
+    actualUsed += lineSize;
+    prev = ln;
   }
 
   return output.join('\n');
@@ -1254,27 +1679,81 @@ function _contentAwareTruncate(text: string, budget: number): string {
     headRatio = 0.5;
   }
 
-  // Compute line numbers for the truncation marker
-  const totalLines = text.split('\n').length;
-  const markerTemplate = '\n[TRUNCATED: lines X-Y]\n';
-  const usable = budget - markerTemplate.length;
-  if (usable <= 0) {
-    return text.slice(0, budget);
-  }
+  // Line-based selection so every shown line carries its true 1-based number and
+  // is verbatim (no mid-line cuts). The head/tail char budgets keep the original
+  // head-vs-tail heuristic; emission is whole numbered lines + one flush-left
+  // `[TRUNCATED: lines X-Y]` for the omitted middle. Prefix width is charged and
+  // the budget-break keeps output within budget.
+  const lines = text.split('\n');
+  const totalLines = lines.length;
+  const lineCost = (idx: number): number => lines[idx]!.length + (String(idx + 1).length + 2) + 1;
+
+  const markerReserve = `[TRUNCATED: lines ${totalLines}-${totalLines}]`.length + 1;
+  const usable = Math.max(0, budget - markerReserve);
   const headBudget = Math.floor(usable * headRatio);
   const tailBudget = usable - headBudget;
 
-  // Count lines in head and tail portions
-  const headText = text.slice(0, headBudget);
-  const tailText = text.slice(-tailBudget);
-  const headLines = headText.split('\n').length;
-  const tailLines = tailText.split('\n').length;
-  const firstOmitted = headLines + 1;
-  const lastOmitted = totalLines - tailLines;
-  
-  const marker = `\n[TRUNCATED: lines ${firstOmitted}-${lastOmitted}]\n`;
+  // Take whole lines from the head up to headBudget.
+  const headIdx: number[] = [];
+  let headUsed = 0;
+  for (let i = 0; i < totalLines; i++) {
+    const c = lineCost(i);
+    if (headUsed + c > headBudget) break;
+    headIdx.push(i);
+    headUsed += c;
+  }
+  // Take whole lines from the tail up to tailBudget, not overlapping the head.
+  const tailIdx: number[] = [];
+  let tailUsed = 0;
+  const headEnd = headIdx.length > 0 ? headIdx[headIdx.length - 1]! : -1;
+  for (let i = totalLines - 1; i > headEnd; i--) {
+    const c = lineCost(i);
+    if (tailUsed + c > tailBudget) break;
+    tailIdx.push(i);
+    tailUsed += c;
+  }
+  tailIdx.reverse();
 
-  return headText + marker + tailText;
+  const selected = [...headIdx, ...tailIdx];
+  const output: string[] = [];
+  let prev = -1;
+
+  if (selected.length === 0) {
+    // Budget too small for even one whole line. Never cut mid-line: emit the
+    // first (and, if distinct, the last) whole numbered line verbatim with a
+    // real-range marker between them. This degenerate output is intentionally
+    // not budget-clamped — clamping would corrupt line content.
+    const degenerate = totalLines > 1 ? [0, totalLines - 1] : [0];
+    for (const idx of degenerate) {
+      if (prev >= 0 && idx - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+        output.push(`[TRUNCATED: lines ${prev + 2}-${idx}]`);
+      }
+      output.push(`${idx + 1}. ${lines[idx]!}`);
+      prev = idx;
+    }
+    return output.join('\n');
+  }
+
+  // Normal path: whole numbered lines bounded by the head/tail budgets, with a
+  // single flush-left marker for the omitted middle. Budget-break ensures the
+  // emitted output never exceeds budget.
+  let emittedUsed = 0;
+  for (const idx of selected) {
+    if (prev >= 0 && idx - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+      const marker = `[TRUNCATED: lines ${prev + 2}-${idx}]`;
+      if (emittedUsed + marker.length + 1 <= budget) {
+        output.push(marker);
+        emittedUsed += marker.length + 1;
+      }
+    }
+    const shown = `${idx + 1}. ${lines[idx]!}`;
+    if (emittedUsed + shown.length + 1 > budget) break;
+    output.push(shown);
+    emittedUsed += shown.length + 1;
+    prev = idx;
+  }
+
+  return output.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,4 +1811,86 @@ export function compressSourceStructured(
   budget = Math.max(budget, minBudget);
   if (text.length <= budget) return text;
   return _compressSourceStructured(text, budget, structure, context);
+}
+
+/**
+ * Compress a single file from raw structural facts.
+ *
+ * Shapes the caller-supplied facts into the structured-source inputs and
+ * delegates to compressSourceStructured (the real engine). Owns no compression
+ * logic of its own — only fact-shaping and the usefulness gate.
+ */
+export function compressFile(req: CompressFileRequest): string | null {
+  if (req.source.length === 0) return null;
+  if (req.facts.langName === null && req.facts.defs.length === 0) {
+    // Rule 12: TOON must NEVER deny a compression request. An unsupported
+    // language (no tree-sitter lang, no structural defs) is a MANDATORY
+    // fallback to the unstructured text engine — the same engine
+    // _compressSourceStructured delegates to when structure is empty
+    // (compressString, which auto-detects content type, enforces the 70%
+    // floor, and emits the verbatim/line-number/[TRUNCATED] invariants).
+    // We do NOT early-return null and force the caller into plain truncation.
+    const unstructured = compressString(req.source, req.maxChars);
+    // Match the structured path's usefulness gate: if even the unstructured
+    // output isn't shorter than the source, return null so the caller emits
+    // raw (TOON owns the "not useful" decision; the floor may keep them equal).
+    if (unstructured.length >= req.source.length) return null;
+    return unstructured;
+  }
+  const facts: RawFileFacts = req.facts;
+  // Public-API hardening: never let facts reference lines the source doesn't
+  // contain (callers are contracted to pass the full file, but facts can be
+  // momentarily stale across an edit boundary). Window clamp.
+  const lineCount = req.source.split('\n').length;
+  const structure: StructureBlock[] = facts.defs
+    .filter((d) => d.line >= 1 && d.line - 1 < lineCount)
+    .map((d) => ({
+      name: d.name, kind: d.kind, type: d.type,
+      startLine: d.line - 1, endLine: Math.min(d.endLine - 1, lineCount - 1),
+      exported: d.visibility === 'public', anchors: [] as Anchor[],
+    }));
+  // Anchor weighting is TOON's decision (Priority 0.5): derive priority from
+  // anchor kind — the flat `300` it replaces erased the extractor's signal
+  // ladder (return > throw > if > switch > try > catch > loop > await > call).
+  // Mirrors the extractor's rule ladder so SageRank can distinguish "this
+  // block returns" from "this block contains a low-value call".
+  const ANCHOR_KIND_PRIORITY: Readonly<Record<string, number>> = {
+    return: 400, throw: 380, if: 320, switch: 300, try: 280, catch: 270,
+    loop: 260, await: 180, call: 140,
+  };
+  for (const a of facts.anchors) {
+    // anchors arrive 1-BASED across the seam (extractor persists 1-based),
+    // so `a.line - 1` converts to 0-based for the structured-source engine.
+    const anchorLine = a.line - 1;
+    if (anchorLine < 0 || anchorLine >= lineCount) continue;
+    // Tightest containing block — not first/outermost. A method anchor inside
+    // a class should attach to the method, not the class, so SageRank
+    // weighting lands on the right block.
+    let owner: StructureBlock | undefined;
+    for (const b of structure) {
+      if (anchorLine < b.startLine || anchorLine > b.endLine) continue;
+      if (owner === undefined || (b.endLine - b.startLine) < (owner.endLine - owner.startLine)) owner = b;
+    }
+    if (owner === undefined) continue;
+    owner.anchors.push({
+      startLine: anchorLine, endLine: anchorLine, kind: a.kind,
+      priority: ANCHOR_KIND_PRIORITY[a.kind] ?? 300,
+    });
+  }
+  const context: CompressionContext = {
+    // SageRank tuning transform: damp raw call counts with sqrt so a hot edge
+    // (many calls) doesn't linearly dominate AST ranking. Per Priority 0.5 this
+    // edge-weighting decision lives in TOON; MCP hands across the raw callCount.
+    callGraph: facts.edges.map((e) => ({ caller: e.callerName, callee: e.calleeName, weight: Math.sqrt(e.callCount) })),
+    exportedSymbols: facts.defs.filter((d) => d.visibility === 'public').map((d) => d.name),
+  };
+  const out = compressSourceStructured(req.source, req.maxChars, structure, context);
+  if (out.length >= req.source.length) return null; // compression not useful (TOON owns this decision); caller falls back
+  // The 70% retention floor in compressSourceStructured is intentional and may
+  // push the output above req.maxChars: tests (compression-core ×2,
+  // compression-utils ×1) assert that floor as the contract — output MAY
+  // exceed the requested maxChars because the floor overrides the budget by
+  // design. Transport bounding is handled caller-side; TOON does not gate on
+  // fit here.
+  return out;
 }

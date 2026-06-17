@@ -13,9 +13,8 @@
 
 ; --- Parameters ---
 (function_value_parameters
-  (function_value_parameter
-    (parameter
-      (simple_identifier) @local.parameter)))
+  (parameter
+    (simple_identifier) @local.parameter))
 
 ; --- Local variable definitions ---
 (property_declaration

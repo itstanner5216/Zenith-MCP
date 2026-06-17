@@ -1,14 +1,8 @@
 ; Lua Locals
-; CONSERVATIVE: scopes from blocks and functions; parameters; local bindings.
+; scopes from blocks and functions; parameters; local bindings.
 
 ; Function body creates a scope
 (function_declaration
-  body: (block) @scope)
-
-(local_function_declaration
-  body: (block) @scope)
-
-(function_statement
   body: (block) @scope)
 
 ; do...end creates a scope
@@ -17,9 +11,6 @@
 
 ; for loops create a scope
 (for_statement
-  body: (block) @scope)
-
-(for_in_statement
   body: (block) @scope)
 
 ; while loop creates a scope
@@ -38,15 +29,35 @@
 (parameters
   (identifier) @local.parameter)
 
-; Local variable declarations
-(local_variable_declaration
-  (variable_list
-    (identifier) @local.definition))
+; Local variable declarations — initialized form: local x = expr
+(variable_declaration
+  (assignment_statement
+    (variable_list
+      name: (identifier) @local.definition)))
 
-; Local function is a local definition
-(local_function_declaration
+; Local variable declarations — bare form: local x  (no assignment)
+(variable_declaration
+  (variable_list
+    name: (identifier) @local.definition))
+
+; Local function at top level (direct child of chunk)
+(chunk
+  local_declaration: (function_declaration
+    name: (identifier) @local.definition))
+
+; Local function inside a block (nested inside any function/do/if/for/while/repeat)
+(block
+  local_declaration: (function_declaration
+    name: (identifier) @local.definition))
+
+; Numeric for-loop variable is a local definition
+(for_numeric_clause
   name: (identifier) @local.definition)
+
+; Generic for-loop variables are local definitions
+(for_generic_clause
+  (variable_list
+    name: (identifier) @local.definition))
 
 ; Identifier references (all unresolved identifiers)
 (identifier) @local.reference
-

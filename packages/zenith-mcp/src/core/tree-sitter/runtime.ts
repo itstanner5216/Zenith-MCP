@@ -78,10 +78,15 @@ export const _symbolCache: Map<string, SymbolCacheEntry> = new Map();
 // names contain "external_scanner". In the WASM binary, both strings appear
 // as UTF-8 in the imports section. A fast byte-scan detects this reliably.
 //
-// Safety of this heuristic: across all 43 grammar WASMs in this build, only
-// tree-sitter-vue.wasm contains the "GOT.func" byte sequence. All other WASMs
-// that have external scanners compiled them in statically (no GOT imports).
-// False positives are not possible with the current grammar set.
+// Safety of this heuristic: no grammar WASM in the current build is an
+// Emscripten PIC side-module. Every bundled grammar — vue included, now that it
+// is a standalone (non-side-module) build of tree-sitter-grammars/tree-sitter-vue
+// with its scanner linked in statically — keeps its external scanner internal,
+// so none contains the "GOT.func" byte sequence. tree-sitter-vue WAS the
+// historical trigger (an old side-module build poisoned the GOT and was
+// skipped); it now loads cleanly. This pre-screen remains as defense-in-depth
+// against any future side-module wasm. False positives are not possible with
+// the current grammar set.
 //
 // Fix: if a WASM is detected as a PIC side-module before Language.load() is
 // called, we skip the load entirely. The GOT is never touched, so all
@@ -100,7 +105,7 @@ export const _symbolCache: Map<string, SymbolCacheEntry> = new Map();
  * neither appears together in any correctly-built standalone grammar WASM.
  *
  * This is cheaper and safer than a full WASM section parser because:
- *   - vue.wasm is 17 KB — reading it is trivial.
+ *   - grammar WASMs are small (tens of KB) — reading one is trivial.
  *   - The two byte sequences cannot appear together in a well-formed
  *     standalone grammar (confirmed by inspecting all 43 WASMs in the build).
  *   - No WASM spec version dependency; byte scanning is version-agnostic.
@@ -218,7 +223,43 @@ export async function loadLanguage(langName: string): Promise<Language | null> {
         }
 
         try {
-            return await Language.load(wasmPath);
+            const language = await Language.load(wasmPath);
+
+            // ABI compatibility probe: verify the grammar's parse driver is
+            // compatible with the bundled web-tree-sitter core WASM.
+            //
+            // Some upstream grammar WASMs (notably prebuilt downloads like
+            // tree-sitter-sql) were compiled against a different tree-sitter
+            // core version than the bundled tree-sitter.wasm. They load
+            // successfully — Language metadata is intact, Query compilation
+            // and node-type enumeration work — but crash at parse-time with a
+            // WASM "function signature mismatch" RuntimeError.
+            //
+            // Parsing an empty string exercises the driver entry points
+            // without touching a real source tree. If it throws, we still
+            // return the language (Query / symbol-metadata features remain
+            // available) but log a clear warning that source parsing is
+            // disabled for this grammar.
+            //
+            // Unlike the PIC side-module guard above, this does NOT return
+            // null: an ABI-mismatched WASM is harmless to the process (no GOT
+            // poisoning), so non-parsing callers should keep working.
+            const probeParser = new Parser();
+            probeParser.setLanguage(language);
+            try {
+                probeParser.parse('');
+            } catch {
+                process.stderr.write(
+                    `[tree-sitter] ${langName} grammar loaded but its parse driver is ` +
+                    `ABI-incompatible with the bundled runtime core (likely built ` +
+                    `against a different tree-sitter version). Query compilation and ` +
+                    `symbol metadata remain available, but source parsing is disabled ` +
+                    `for ${langName}. Rebuild the grammar with the pinned tree-sitter ` +
+                    `CLI to restore parsing.\n`
+                );
+            }
+
+            return language;
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             process.stderr.write(`Failed to load grammar for ${langName}: ${message}\n`);
@@ -278,6 +319,97 @@ export async function getCompiledQuery(langName: string): Promise<Query | null> 
         const message = err instanceof Error ? err.message : String(err);
         process.stderr.write(`Failed to compile query for ${langName}: ${message}\n`);
         _compiledQueryCache.set(langName, null);
+        return null;
+    }
+}
+
+/**
+ * Per-language declaration of which modular query files exist.
+ * Derived from `grammars/queries/<lang>/` directory listing.
+ * Used by getCompiledModularQuery to avoid filesystem probes for known-absent files.
+ */
+export const QUERIES_LANG_MAP: Readonly<Record<string, readonly string[]>> = {
+    bash:       ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    c:          ['definitions.scm', 'locals.scm', 'references.scm'],
+    c_sharp:    ['definitions.scm', 'locals.scm', 'references.scm'],
+    cpp:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    css:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    dockerfile: ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    go:         ['definitions.scm', 'locals.scm', 'references.scm'],
+    graphql:    ['definitions.scm', 'locals.scm', 'references.scm'],
+    hcl:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    html:       ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    java:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    javascript: ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    json:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    kotlin:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    lua:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    markdown:   ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    nix:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    php:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    prisma:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    proto:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    python:     ['definitions.scm', 'locals.scm', 'references.scm'],
+    query:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    regex:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    ruby:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    rust:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    scss:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    sql:        ['definitions.scm', 'locals.scm', 'references.scm'],
+    svelte:     ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    swift:      ['definitions.scm', 'locals.scm', 'references.scm'],
+    toml:       ['definitions.scm', 'locals.scm', 'references.scm'],
+    tsx:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    typescript: ['definitions.scm', 'locals.scm', 'references.scm'],
+    vue:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    xml:        ['definitions.scm', 'injections.scm', 'locals.scm', 'references.scm'],
+    yaml:       ['definitions.scm', 'locals.scm', 'references.scm'],
+};
+
+const _modularQueryCache: Map<string, Query | null> = new Map();
+
+/**
+ * Load and compile a modular query file (locals.scm, injections.scm, etc.).
+ * Cached permanently. Returns null if the language has no such file or compilation fails.
+ *
+ * Does NOT affect the existing getCompiledQuery() for <lang>-tags.scm.
+ */
+export async function getCompiledModularQuery(langName: string, queryFile: string): Promise<Query | null> {
+    const cacheKey = `${langName}:${queryFile}`;
+    if (_modularQueryCache.has(cacheKey)) {
+        return _modularQueryCache.get(cacheKey) ?? null;
+    }
+
+    // Fast reject: check QUERIES_LANG_MAP before touching the filesystem
+    const available = QUERIES_LANG_MAP[langName];
+    if (!available || !available.includes(queryFile)) {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    const language = await loadLanguage(langName);
+    if (!language) {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    const scmPath = path.join(QUERIES_DIR, langName, queryFile);
+    let content: string;
+    try {
+        content = await fs.readFile(scmPath, 'utf-8');
+    } catch {
+        _modularQueryCache.set(cacheKey, null);
+        return null;
+    }
+
+    try {
+        const query = new Query(language, content);
+        _modularQueryCache.set(cacheKey, query);
+        return query;
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Failed to compile ${queryFile} for ${langName}: ${message}\n`);
+        _modularQueryCache.set(cacheKey, null);
         return null;
     }
 }

@@ -1,10 +1,13 @@
 ; Prisma Schema Definitions
-; CONSERVATIVE: victorhqc/tree-sitter-prisma or similar grammar.
-; Captures model, enum, type, datasource, and generator declarations.
+; Captures model, enum, type, datasource, generator, view, column, and enum value declarations.
 
 ; Model declaration: model Foo { ... }
 (model_declaration
   (identifier) @name.definition.model) @definition.model
+
+; View declaration: view Foo { ... }
+(view_declaration
+  (identifier) @name.definition.view) @definition.view
 
 ; Enum declaration: enum Foo { ... }
 (enum_declaration
@@ -22,11 +25,10 @@
 (generator_declaration
   (identifier) @name.definition.generator) @definition.generator
 
-; Field declaration inside model
-(field_declaration
+; Column/field declaration inside model/type/view
+(column_declaration
   (identifier) @name.definition.field) @definition.field
 
 ; Enum value inside enum block
-(enum_value_declaration
+(enumeral
   (identifier) @name.definition.enum_value) @definition.enum_value
-
