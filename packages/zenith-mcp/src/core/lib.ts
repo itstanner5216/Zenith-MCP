@@ -16,12 +16,18 @@ function hasCode(e: unknown): e is { code: string } {
 export interface FilesystemContext {
     getAllowedDirectories(): string[];
     setAllowedDirectories(directories: string[]): void;
+    setSandboxEnabled(enabled: boolean): void;
     validatePath(requestedPath: string): Promise<string>;
     validateNewFilePath(requestedPath: string): Promise<string>;
 }
 
 export function createFilesystemContext(initialAllowedDirectories: string[] = []): FilesystemContext {
     let _allowedDirectories = [...initialAllowedDirectories];
+    // Access enforcement is OPT-IN. Default off so allowed directories stay
+    // project-context hints (the historical "Zenith is intentionally not a
+    // sandbox" behavior) until an operator explicitly enables the `sandbox`
+    // config flag — registerEnabledTools wires that flag in via setSandboxEnabled().
+    let _sandboxEnabled = false;
 
     function getAllowedDirectories() {
         return [..._allowedDirectories];
@@ -31,12 +37,23 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         _allowedDirectories = [...directories];
     }
 
+    function setSandboxEnabled(enabled: boolean) {
+        _sandboxEnabled = enabled;
+    }
+
     async function isInsideAllowed(candidate: string): Promise<boolean> {
-        // Empty allowlist preserves backwards-compatible "no sandbox" behavior for
-        // callers (CLIs, tests) that explicitly construct the context without dirs.
-        // When any directories ARE supplied, the candidate must resolve inside one
-        // of them — checked with realpath on BOTH sides and a path-separator
-        // boundary so '/tmp/foo' does not match '/tmp/foobar'.
+        // Access enforcement is OPT-IN via the `sandbox` config flag. When it is
+        // disabled (the default), allowed directories are project-context hints
+        // only and never block filesystem access — this decouples "which dirs are
+        // known" (always populated from CLI args / MCP roots) from "is access
+        // enforced" (only when the operator opts in). Historically these were
+        // conflated: any configured dir silently turned enforcement on.
+        if (!_sandboxEnabled) return true;
+        // Sandbox enabled but no allowlist configured: nothing to gate against, so
+        // stay permissive for callers (CLIs, tests) that enable the sandbox without
+        // supplying dirs. When directories ARE supplied, the candidate must resolve
+        // inside one of them — checked with realpath on BOTH sides and a
+        // path-separator boundary so '/tmp/foo' does not match '/tmp/foobar'.
         if (_allowedDirectories.length === 0) return true;
         for (const allowed of _allowedDirectories) {
             const expanded = expandHome(allowed);
@@ -151,7 +168,7 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         return resolvedTarget;
     }
 
-    return { getAllowedDirectories, setAllowedDirectories, validatePath, validateNewFilePath };
+    return { getAllowedDirectories, setAllowedDirectories, setSandboxEnabled, validatePath, validateNewFilePath };
 }
 
 export function formatSize(bytes: number): string {

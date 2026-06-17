@@ -14,9 +14,11 @@
 // throws.
 //
 // CRITICAL invariant preserved (opt-in sandboxing, the no-sandbox default):
-// when the allowlist is EMPTY, isInsideAllowed returns true, so
-// validateNewFilePath stays fully permissive — no behavior change when no
-// allowlist is configured.
+// enforcement only happens when the `sandbox` flag is enabled (setSandboxEnabled).
+// With sandbox OFF — the default — isInsideAllowed returns true regardless of the
+// allowlist, so validateNewFilePath stays fully permissive. The enforcement cases
+// below therefore enable the sandbox explicitly; the EMPTY-allowlist case leaves
+// it off to document the permissive default.
 //
 // Fail-before / pass-after:
 //   - Before the fix, validateNewFilePath('/etc/x.conf') with allowlist=[tmpDir]
@@ -54,6 +56,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
     it('ACCEPTS a new-file path inside an allowed directory', async () => {
         const { createFilesystemContext } = await importLib();
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         // File does not exist yet; nearest existing ancestor is tmpDir itself.
         const result = await fsc.validateNewFilePath(path.join(tmpDir, 'new.txt'));
         expect(result).toBe(path.join(realTmpDir, 'new.txt'));
@@ -62,6 +65,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
     it('ACCEPTS a new-file path in a not-yet-existing subdir of an allowed dir', async () => {
         const { createFilesystemContext } = await importLib();
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         // Multiple missing segments: ancestor resolves to tmpDir, segments are
         // reconstructed on top of it and must stay inside the allowed dir.
         const target = path.join(tmpDir, 'a', 'b', 'deep.txt');
@@ -72,6 +76,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
     it('REJECTS a new-file path outside the allowlist (/etc/x.conf)', async () => {
         const { createFilesystemContext } = await importLib();
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         // /etc exists, so the ancestor resolves to /etc which is OUTSIDE the
         // allowlist — must throw exactly like validatePath does.
         await expect(fsc.validateNewFilePath('/etc/x.conf'))
@@ -81,6 +86,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
     it('REJECTS a new-file path in a sibling directory outside the allowlist', async () => {
         const { createFilesystemContext } = await importLib();
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         // A sibling temp dir that exists but is NOT in the allowlist.
         const sibling = fs.mkdtempSync(path.join(os.tmpdir(), 'fsctx-sibling-'));
         try {
@@ -96,6 +102,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
         // Allow exactly tmpDir; a sibling whose path STARTS WITH tmpDir's string
         // but is a different directory must not slip through the boundary check.
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         const prefixSibling = `${tmpDir}-sibling`;
         fs.mkdirSync(prefixSibling, { recursive: true });
         try {
@@ -122,6 +129,7 @@ describe('createFilesystemContext — validateNewFilePath enforces the allowlist
     it('throws the SAME error message validatePath uses for denied paths', async () => {
         const { createFilesystemContext } = await importLib();
         const fsc = createFilesystemContext([tmpDir]);
+        fsc.setSandboxEnabled(true); // enforcement is opt-in: enable it for these cases
         await expect(fsc.validateNewFilePath('/etc/x.conf'))
             .rejects.toThrow('/etc/x.conf is outside allowed directories');
     });

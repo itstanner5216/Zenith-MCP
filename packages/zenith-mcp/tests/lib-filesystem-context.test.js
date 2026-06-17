@@ -16,6 +16,9 @@ describe('createFilesystemContext — validatePath', () => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fsctx-test-'));
         const { createFilesystemContext } = await importLib();
         fsc = createFilesystemContext([tmpDir]);
+        // Enforcement is opt-in (sandbox flag, default off). These cases exercise
+        // the sandbox boundary, so enable it explicitly.
+        fsc.setSandboxEnabled(true);
     });
 
     afterEach(() => {

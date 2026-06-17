@@ -54,6 +54,10 @@ export type ToolContext = {
     validateNewFilePath(inputPath: string): Promise<string>;
     getAllowedDirectories: () => string[];
     setAllowedDirectories: (directories: string[]) => void;
+    // Optional: real FilesystemContext implements this; lightweight test mocks
+    // may omit it. registerEnabledTools wires the `sandbox` config flag through
+    // it, so enforcement is opt-in rather than implied by allowed-dir presence.
+    setSandboxEnabled?: (enabled: boolean) => void;
 };
 
 export function errorMessage(error: unknown): string {
