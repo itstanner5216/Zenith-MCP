@@ -27,7 +27,7 @@ jobs:
           version: "11.5.1"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           # Pinned to engines.node in packages/zenith-mcp/package.json
           node-version: "26.3.0"
