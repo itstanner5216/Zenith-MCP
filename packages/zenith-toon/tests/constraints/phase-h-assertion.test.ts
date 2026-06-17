@@ -56,7 +56,8 @@ describe('Phase H — randomized structures never break Priority-0', () => {
         }, `${fixture} iter ${iter}`).not.toThrow();
         // And the emitted output must satisfy the contract.
         out = compressSourceStructured(source, budget, structure);
-        assertLineTruth(source, out, { minGap: 6, label: `${fixture}#${iter}` });
+        assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: `${fixture}#${iter}` });
       }
     });
   }

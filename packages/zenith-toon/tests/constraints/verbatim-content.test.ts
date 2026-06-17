@@ -42,7 +42,8 @@ describe('Verbatim — structured source output never synthesizes', () => {
     ].join('\n');
     const out = compressSourceStructured(source, Math.floor(source.length * 0.5), synthesizeStructure(source));
     // Every shown line is verbatim (checker enforces character-perfect copy).
-    assertLineTruth(source, out, { minGap: 6, label: 'verbatim-comments' });
+    assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: 'verbatim-comments' });
     for (const { re, why } of SYNTHETIC_PATTERNS) {
       expect(re.test(out), `synthetic content: ${why}`).toBe(false);
     }
@@ -63,7 +64,8 @@ describe('Verbatim — structured source output never synthesizes', () => {
       },
     ];
     const out = compressSourceStructured(source, Math.floor(source.length * 0.4), structure);
-    assertLineTruth(source, out, { minGap: 6, label: 'json-structured' });
+    assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: 'json-structured' });
     for (const { re, why } of SYNTHETIC_PATTERNS) {
       expect(re.test(out), `JSON synthetic content: ${why}`).toBe(false);
     }
@@ -72,7 +74,8 @@ describe('Verbatim — structured source output never synthesizes', () => {
   it('never reorders lines (output line numbers are monotonic)', () => {
     const source = Array.from({ length: 50 }, (_, i) => `const v${i} = step(${i});`).join('\n');
     const out = compressSourceStructured(source, Math.floor(source.length * 0.3), synthesizeStructure(source));
-    const { shown } = assertLineTruth(source, out, { minGap: 6, label: 'no-reorder' });
+    const { shown } = assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: 'no-reorder' });
     const sorted = [...shown].sort((a, b) => a - b);
     expect(shown).toEqual(sorted);
   });

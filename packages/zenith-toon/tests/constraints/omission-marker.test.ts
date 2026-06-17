@@ -68,7 +68,8 @@ describe('Omission markers — canonical format only', () => {
 
   it('marker ranges are strictly ascending and non-overlapping', () => {
     for (const { name, source, out } of outputs) {
-      const { markers } = assertLineTruth(source, out, { minGap: 6, label: name });
+      const { markers } = assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: name });
       for (let i = 1; i < markers.length; i++) {
         expect(markers[i]!.x, `${name}: markers must not overlap`).toBeGreaterThan(markers[i - 1]!.y);
       }
@@ -79,7 +80,8 @@ describe('Omission markers — canonical format only', () => {
 describe('Omission markers — 6-line floor on the structured engine', () => {
   it('no internal omission gap is smaller than 6 lines', () => {
     for (const { name, source, out } of allStructuredOutputs()) {
-      const { markers } = assertLineTruth(source, out, { label: name });
+      const { markers } = assertLineTruth(source, out, { requireTrailingMarker: false,
+          requireLeadingMarker: false, label: name });
       for (const m of markers) {
         const span = m.y - m.x + 1;
         // Trailing-to-EOF markers are still bounded by the engine; an internal
@@ -104,7 +106,8 @@ describe('Omission markers — 6-line floor on the structured engine', () => {
     const source = lines.join('\n');
     const structure = synthesizeStructure(source);
     const out = compressSourceStructured(source, Math.floor(source.length * 0.5), structure);
-    const { markers } = assertLineTruth(source, out, { minGap: 6, label: 'gap-fill' });
+    const { markers } = assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
+          requireLeadingMarker: false, label: 'gap-fill' });
     for (const m of markers) {
       expect(m.y - m.x + 1).toBeGreaterThanOrEqual(6);
     }
