@@ -1,0 +1,63 @@
+# Enforces the zenith-toon compression contract on every change.
+#
+# Runs the constraint suite under packages/zenith-toon/tests/constraints, which
+# mechanically pins docs/toon-constraints/constraints.md and
+# docs/toon-goal/zenith-toon-goal.md: Priority-0 line-number truth, verbatim
+# output, the single `[TRUNCATED: lines X-Y]` marker, the 6-line omission floor,
+# the 70% retention floor, Phase-H safety, the MCP→TOON ownership seam, and
+# real-engine reuse.
+#
+# Free, no-setup: GitHub-hosted ubuntu runner + pnpm + Vitest. Nothing external.
+name: zenith-toon constraints
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "packages/zenith-toon/**"
+      - "packages/zenith-mcp/src/core/compression.ts"
+      - "packages/zenith-mcp/src/tools/read_file.ts"
+      - "packages/zenith-mcp/src/tools/read_multiple_files.ts"
+      - "docs/toon-constraints/**"
+      - "docs/toon-goal/**"
+      - ".github/workflows/zenith-toon-constraints.yml"
+      - "pnpm-lock.yaml"
+  pull_request:
+    paths:
+      - "packages/zenith-toon/**"
+      - "packages/zenith-mcp/src/core/compression.ts"
+      - "packages/zenith-mcp/src/tools/read_file.ts"
+      - "packages/zenith-mcp/src/tools/read_multiple_files.ts"
+      - "docs/toon-constraints/**"
+      - "docs/toon-goal/**"
+      - ".github/workflows/zenith-toon-constraints.yml"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  constraints:
+    name: Compression contract suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run zenith-toon constraint suite
+        run: pnpm --filter zenith-toon run test

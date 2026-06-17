@@ -17,6 +17,7 @@
     "rebuild:mcp": "pnpm --filter zenith-mcp run rebuild",
     "build:turbo": "turbo run build",
     "test": "pnpm --filter zenith-mcp run test",
+    "test:toon": "pnpm --filter zenith-toon run test",
     "test:turbo": "turbo run test --filter=zenith-mcp",
     "start": "pnpm --filter zenith-mcp run start",
     "start:http": "pnpm --filter zenith-mcp run start:http",
