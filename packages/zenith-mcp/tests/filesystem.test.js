@@ -18,16 +18,21 @@ function captureHandler() {
 }
 
 function mkCtx(baseDir) {
+    const validateInsideBase = async (p) => {
+        const resolved = path.resolve(p);
+        const allowedBase = path.resolve(baseDir);
+        const relative = path.relative(allowedBase, resolved);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+            const err = new Error('Path outside allowed directory');
+            err.code = 'ENOENT';
+            throw err;
+        }
+        return resolved;
+    };
+
     return {
-        validatePath: async (p) => {
-            const resolved = path.resolve(p);
-            if (!resolved.startsWith(path.resolve(baseDir))) {
-                const err = new Error('Path outside allowed directory');
-                err.code = 'ENOENT';
-                throw err;
-            }
-            return resolved;
-        },
+        validatePath: validateInsideBase,
+        validateNewFilePath: validateInsideBase,
         getAllowedDirectories: () => [baseDir],
     };
 }
@@ -140,7 +145,7 @@ describe('file_manager move', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
-    it('moves a file to a new location', async () => {
+    it('moves a file to a new filename under an existing allowed parent', async () => {
         const src = path.join(tmpDir, 'original.txt');
         const dst = path.join(tmpDir, 'moved.txt');
         fs.writeFileSync(src, 'content');
@@ -148,6 +153,26 @@ describe('file_manager move', () => {
         expect(result.content[0].text).toBe('Moved.');
         expect(fs.existsSync(src)).toBe(false);
         expect(fs.readFileSync(dst, 'utf-8')).toBe('content');
+    });
+
+    it('moves a file into a not-yet-existing nested destination', async () => {
+        const src = path.join(tmpDir, 'original.txt');
+        const dst = path.join(tmpDir, 'nested', 'deeper', 'moved.txt');
+        fs.writeFileSync(src, 'nested content');
+        const result = await handler({ mode: 'move', source: src, destination: dst });
+        expect(result.content[0].text).toBe('Moved.');
+        expect(fs.existsSync(src)).toBe(false);
+        expect(fs.readFileSync(dst, 'utf-8')).toBe('nested content');
+    });
+
+    it('rejects moving to a destination outside the sandbox', async () => {
+        const src = path.join(tmpDir, 'original.txt');
+        const dst = path.join(os.tmpdir(), `outside-${Date.now()}.txt`);
+        fs.writeFileSync(src, 'content');
+        await expect(handler({ mode: 'move', source: src, destination: dst }))
+            .rejects.toThrow('Path outside allowed directory');
+        expect(fs.readFileSync(src, 'utf-8')).toBe('content');
+        expect(fs.existsSync(dst)).toBe(false);
     });
 
     it('renames a directory', async () => {
