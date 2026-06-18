@@ -1407,6 +1407,79 @@ function _compressSourceStructured(
   // matches what is actually emitted (Priority-0 / anti-bloat).
   const lineCost = (idx: number): number => lineAt(idx).length + (String(idx + 1).length + 2) + 1;
 
+  // Marker byte cost for a 1-based inclusive range, matching the emitter's
+  // template literal EXACTLY so selection accounting equals emitted output.
+  const markerCost = (x: number, y: number): number => `[TRUNCATED: lines ${x}-${y}]`.length + 1;
+
+  // Per-line AST-aware SHED weight. When the fully-rendered surface (every shown
+  // line PLUS every [TRUNCATED] marker the emitter inserts - head, interior, and
+  // tail) overshoots the budget, the selection must shrink. That shrink is a
+  // DELIBERATE, ranking-driven compression decision - never the historical
+  // emit-time blind cut that silently dropped the file's tail with no marker.
+  // Higher weight = surrendered sooner. The weight is derived entirely from the
+  // intelligence TOON already computed: the owning block's SageRank rank (later
+  // in sortedBlocks = less central = shed sooner) and the line's role within its
+  // block (a plain body line outranks both its signature and its anchor lines
+  // for removal - the structural skeleton survives while predictable bodies fall
+  // away first). Top-level lines (imports / module constants) carry no entry, so
+  // they default to weight 0 and are the LAST content surrendered.
+  const shedWeight = new Map<number, number>();
+  {
+    const rankOf = new Map<StructureBlock & { priority: number }, number>();
+    sortedBlocks.forEach((b, r) => rankOf.set(b, r));
+    const RANK_SPAN = sortedBlocks.length + 1;
+    for (const blk of sortedBlocks) {
+      const s = Math.max(0, blk.startLine);
+      const e = Math.min(n - 1, blk.endLine);
+      if (s > e) continue;
+      const rank = rankOf.get(blk) ?? RANK_SPAN;
+      const anchorLines = new Set<number>();
+      for (const a of blk.anchors ?? []) {
+        for (let al = a.startLine; al <= a.endLine; al++) anchorLines.add(al);
+      }
+      for (let ln = s; ln <= e; ln++) {
+        // Signature (block start) and anchor lines ARE the structural skeleton:
+        // shed them only after every plain body line of equal-or-lower-ranked
+        // blocks. roleBias lifts plain body lines above them by a full rank span.
+        const isSkeleton = ln === s || anchorLines.has(ln);
+        const roleBias = isSkeleton ? 0 : RANK_SPAN;
+        // +1 keeps the top-ranked block's skeleton at weight >= 1, strictly
+        // above the weight-0 top-level floor.
+        const w = rank + 1 + roleBias;
+        const cur = shedWeight.get(ln);
+        // A line shared by nested blocks keeps the MINIMUM weight (its most
+        // protective owner wins) so we never shed a line some block ranks high.
+        if (cur === undefined || w < cur) shedWeight.set(ln, w);
+      }
+    }
+  }
+
+  // True rendered byte cost of the CURRENT selection: every shown line plus
+  // every marker the emitter will insert - the >= threshold head gap (lines
+  // before the first shown line), every >= threshold interior gap, and the
+  // closing tail gap (lines after the last shown line through EOF). This is the
+  // SINGLE source of truth for "does the selection fit"; the selection is
+  // reconciled against THIS value so the emitter renders the surface 1:1 and
+  // never blind-cuts a selected line or an omission boundary.
+  const renderedCost = (): number => {
+    const keys = [...resultLines.keys()].sort((a, b) => a - b);
+    const first = keys[0];
+    const last = keys[keys.length - 1];
+    if (first === undefined || last === undefined) return 0;
+    let cost = 0;
+    if (first >= _MIN_OMISSION_THRESHOLD) cost += markerCost(1, first);
+    let prevKey = -1;
+    for (const ln of keys) {
+      if (prevKey >= 0 && ln - prevKey - 1 >= _MIN_OMISSION_THRESHOLD) {
+        cost += markerCost(prevKey + 2, ln);
+      }
+      cost += lineCost(ln);
+      prevKey = ln;
+    }
+    if (n - 1 - last >= _MIN_OMISSION_THRESHOLD) cost += markerCost(last + 2, n);
+    return cost;
+  };
+
   for (const block of sortedBlocks) {
     const start = Math.max(0, block.startLine);
     const end = Math.min(n - 1, block.endLine);
@@ -1608,16 +1681,141 @@ function _compressSourceStructured(
     }
   }
 
+  // Emission-fit reconciliation (Priority-0 + Priority 0.5). The selected set is
+  // the compression surface and the emitter must render it 1:1 - every shown
+  // line AND every [TRUNCATED] marker (head, interior, tail). Historically the
+  // emitter ran a budget-break loop that silently dropped whatever did not fit -
+  // typically the file's entire tail - with NO marker, so the model believed the
+  // file ended early. That is the core bug. The fix reconciles the SELECTION
+  // against the fully-rendered byte cost HERE, deliberately and AST-aware, so the
+  // emitter below never has to cut. While the rendered surface (lines + all
+  // markers) exceeds the budget, surrender the single least-valuable selected
+  // line per `shedWeight` (the SageRank/anchor-derived ranking) - body before
+  // signature, low-ranked block before high-ranked, tail before head on ties.
+  // Each shed converts shown lines into a marked omission: a deliberate,
+  // intelligent compression decision, never a positional emit-time break. After
+  // each shed the selection is re-settled to total Priority-0 convergence so no
+  // sub-threshold interior gap and no marker-bounded sub-threshold sliver can
+  // survive into the emitted surface.
+  {
+    // Settle one Priority-0 violation created by shedding: (1) a sub-threshold
+    // interior gap (< threshold consecutive missing) cannot earn a marker, so
+    // its boundary lines must also go; (2) a run of fewer than threshold
+    // non-blank shown lines bounded on BOTH sides by >= threshold omissions
+    // would sit between two markers - drop it (we are over budget, so expansion
+    // is impossible; merge it into the surrounding truncation). Both merge the
+    // offending lines into the larger adjacent omission by dropping from the
+    // SHORTER contiguous run. Returns true if anything changed.
+    const settleOnce = (): boolean => {
+      const sk = [...resultLines.keys()].sort((a, b) => a - b);
+      // (1) Sub-threshold interior gaps.
+      for (let ki = 1; ki < sk.length; ki++) {
+        const ln = sk[ki];
+        const pv = sk[ki - 1];
+        if (ln === undefined || pv === undefined) continue;
+        const gap = ln - pv - 1;
+        if (gap <= 0 || gap >= _MIN_OMISSION_THRESHOLD) continue;
+        let prevRunLen = 1;
+        for (let j = ki - 2; j >= 0; j--) {
+          const a = sk[j]; const b = sk[j + 1];
+          if (a !== undefined && b !== undefined && a === b - 1) prevRunLen++; else break;
+        }
+        let nextRunLen = 1;
+        for (let j = ki + 1; j < sk.length; j++) {
+          const a = sk[j]; const b = sk[j - 1];
+          if (a !== undefined && b !== undefined && a === b + 1) nextRunLen++; else break;
+        }
+        const dropIdx = prevRunLen <= nextRunLen ? pv : ln;
+        resultLines.delete(dropIdx);
+        used -= lineCost(dropIdx);
+        return true;
+      }
+      // (2) Marker-bounded sub-threshold slivers. Partition into contiguous runs;
+      // any interior run (>= threshold omission on BOTH sides) holding fewer than
+      // threshold non-blank shown lines is dropped wholesale.
+      const runs: number[][] = [];
+      let run: number[] = [];
+      for (const k of sk) {
+        const tail = run.length > 0 ? run[run.length - 1] : undefined;
+        if (tail === undefined || k === tail + 1) run.push(k);
+        else { runs.push(run); run = [k]; }
+      }
+      if (run.length > 0) runs.push(run);
+      for (let r = 0; r < runs.length; r++) {
+        const cur = runs[r];
+        if (cur === undefined || cur.length === 0) continue;
+        const first = cur[0];
+        const last = cur[cur.length - 1];
+        if (first === undefined || last === undefined) continue;
+        // Omission length before/after this run (head gap for the first run,
+        // tail gap for the last run). A marker brackets the run when the
+        // omission on that side is >= threshold.
+        let gapBefore: number;
+        if (r === 0) gapBefore = first;
+        else {
+          const prevRun = runs[r - 1];
+          const prevEnd = prevRun === undefined ? undefined : prevRun[prevRun.length - 1];
+          gapBefore = prevEnd === undefined ? first : first - prevEnd - 1;
+        }
+        let gapAfter: number;
+        if (r === runs.length - 1) gapAfter = n - 1 - last;
+        else {
+          const nextRun = runs[r + 1];
+          const nextStart = nextRun === undefined ? undefined : nextRun[0];
+          gapAfter = nextStart === undefined ? n - 1 - last : nextStart - last - 1;
+        }
+        const markerBefore = gapBefore >= _MIN_OMISSION_THRESHOLD;
+        const markerAfter = gapAfter >= _MIN_OMISSION_THRESHOLD;
+        if (!markerBefore || !markerAfter) continue;
+        const nonBlankShown = cur.filter((i) => lineAt(i).trim() !== '').length;
+        if (nonBlankShown >= _MIN_OMISSION_THRESHOLD) continue;
+        for (const i of cur) {
+          resultLines.delete(i);
+          used -= lineCost(i);
+        }
+        return true;
+      }
+      return false;
+    };
+
+    // Termination guard: each shed deletes at least one selected line, so at
+    // most resultLines.size sheds can run; each settleOnce also strictly shrinks
+    // the selection.
+    let guard = (resultLines.size + 1) * 2;
+    while (renderedCost() > budget && resultLines.size > 0 && guard-- > 0) {
+      // Pick the least-valuable selected line: max shedWeight, tail-first on
+      // ties (higher index sheds first - the natural compression direction, and
+      // the exact boundary the old code dropped without a marker).
+      let victim = -1;
+      let victimWeight = -1;
+      for (const ln of resultLines.keys()) {
+        const w = shedWeight.get(ln) ?? 0;
+        if (w > victimWeight || (w === victimWeight && ln > victim)) {
+          victim = ln;
+          victimWeight = w;
+        }
+      }
+      if (victim < 0) break;
+      resultLines.delete(victim);
+      used -= lineCost(victim);
+      // Re-settle every Priority-0 violation the shed may have introduced before
+      // the next cost check.
+      while (settleOnce()) { /* converge */ }
+    }
+  }
+
   // Phase H: inline assertion over the final selected set (Priority-0).
   {
     const finalKeys = [...resultLines.keys()].sort((a, b) => a - b);
     for (let ki = 0; ki < finalKeys.length; ki++) {
-      const idx = finalKeys[ki]!;
+      const idx = finalKeys[ki];
+      if (idx === undefined) continue;
       if (idx < 0 || idx >= n) {
         throw new Error(`Priority-0 violation: selected index ${idx} out of range (n=${n})`);
       }
       if (ki > 0) {
-        const prevIdx = finalKeys[ki - 1]!;
+        const prevIdx = finalKeys[ki - 1];
+        if (prevIdx === undefined) continue;
         if (idx <= prevIdx) {
           throw new Error(`Priority-0 violation: selected indices not strictly ascending (${prevIdx} >= ${idx})`);
         }
@@ -1629,30 +1827,39 @@ function _compressSourceStructured(
     }
   }
 
-  // Emit in original line order. Every shown line is `${idx+1}. <verbatim>`;
-  // every gap >= threshold becomes a single flush-left `[TRUNCATED: lines X-Y]`
-  // (1-based inclusive). The budget-break keeps output within budget.
+  // Emit in original line order. The emitter is now a FAITHFUL RENDERER of the
+  // reconciled selection: every shown line is `${idx+1}. <verbatim>`, and every
+  // omission >= threshold - at the HEAD (before the first shown line), in the
+  // INTERIOR (between shown lines), and at the TAIL (after the last shown line
+  // through EOF) - is a single flush-left `[TRUNCATED: lines X-Y]` marker
+  // (1-based inclusive). There is NO budget-break: emission-fit reconciliation
+  // above already guaranteed the rendered surface fits, so the emitter never
+  // silently drops a selected line or an omission boundary.
   const output: string[] = [];
   const sortedKeys = [...resultLines.keys()].sort((a, b) => a - b);
-  let prev = -1;
-  let actualUsed = 0;
-
-  for (const ln of sortedKeys) {
-    const lineText = `${ln + 1}. ${resultLines.get(ln)!}`;
-    const lineSize = lineText.length + 1;
-    if (prev >= 0 && ln - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
-      const gapMarker = `[TRUNCATED: lines ${prev + 2}-${ln}]`;
-      const gapMarkerSize = gapMarker.length + 1;
-      // The marker is mandatory for a >= threshold gap; if it (plus the line)
-      // cannot fit, stop here rather than emit an unmarked discontinuity.
-      if (actualUsed + gapMarkerSize + lineSize > budget) break;
-      output.push(gapMarker);
-      actualUsed += gapMarkerSize;
+  const firstShown = sortedKeys[0];
+  if (firstShown !== undefined) {
+    // HEAD boundary: lines 1..firstShown omitted before the first shown line are
+    // a deliberate omission and MUST carry a marker (boundary loss is never
+    // blind). 0-based firstShown => 1-based omitted range is 1..firstShown.
+    if (firstShown >= _MIN_OMISSION_THRESHOLD) {
+      output.push(`[TRUNCATED: lines 1-${firstShown}]`);
     }
-    if (actualUsed + lineSize > budget) break;
-    output.push(lineText);
-    actualUsed += lineSize;
-    prev = ln;
+    let prev = -1;
+    for (const ln of sortedKeys) {
+      if (prev >= 0 && ln - prev - 1 >= _MIN_OMISSION_THRESHOLD) {
+        output.push(`[TRUNCATED: lines ${prev + 2}-${ln}]`);
+      }
+      output.push(`${ln + 1}. ${lineAt(ln)}`);
+      prev = ln;
+    }
+    const lastShown = sortedKeys[sortedKeys.length - 1];
+    // TAIL boundary: lines after the last shown line through EOF are a deliberate
+    // omission and MUST carry a marker - the exact head/tail loss the old
+    // budget-break emitter hid.
+    if (lastShown !== undefined && n - 1 - lastShown >= _MIN_OMISSION_THRESHOLD) {
+      output.push(`[TRUNCATED: lines ${lastShown + 2}-${n}]`);
+    }
   }
 
   return output.join('\n');
