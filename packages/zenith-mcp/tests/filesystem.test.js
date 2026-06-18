@@ -552,42 +552,42 @@ describe('file_manager move - parent directory creation uses validateNewFilePath
 });
 
 describe('file_manager move - validateNewFilePath context (additional)', () => {
-    it('validateNewFilePath accepts path exactly equal to the base directory', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
-        // path.relative(base, base) === '' which does not start with '..' and is not absolute
-        const resolved = await ctx.validateNewFilePath(tmpDir);
-        expect(resolved).toBe(path.resolve(tmpDir));
+    let tmpDir;
+    let ctx;
+
+    beforeEach(() => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+    });
+
+    afterEach(() => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
+    it('validateNewFilePath accepts path exactly equal to the base directory', async () => {
+        // path.relative(base, base) === '' which does not start with '..' and is not absolute
+        const resolved = await ctx.validateNewFilePath(tmpDir);
+        expect(resolved).toBe(path.resolve(tmpDir));
+    });
+
     it('validateNewFilePath rejects a sibling directory path', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         // sibling: strip last segment and add a different name
         const siblingDir = path.join(path.dirname(tmpDir), `sibling-${Date.now()}`);
         const siblingFile = path.join(siblingDir, 'escape.txt');
         await expect(ctx.validateNewFilePath(siblingFile))
             .rejects.toThrow('Path outside allowed directory');
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
     it('validatePath and validateNewFilePath behave identically for inside paths', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         const insidePath = path.join(tmpDir, 'x', 'y', 'z.txt');
         const r1 = await ctx.validatePath(insidePath);
         const r2 = await ctx.validateNewFilePath(insidePath);
         expect(r1).toBe(r2);
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
     it('validatePath and validateNewFilePath both reject paths outside the sandbox', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         const outside = path.join(os.tmpdir(), `both-reject-${Date.now()}.txt`);
         await expect(ctx.validatePath(outside)).rejects.toThrow('Path outside allowed directory');
         await expect(ctx.validateNewFilePath(outside)).rejects.toThrow('Path outside allowed directory');
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 });
