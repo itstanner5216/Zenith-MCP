@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
@@ -123,13 +124,51 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         fs.mkdirSync(filePath);
 
         await expect(handler({ path: filePath, content: 'cannot replace directory' }))
-            .rejects.toThrow(/Write failed \((EISDIR|EPERM|ENOTEMPTY)\)\. Cached as stash:/);
+            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:/);
+    });
+
+    it('stash id in write failure message is a non-empty numeric identifier', async () => {
+        const filePath = path.join(repoDir, 'dir-for-stash-id-check');
+        fs.mkdirSync(filePath);
+
+        await expect(handler({ path: filePath, content: 'data' }))
+            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:\d+\./);
+    });
+
+    it('omits error code from message when underlying error has no code property', async () => {
+        const filePath = path.join(repoDir, 'codeless-error.txt');
+        const spy = vi.spyOn(fsPromises, 'rename').mockRejectedValueOnce(new Error('synthetic no-code failure'));
+        try {
+            await expect(handler({ path: filePath, content: 'some content' }))
+                .rejects.toThrow(/^Write failed\. Cached as stash:\d+\.$/);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it('removes temporary file after failed rename', async () => {
+        const filePath = path.join(repoDir, 'dir-for-tmp-cleanup');
+        fs.mkdirSync(filePath);
+
+        await expect(handler({ path: filePath, content: 'cleanup test' })).rejects.toThrow(/Write failed/);
+
+        const entries = fs.readdirSync(repoDir);
+        const tmpFiles = entries.filter(e => e.endsWith('.tmp'));
+        expect(tmpFiles).toHaveLength(0);
+    });
+
+    it('reports error code in write failure message when append mode target is a directory', async () => {
+        const filePath = path.join(repoDir, 'dir-append-target');
+        fs.mkdirSync(filePath);
+
+        await expect(handler({ path: filePath, content: 'appended data', append: true }))
+            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:\d+\./);
     });
 
     it('normalizes CRLF to LF on write', async () => {
         const filePath = path.join(repoDir, 'crlf.txt');
         await handler({ path: filePath, content: 'line1\r\nline2\r\n' });
-        const written = fs.readFileSync(filePath, 'utf-8');
+
         expect(written).not.toContain('\r\n');
         expect(written).toBe('line1\nline2\n');
     });
