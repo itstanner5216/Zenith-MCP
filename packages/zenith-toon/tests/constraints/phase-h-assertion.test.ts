@@ -49,16 +49,14 @@ describe('Phase H — randomized structures never break Priority-0', () => {
       for (let iter = 0; iter < 200; iter++) {
         const structure = randomStructure(source, rng);
         const budget = 1 + Math.floor(rng() * source.length);
-        let out: string;
+        let out = '';
         // Phase H must never throw for in-range structure.
         expect(() => {
           out = compressSourceStructured(source, budget, structure);
         }, `${fixture} iter ${iter}`).not.toThrow();
         // And the emitted output must satisfy the contract.
-        out = compressSourceStructured(source, budget, structure);
         assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
           requireLeadingMarker: false, label: `${fixture}#${iter}` });
-      }
     });
   }
 });
