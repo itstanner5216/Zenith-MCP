@@ -18,8 +18,8 @@
 //   1. `ZENITH_ENV_FILE` — explicit override (absolute or cwd-relative path).
 //   2. `<cwd>/.env`
 //   3. `<package root>/.env`        (packages/zenith-mcp/.env)
-//   4. `<workspace root>/.env`      (repo root containing pnpm-workspace.yaml
-//                                    or package.json with "workspaces")
+//   4. `<workspace root>/.env`      (repo root containing pnpm-workspace.yaml,
+//                                    lerna.json, or .git)
 //
 // All paths are tried best-effort; missing files are silent. Any other error
 // (e.g. malformed file) is surfaced on stderr so misconfiguration is visible
