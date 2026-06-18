@@ -1,5 +1,6 @@
 import { z } from "zod";
 import fs from "fs/promises";
+import path from "path";
 import { getFileStats } from '../core/lib.js';
 import type { ToolServer, ToolContext } from './types.js';
 
@@ -51,7 +52,18 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.source) throw new Error('source required for move.');
             if (!args.destination) throw new Error('destination required for move.');
             const validSourcePath = await ctx.validatePath(args.source);
-            const validDestPath = await ctx.validatePath(args.destination);
+            const validDestPath = await ctx.validateNewFilePath(args.destination);
+            const sourceStats = await fs.stat(validSourcePath);
+            if (sourceStats.isDirectory()) {
+                const relativeDest = path.relative(validSourcePath, validDestPath);
+                const movingIntoOwnSubdirectory = relativeDest !== ''
+                    && !relativeDest.startsWith('..')
+                    && !path.isAbsolute(relativeDest);
+                if (movingIntoOwnSubdirectory) {
+                    throw new Error('Cannot move a directory into its own subdirectory.');
+                }
+            }
+            await fs.mkdir(path.dirname(validDestPath), { recursive: true });
             await fs.rename(validSourcePath, validDestPath);
             return { content: [{ type: "text", text: "Moved." }] };
         }
