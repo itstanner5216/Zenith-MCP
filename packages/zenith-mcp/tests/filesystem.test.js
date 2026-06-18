@@ -401,3 +401,193 @@ describe('file_manager registration', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 });
+
+describe('file_manager move - missing argument guards', () => {
+    let tmpDir;
+    let ctx;
+    let handler;
+
+    beforeEach(async () => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+        const mod = await importFilesystem();
+        const { server, calls } = captureHandler();
+        mod.register(server, ctx);
+        handler = calls[0].handler;
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('throws "source required for move." when source is omitted', async () => {
+        const dst = path.join(tmpDir, 'dest.txt');
+        await expect(handler({ mode: 'move', destination: dst }))
+            .rejects.toThrow('source required for move.');
+    });
+
+    it('throws "destination required for move." when destination is omitted', async () => {
+        const src = path.join(tmpDir, 'src.txt');
+        fs.writeFileSync(src, 'data');
+        await expect(handler({ mode: 'move', source: src }))
+            .rejects.toThrow('destination required for move.');
+    });
+
+    it('throws "source required for move." when source is empty string', async () => {
+        const dst = path.join(tmpDir, 'dest.txt');
+        await expect(handler({ mode: 'move', source: '', destination: dst }))
+            .rejects.toThrow('source required for move.');
+    });
+
+    it('throws "destination required for move." when destination is empty string', async () => {
+        const src = path.join(tmpDir, 'src.txt');
+        fs.writeFileSync(src, 'data');
+        await expect(handler({ mode: 'move', source: src, destination: '' }))
+            .rejects.toThrow('destination required for move.');
+    });
+});
+
+describe('file_manager move - non-existent source', () => {
+    let tmpDir;
+    let ctx;
+    let handler;
+
+    beforeEach(async () => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+        const mod = await importFilesystem();
+        const { server, calls } = captureHandler();
+        mod.register(server, ctx);
+        handler = calls[0].handler;
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('throws ENOENT when source file does not exist inside sandbox', async () => {
+        const src = path.join(tmpDir, 'ghost.txt');
+        const dst = path.join(tmpDir, 'ghost-dest.txt');
+        // src intentionally not created
+        await expect(handler({ mode: 'move', source: src, destination: dst }))
+            .rejects.toThrow(/ENOENT/);
+    });
+
+    it('does not create destination when source is missing', async () => {
+        const src = path.join(tmpDir, 'nonexistent.txt');
+        const dst = path.join(tmpDir, 'shouldnotexist.txt');
+        await expect(handler({ mode: 'move', source: src, destination: dst }))
+            .rejects.toThrow();
+        expect(fs.existsSync(dst)).toBe(false);
+    });
+});
+
+describe('file_manager move - parent directory creation uses validateNewFilePath', () => {
+    let tmpDir;
+    let ctx;
+    let handler;
+
+    beforeEach(async () => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+        const mod = await importFilesystem();
+        const { server, calls } = captureHandler();
+        mod.register(server, ctx);
+        handler = calls[0].handler;
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('mkdir for destination parent is idempotent when parent already exists', async () => {
+        const existingParent = path.join(tmpDir, 'existing-parent');
+        fs.mkdirSync(existingParent);
+        const src = path.join(tmpDir, 'file.txt');
+        const dst = path.join(existingParent, 'file.txt');
+        fs.writeFileSync(src, 'idempotent');
+        const result = await handler({ mode: 'move', source: src, destination: dst });
+        expect(result.content[0].text).toBe('Moved.');
+        expect(fs.readFileSync(dst, 'utf-8')).toBe('idempotent');
+    });
+
+    it('creates deeply nested parent directories (3+ levels)', async () => {
+        const src = path.join(tmpDir, 'deep.txt');
+        const dst = path.join(tmpDir, 'a', 'b', 'c', 'd', 'deep.txt');
+        fs.writeFileSync(src, 'deep');
+        const result = await handler({ mode: 'move', source: src, destination: dst });
+        expect(result.content[0].text).toBe('Moved.');
+        expect(fs.readFileSync(dst, 'utf-8')).toBe('deep');
+        expect(fs.statSync(path.join(tmpDir, 'a', 'b', 'c', 'd')).isDirectory()).toBe(true);
+    });
+
+    it('uses validateNewFilePath not validatePath for destination (calls the right ctx method)', async () => {
+        let validateNewFilePathCallCount = 0;
+        let validatePathCallCount = 0;
+        const spyCtx = {
+            validatePath: async (p) => {
+                validatePathCallCount++;
+                return ctx.validatePath(p);
+            },
+            validateNewFilePath: async (p) => {
+                validateNewFilePathCallCount++;
+                return ctx.validateNewFilePath(p);
+            },
+            getAllowedDirectories: ctx.getAllowedDirectories,
+        };
+        const mod = await importFilesystem();
+        const { server, calls } = captureHandler();
+        mod.register(server, spyCtx);
+        const spyHandler = calls[0].handler;
+
+        const src = path.join(tmpDir, 'spy-src.txt');
+        const dst = path.join(tmpDir, 'spy-dst.txt');
+        fs.writeFileSync(src, 'spy');
+        await spyHandler({ mode: 'move', source: src, destination: dst });
+
+        // source uses validatePath, destination uses validateNewFilePath
+        expect(validatePathCallCount).toBe(1);
+        expect(validateNewFilePathCallCount).toBe(1);
+    });
+});
+
+describe('file_manager move - validateNewFilePath context (additional)', () => {
+    it('validateNewFilePath accepts path exactly equal to the base directory', async () => {
+        const tmpDir = mkTmpDir();
+        const ctx = mkCtx(tmpDir);
+        // path.relative(base, base) === '' which does not start with '..' and is not absolute
+        const resolved = await ctx.validateNewFilePath(tmpDir);
+        expect(resolved).toBe(path.resolve(tmpDir));
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('validateNewFilePath rejects a sibling directory path', async () => {
+        const tmpDir = mkTmpDir();
+        const ctx = mkCtx(tmpDir);
+        // sibling: strip last segment and add a different name
+        const siblingDir = path.join(path.dirname(tmpDir), `sibling-${Date.now()}`);
+        const siblingFile = path.join(siblingDir, 'escape.txt');
+        await expect(ctx.validateNewFilePath(siblingFile))
+            .rejects.toThrow('Path outside allowed directory');
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('validatePath and validateNewFilePath behave identically for inside paths', async () => {
+        const tmpDir = mkTmpDir();
+        const ctx = mkCtx(tmpDir);
+        const insidePath = path.join(tmpDir, 'x', 'y', 'z.txt');
+        const r1 = await ctx.validatePath(insidePath);
+        const r2 = await ctx.validateNewFilePath(insidePath);
+        expect(r1).toBe(r2);
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('validatePath and validateNewFilePath both reject paths outside the sandbox', async () => {
+        const tmpDir = mkTmpDir();
+        const ctx = mkCtx(tmpDir);
+        const outside = path.join(os.tmpdir(), `both-reject-${Date.now()}.txt`);
+        await expect(ctx.validatePath(outside)).rejects.toThrow('Path outside allowed directory');
+        await expect(ctx.validateNewFilePath(outside)).rejects.toThrow('Path outside allowed directory');
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+});
