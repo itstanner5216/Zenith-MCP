@@ -12,6 +12,7 @@ export default defineConfig({
     environment: 'node',
     // The constraint suite is deterministic and self-contained; fail fast on the
     // first Priority-0 violation so CI output points straight at the drift.
+    bail: 1,
     passWithNoTests: false,
     reporters: ['default'],
   },
