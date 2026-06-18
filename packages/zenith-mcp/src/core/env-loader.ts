@@ -49,8 +49,20 @@ function findWorkspaceRoot(startDir: string): string | undefined {
     return undefined;
 }
 
+let warnedAboutMissingLoadEnvFile = false;
+
 function tryLoad(path: string): boolean {
     if (!existsSync(path)) return false;
+    if (typeof process.loadEnvFile !== 'function') {
+        if (!warnedAboutMissingLoadEnvFile) {
+            warnedAboutMissingLoadEnvFile = true;
+            process.stderr.write(
+                `[zenith-mcp] Node ${process.version} does not support process.loadEnvFile(); ` +
+                `.env files will be ignored. Upgrade to Node 20.12+ / 21.7+ to enable.\n`,
+            );
+        }
+        return false;
+    }
     try {
         process.loadEnvFile(path);
         return true;

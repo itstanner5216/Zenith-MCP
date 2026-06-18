@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { loadDotEnvFiles } from '../core/env-loader.js';
 
-// Load `.env` files BEFORE any other import reads `process.env`. The shared
-// loader walks cwd → package root → workspace root and honours the
-// `ZENITH_ENV_FILE` override. It must run before the API-key check below.
+// Load `.env` files before this entrypoint reads `process.env`. ESM static
+// imports are evaluated before this module's body, so any env var consumed
+// at an imported module's top level will already have been read — keep
+// entrypoint-level reads (including the API-key check below) after this
+// call. The shared loader walks cwd → package root → workspace root and
+// honours the `ZENITH_ENV_FILE` override.
 const _loadedEnvFiles = loadDotEnvFiles(import.meta.url);
 
 // ---------------------------------------------------------------------------
@@ -113,9 +116,9 @@ if (!ZENITH_API_KEY) {
     process.exit(1);
 }
 
-// Pre-encode the expected key once. Buffer reuse is safe because the value
-// is process-lifetime immutable; we still copy on every comparison so the
-// caller cannot mutate it via a shared view.
+// Pre-encode the expected key once at startup and reuse the buffer for
+// every comparison. The value is process-lifetime immutable and never
+// handed to callers.
 const EXPECTED_API_KEY_BYTES = Buffer.from(ZENITH_API_KEY, 'utf8');
 
 const authRateLimiter = rateLimit({
@@ -319,15 +322,14 @@ function requireApiKey(req: Request, res: Response, next: NextFunction): void {
     const provided = authMatch?.[1] ?? '';
     const providedBytes = Buffer.from(provided, 'utf8');
 
-    // Constant-time equality: pad the caller-supplied bytes to the expected
-    // length so timingSafeEqual always inspects the same number of bytes,
-    // then verify the unpadded length separately. The length check leaks at
-    // most the length of the configured key (32+ random bytes by convention),
-    // which is not a credential-recovery vector.
-    const padded = Buffer.alloc(EXPECTED_API_KEY_BYTES.length);
-    providedBytes.copy(padded);
-    const bytesEqual = timingSafeEqual(padded, EXPECTED_API_KEY_BYTES);
+    // Constant-time equality: compare the provided bytes against the
+    // expected key when lengths match, otherwise compare the expected key
+    // against itself. This keeps timingSafeEqual on equal-length inputs
+    // (avoiding throws) and runs in constant time relative to the expected
+    // key length without any per-request allocation or copy.
     const lengthEqual = providedBytes.length === EXPECTED_API_KEY_BYTES.length;
+    const compareBuffer = lengthEqual ? providedBytes : EXPECTED_API_KEY_BYTES;
+    const bytesEqual = timingSafeEqual(compareBuffer, EXPECTED_API_KEY_BYTES);
 
     if (bytesEqual && lengthEqual) {
         next();
