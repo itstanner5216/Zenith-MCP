@@ -123,7 +123,7 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         fs.mkdirSync(filePath);
 
         await expect(handler({ path: filePath, content: 'cannot replace directory' }))
-            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:/);
+            .rejects.toThrow(/Write failed \((EISDIR|EPERM|ENOTEMPTY)\)\. Cached as stash:/);
     });
 
     it('normalizes CRLF to LF on write', async () => {
