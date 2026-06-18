@@ -234,6 +234,20 @@ describe('file_manager move', () => {
         expect(fs.readFileSync(path.join(dst, 'data.txt'), 'utf-8')).toBe('dir content');
     });
 
+    it('rejects moving a directory into its own subdirectory without creating nested dirs', async () => {
+        const src = path.join(tmpDir, 'mydir');
+        const dst = path.join(src, 'nested', 'newname');
+        fs.mkdirSync(src);
+        fs.writeFileSync(path.join(src, 'data.txt'), 'dir content');
+
+        await expect(handler({ mode: 'move', source: src, destination: dst }))
+            .rejects.toThrow('Cannot move a directory into its own subdirectory.');
+
+        expect(fs.existsSync(src)).toBe(true);
+        expect(fs.existsSync(path.join(src, 'nested'))).toBe(false);
+        expect(fs.readFileSync(path.join(src, 'data.txt'), 'utf-8')).toBe('dir content');
+    });
+
     it('preserves file content exactly when moving to nested destination', async () => {
         const src = path.join(tmpDir, 'binary-like.txt');
         const content = 'line1\nline2\nline3\n';
@@ -245,44 +259,45 @@ describe('file_manager move', () => {
 });
 
 describe('file_manager move - validateNewFilePath context', () => {
+    let tmpDir;
+    let ctx;
+
+    beforeEach(() => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
     it('mkCtx exposes validateNewFilePath alongside validatePath', () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         expect(typeof ctx.validateNewFilePath).toBe('function');
         expect(typeof ctx.validatePath).toBe('function');
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
     it('validateNewFilePath rejects paths outside the sandbox', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         const outsidePath = path.join(os.tmpdir(), `escape-check-${Date.now()}.txt`);
         await expect(ctx.validateNewFilePath(outsidePath))
             .rejects.toThrow('Path outside allowed directory');
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
     it('validateNewFilePath accepts paths inside the sandbox', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         const insidePath = path.join(tmpDir, 'subdir', 'file.txt');
         const resolved = await ctx.validateNewFilePath(insidePath);
         expect(resolved).toBe(path.resolve(insidePath));
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 
     it('validateNewFilePath blocks path traversal via .. segments', async () => {
-        const tmpDir = mkTmpDir();
-        const ctx = mkCtx(tmpDir);
         const traversalPath = path.join(tmpDir, 'allowed', '..', '..', 'escape.txt');
         await expect(ctx.validateNewFilePath(traversalPath))
             .rejects.toThrow('Path outside allowed directory');
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     });
 });
 
 describe('file_manager info', () => {
 
+    let tmpDir;
     let ctx;
     let handler;
 
