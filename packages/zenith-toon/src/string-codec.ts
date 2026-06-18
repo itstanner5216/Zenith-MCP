@@ -1591,7 +1591,7 @@ function _compressSourceStructured(
       resultLines.delete(dropIdx);
     };
 
-    let guard = (resultLines.size + n + 1) * 6;
+    let guard = (resultLines.size + n + 1) * 12;
     let converged = false;
     while (!converged && guard-- > 0) {
       const keys = [...resultLines.keys()].sort((a, b) => a - b);
@@ -1870,6 +1870,27 @@ function _compressSourceStructured(
   // exactly the selected set. Diverging is the historical bug class.
   if (emittedShown !== sortedKeys.length) {
     throw new Error(`Priority-0 violation: emitted ${emittedShown} lines but selected ${sortedKeys.length}`);
+  }
+
+  // Definitive post-emit self-check (Priority-0). Phase-H asserts over the
+  // SELECTED set; this asserts over the ACTUAL emitted tokens, so even if the
+  // run/marker bookkeeping above ever diverged from what the emitter placed, a
+  // Rule-1 violation (fewer than threshold shown lines between two markers) can
+  // never escape into output — it throws here instead.
+  {
+    let sawMarker = false;
+    let shownSinceMarker = 0;
+    for (const tok of output) {
+      if (tok.startsWith('[TRUNCATED: lines ')) {
+        if (sawMarker && shownSinceMarker < _MIN_OMISSION_THRESHOLD) {
+          throw new Error(`Priority-0 violation: ${shownSinceMarker} shown lines (< ${_MIN_OMISSION_THRESHOLD}) between two markers in emitted output`);
+        }
+        sawMarker = true;
+        shownSinceMarker = 0;
+      } else {
+        shownSinceMarker++;
+      }
+    }
   }
 
   return output.join('\n');
