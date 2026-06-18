@@ -86,8 +86,6 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         }
         catch (error) {
             const code = (error as NodeJS.ErrnoException)?.code;
-            const message = errorMessage(error);
-            void message;
             try {
                 await fs.unlink(tempPath);
             }
