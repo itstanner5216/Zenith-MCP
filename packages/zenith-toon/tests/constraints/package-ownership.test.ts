@@ -51,9 +51,7 @@ describe('Ownership — forbidden compression decisions are absent from MCP', ()
     // compressSourceStructured / compressString would mean MCP is shaping
     // structure or choosing a codec — a compression decision.
     for (const { rel, text } of readAll()) {
-      const toonImport = text.match(/import\s+\{([^}]*)\}\s+from\s+['"]zenith-toon['"]/);
-      if (!toonImport) continue;
-      const named = toonImport[1]!.split(',').map((s) => s.trim()).filter(Boolean);
+      const toonImport = text.match(/import\s+\{([\s\S]*?)\}\s+from\s+['"]zenith-toon['"]/);
       expect(named, `zenith-mcp/src/${rel} imports more than compressFile from TOON`).toEqual(['compressFile']);
     }
   });
