@@ -1631,6 +1631,55 @@ function _compressSourceStructured(
       }
       if (gapFixed) continue;
 
+      // (2.5) Sub-threshold BOUNDARY gap (Priority-0). The head omission (lines
+      // before the first shown line) and the tail omission (lines after the last
+      // shown line through EOF) are subject to the same rule as interior gaps: a
+      // gap < threshold cannot earn a marker, so those boundary lines must be
+      // SHOWN — never silently dropped, which is exactly the blind head/tail cut
+      // the emit-time break used to cause. The cross-review surfaced this on a
+      // single-line tail (e.g. a file's final `}`): n-1-last == 2 < threshold so
+      // no tail marker is emitted, yet the line was also not shown. Fill the
+      // boundary if it fits; otherwise shed the worst interior line and retry, so
+      // the trailing/leading lines are recovered at the expense of lower-value
+      // content elsewhere — a deliberate, ranked decision, never a boundary loss.
+      const firstSel = keys[0] ?? 0;
+      const lastSel = keys[keys.length - 1] ?? 0;
+      const headGap = firstSel;                 // lines 0..firstSel-1 omitted
+      const tailGap = n - 1 - lastSel;          // lines lastSel+1..n-1 omitted
+      let boundaryFixed = false;
+      for (const bound of [
+        { gap: headGap, lo: 0, hi: firstSel - 1 },
+        { gap: tailGap, lo: lastSel + 1, hi: n - 1 },
+      ]) {
+        if (bound.gap <= 0 || bound.gap >= _MIN_OMISSION_THRESHOLD) continue;
+        let fillCost = 0;
+        for (let g = bound.lo; g <= bound.hi; g++) fillCost += lineCost(g);
+        if (renderedCost() + fillCost <= budget) {
+          for (let g = bound.lo; g <= bound.hi; g++) {
+            resultLines.set(g, lineAt(g));
+            used += lineCost(g);
+          }
+        } else {
+          // No room — surrender the worst interior line so the next pass can
+          // afford to show the boundary. If only the boundary's own lines remain
+          // sheddable, fall through (the boundary lines themselves are the least
+          // valuable and showing them is mandatory anyway).
+          const victim = worstSheddable();
+          if (victim < 0 || (victim >= bound.lo && victim <= bound.hi)) {
+            for (let g = bound.lo; g <= bound.hi; g++) {
+              resultLines.set(g, lineAt(g));
+              used += lineCost(g);
+            }
+          } else {
+            used -= lineCost(victim);
+            resultLines.delete(victim);
+          }
+        }
+        boundaryFixed = true;
+        break;
+      }
+      if (boundaryFixed) continue;
+
       // (3) Sub-threshold SHOWN run sandwiched between two markers (Rule 1).
       // Partition into runs; drop the first marker-bounded run shorter than the
       // threshold (merge it into the surrounding truncation). Growing it would
@@ -1682,10 +1731,9 @@ function _compressSourceStructured(
         if (selected.has(cand)) return;
         const w = shedWeight.get(cand) ?? 0;
         if (w >= bestW) return;
-        // Adding `cand` shrinks the omission between it and the nearest selected
-        // line on the far side (away from `anchor`). Guard: that residual
-        // omission must stay either 0 (runs merge) or >= threshold (a legal
-        // marker remains) so we never create a sub-threshold gap.
+        // Adding `cand` shrinks the omission between it and the next selected
+        // line on the far side. Guard: the residual omission on the side away
+        // from `anchor` must stay 0 or >= threshold.
         if (cand < anchor) {
           // Extending a run leftward: nearest selected line below cand.
           let p = cand - 1;
@@ -1693,7 +1741,6 @@ function _compressSourceStructured(
           const residual = p < 0 ? cand : cand - p - 1;
           if (residual !== 0 && residual < _MIN_OMISSION_THRESHOLD) return;
         } else {
-          // Extending a run rightward: nearest selected line above cand.
           let q = cand + 1;
           while (q < n && !selected.has(q)) q++;
           const residual = q >= n ? n - 1 - cand : q - cand - 1;
@@ -1765,6 +1812,16 @@ function _compressSourceStructured(
       if (markerBefore && markerAfter && cur.length < _MIN_OMISSION_THRESHOLD) {
         throw new Error(`Priority-0 violation: shown run ${first + 1}-${last + 1} is ${cur.length} lines (< ${_MIN_OMISSION_THRESHOLD}) between two markers`);
       }
+    }
+    // Boundary truth: a sub-threshold head/tail omission cannot earn a marker,
+    // so those boundary lines MUST be shown — never silently cut.
+    const fk0 = finalKeys[0];
+    const fkLast = finalKeys[finalKeys.length - 1];
+    if (fk0 !== undefined && fk0 > 0 && fk0 < _MIN_OMISSION_THRESHOLD) {
+      throw new Error(`Priority-0 violation: head omission 1-${fk0} is ${fk0} lines (< ${_MIN_OMISSION_THRESHOLD}) but not shown`);
+    }
+    if (fkLast !== undefined && n - 1 - fkLast > 0 && n - 1 - fkLast < _MIN_OMISSION_THRESHOLD) {
+      throw new Error(`Priority-0 violation: tail omission ${fkLast + 2}-${n} is ${n - 1 - fkLast} lines (< ${_MIN_OMISSION_THRESHOLD}) but not shown`);
     }
     if (renderedCost() > budget) {
       throw new Error(`Priority-0 violation: rendered surface ${renderedCost()} exceeds budget ${budget}`);
