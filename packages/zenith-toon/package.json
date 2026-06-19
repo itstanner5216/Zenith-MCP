@@ -18,11 +18,14 @@
   "scripts": {
     "clean": "shx rm -rf dist tsconfig.tsbuildinfo",
     "build": "tsc --build",
-    "rebuild": "tsc --build --force"
+    "rebuild": "tsc --build --force",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
     "shx": "^0.4.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }
