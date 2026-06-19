@@ -581,4 +581,110 @@ describe('directory tool — copy mode', () => {
         const calls = validateNewFilePath.mock.calls.map(c => c[0]);
         expect(calls.some(p => p.includes('child.txt'))).toBe(true);
     });
+
+    it('throws when copying a directory into its own subdirectory', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'source-dir', 'sub');
+        fs.mkdirSync(source);
+        fs.writeFileSync(path.join(source, 'file.txt'), 'data');
+
+        await expect(handler({ mode: 'copy', source, destination, recursive: true }))
+            .rejects.toThrow('Cannot copy a directory into its own subdirectory.');
+    });
+
+    it('throws for unsupported special file types (non-file, non-directory, non-symlink)', async () => {
+        const source = path.join(tmpDir, 'special-file');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, '');
+
+        const resolvedSource = path.resolve(source);
+        // Capture original before mocking so the fallback calls the real implementation
+        const originalLstat = fsp.lstat.bind(fsp);
+        // Mock lstat to simulate a special file (e.g. FIFO/socket/device)
+        const lstatSpy = vi.spyOn(fsp, 'lstat').mockImplementation(async (p) => {
+            if (path.resolve(String(p)) === resolvedSource) {
+                return {
+                    isSymbolicLink: () => false,
+                    isDirectory: () => false,
+                    isFile: () => false,
+                    isBlockDevice: () => false,
+                    isCharacterDevice: () => false,
+                    isFIFO: () => true,
+                    isSocket: () => false,
+                    size: 0,
+                    mode: 0o644,
+                    atime: new Date(),
+                    mtime: new Date(),
+                };
+            }
+            return originalLstat(p);
+        });
+        try {
+            await expect(handler({ mode: 'copy', source, destination }))
+                .rejects.toThrow('Cannot copy special file types (socket, FIFO, block/character device).');
+        } finally {
+            lstatSpy.mockRestore();
+        }
+    });
+
+    it('throws when destination directory is non-empty and overwrite is false during recursive copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(source);
+        fs.writeFileSync(path.join(source, 'new.txt'), 'new');
+        fs.mkdirSync(destination);
+        fs.writeFileSync(path.join(destination, 'existing.txt'), 'existing');
+
+        await expect(handler({ mode: 'copy', source, destination, recursive: true }))
+            .rejects.toThrow('Destination exists.');
+
+        // Original file in destination should be untouched
+        expect(fs.readFileSync(path.join(destination, 'existing.txt'), 'utf8')).toBe('existing');
+    });
+
+    it('throws when destination exists as a file (not a directory) during recursive directory copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-as-file');
+        fs.mkdirSync(source);
+        fs.writeFileSync(path.join(source, 'file.txt'), 'data');
+        // Create destination as a regular file instead of directory
+        fs.writeFileSync(destination, 'i-am-a-file');
+
+        await expect(handler({ mode: 'copy', source, destination, recursive: true }))
+            .rejects.toThrow('Destination exists.');
+    });
+
+    it('preserves source timestamps on the copied file', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'timestamp test');
+        // Set a known mtime in the past (truncated to seconds for filesystem precision)
+        const knownMtime = new Date('2020-01-15T10:30:00.000Z');
+        fs.utimesSync(source, knownMtime, knownMtime);
+
+        await handler({ mode: 'copy', source, destination });
+
+        const destStats = fs.statSync(destination);
+        // Compare mtime at second-level precision (some filesystems have coarser resolution)
+        expect(Math.floor(destStats.mtimeMs / 1000)).toBe(Math.floor(knownMtime.getTime() / 1000));
+    });
+
+    it('does not alter destination content when source copy fails mid-operation', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'new content');
+        fs.writeFileSync(destination, 'original content');
+
+        vi.spyOn(fsp, 'rename').mockImplementation(async () => {
+            throw new Error('rename failed');
+        });
+        try {
+            await expect(handler({ mode: 'copy', source, destination, overwrite: true }))
+                .rejects.toThrow('rename failed');
+            // The original destination must remain intact (atomic write guarantee)
+            expect(fs.readFileSync(destination, 'utf8')).toBe('original content');
+        } finally {
+            vi.restoreAllMocks();
+        }
+    });
 });
