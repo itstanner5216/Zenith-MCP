@@ -47,7 +47,7 @@ export interface RetrievalConfig {
   fullDescriptionCount: number;
   anchorTools: string[];
   shadowMode: boolean;
-  scorer: "bmxf" | "passthrough";
+  scorer: "bmx" | "passthrough";
   maxK: number;
   enableRoutingTool: boolean;
   enableTelemetry: boolean;
@@ -150,7 +150,7 @@ export function defaultRetrievalConfig(overrides?: Partial<RetrievalConfig>): Re
     fullDescriptionCount: 3,
     anchorTools: [],
     shadowMode: false,
-    scorer: "bmxf",
+    scorer: "bmx",
     maxK: 20,
     enableRoutingTool: true,
     enableTelemetry: true,

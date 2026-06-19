@@ -1,4 +1,14 @@
 #!/usr/bin/env node
+import { loadDotEnvFiles } from '../core/env-loader.js';
+
+// Load `.env` files before this entrypoint reads `process.env`. ESM static
+// imports are evaluated before this module's body, so any env var consumed
+// at an imported module's top level will already have been read — keep
+// entrypoint-level reads of `process.env` after this call. The shared
+// loader walks cwd → package root → workspace root and honours the
+// `ZENITH_ENV_FILE` override.
+loadDotEnvFiles(import.meta.url);
+
 // ---------------------------------------------------------------------------
 // cli/stdio.ts — stdio MCP entrypoint
 //
