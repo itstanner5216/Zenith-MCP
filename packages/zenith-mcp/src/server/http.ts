@@ -446,13 +446,25 @@ app.get('/mcp', authRateLimiter, requireApiKey, async (req, res) => {
         res.status(400).json({ error: 'Unknown or mismatched session' });
         return;
     }
+
+    // Stamp lastSeenAt now and keep it fresh while the SSE stream is open.
+    // Without this the reaper sees the open time and kills the session mid-stream.
+    entry.lastSeenAt = Date.now();
+    const keepalive = setInterval(() => {
+        const e = sessions.get(sessionId as string);
+        if (e) e.lastSeenAt = Date.now();
+    }, 30_000).unref();
+
+    res.on('close', () => clearInterval(keepalive));
+
     try {
-        entry.lastSeenAt = Date.now();
         await entry.transport.handleRequest(req, res);
     } catch (err) {
         const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
         writeErrorLog(`[session:${safeId}] GET error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    } finally {
+        clearInterval(keepalive);
     }
 });
 

@@ -1,705 +1,507 @@
-# Zenith-MCP Developer Documentation & Cheat Sheet
+# TOON CONSTRAINTS & GOALS - REPO-WIDE CONTRACT 
 
-Internal developer guidance for Zenith-MCP tool design, implementation, and maintenance.
+*this is the literal source of truth*
 
-This document is intentionally stricter and more implementation-focused than the public README. The README sells the project. This file keeps tool behavior honest, compact, and aligned with the current MCP contract.
+## TOON CONSTRAINTS 
 
+- these are the requirements, finding a violation of this document in the code-base does not mean it is acceptable, it means you should stop and correct the deviation in the most robust and beneficial to the entire MCP way that you can, always prioritizing robustness, correctness and optimal MCP performance.
+
+### Priority 0 — Line Number Fidelity (NON-NEGOTIABLE)
+
+Line numbers must be TRUE to the original file. This is non-negotiable and must be verified mechanically, not assumed. Every shown line `N. content` means that line exists at position N in the uncompressed source. The output must be in ascending line-number order with no gaps except where a `[TRUNCATED: lines X-Y]` marker explicitly accounts for the missing range.
+
+After all fixes, add an inline assertion before Phase H emits: walk the final selected set and verify:
+
+- Every selected index maps to `lines[index]` from the original split
+- Selected indices are strictly ascending
+- Every gap between consecutive selected indices either has a valid marker (≥6 lines) or the gap lines are also selected
+
+If this assertion can ever fail, the implementation is broken regardless of what the compression quality looks like.
+
+Anything from 68–72% is acceptable. For the added markers, it does not need to be exactly 70%, just within that range.
+
+This includes truncation markers, anything above 72 percent is not acceptable. 
 ---
 
-## CRITICAL: Context Efficiency Is a Product Feature
+### Priority 0.5 — Package Ownership (NON-NEGOTIABLE)
 
-Zenith-MCP is used by agents. Tool output is model context. Context bloat directly hurts reasoning, memory, latency, and edit reliability.
+Every single TOON / compression-related **decision** lives in `packages/zenith-toon`. Period. No exceptions.
 
-Previous tool design failures produced extreme output bloat: roughly 7.5× useless output for every 1× useful information.
+#### The Seam
 
-### Design Rule
+The data flow is exactly:
 
-Return only **new, decision-relevant information**.
-
-Do not return information the caller already knows, can infer from the request, or can retrieve from a separate tool whose scope already covers that job.
-
-### Required Workflow
-
-- Do not parrot request inputs back in responses.
-- Do not return paths, selectors, mode names, line ranges, old text, new text, diffs, metadata, or summaries unless they are required for disambiguation or recovery.
-- Keep every tool inside its explicit scope.
-- Do not duplicate metadata, diagnostics, diff inspection, search, or file-info functionality across unrelated tools.
-- Prefer minimal success responses.
-- Avoid decorative headers, separators, and "nice" formatting that costs tokens without changing the caller's next action.
-
-### Response Discipline
-
-Success should usually be tiny:
-
-```text
-Applied.
+```
+caller → zenith-mcp (read tool)
+          zenith-mcp → zenith-toon : { rawText, languageInfo, astInfo, symbolInfo, budget/maxChars, ...allowed read-only context }
+          zenith-toon → zenith-mcp : compressed text string
+zenith-mcp → caller : that exact string, verbatim, as the tool result
 ```
 
-Dry-run should usually be minimal:
+MCP is allowed — and expected — to hand TOON the AST / symbol / language information it has already computed for other purposes (tree-sitter parses, symbol-index rows, call-graph edges, file/project metadata). TOON should not re-parse what MCP already knows. That hand-off is **data transport**, not intelligence transfer.
 
-```text
-Dry run successful.
-```
+What crosses the seam is **facts**: “here is the raw text, here is the language, here are the symbols/defs/refs/edges I already have indexed, here is the project root, here is the budget.”
 
-Failure should include only actionable new information:
+What does NOT cross the seam is **decisions**: which lines to keep, which symbols matter, how to weight edges, how to allocate budget, what the keep-ratio should be, whether compression was worth it, how to format markers, where to truncate.
 
-```json
-{"error":"OLD_TEXT_NOT_FOUND"}
-```
+#### MCP’s Role
 
-```json
-{"error":"PARSE_ERROR","message":"Expression expected.","line":91}
-```
+MCP is the context provider and the pipe. It may:
 
-### Single-Target Rule
+- Read the file off disk
+- Resolve language / path / project-root / DB-path context
+- Reuse its already-computed AST/symbol/edge data (from `getSymbols`, `getFileBlockEdges`, the symbol-index DB, etc.) and hand the **raw results** to TOON as inputs
+- Pass the caller’s budget / maxChars through as a number
+- Take TOON’s returned string and place it in the tool response, untouched
 
-If the caller sent one path, do not echo that path back.
+MCP must not post-process, re-truncate, re-budget, re-wrap, decorate, or otherwise modify TOON’s returned text. Pipe in, pipe out.
 
-Include identifiers such as path, edit index, or symbol only when needed to distinguish multiple targets, multiple failures, or recovery steps.
+#### TOON’s Role
 
-### Enforced Repo Policy
+TOON owns every compression decision. Given the inputs MCP supplies, TOON:
 
-When designing or modifying tools, optimize for:
+- Decides which symbols / blocks / lines are structurally important
+- Constructs its own `StructureBlock[]` / `Anchor[]` / `ASTEdge[]` / `CompressionContext` from the AST/symbol facts MCP handed in (TOON does the shaping; MCP just supplies the raw symbol rows and edge rows)
+- Decides edge weighting (e.g. the `Math.sqrt(call_count)` transform — a SageRank tuning concern, lives in TOON)
+- Computes the budget, the keep-ratio, the 70% floor, allocator decisions
+- Runs SageRank, BMX+, Deduplicator, BudgetAllocator
+- Performs line selection, marker emission, the Phase H assertion, the verbatim/line-number guarantees
+- Decides whether compression is useful and falls back to truncation if not
+- Returns the final compressed string
 
-- minimal output
-- scope-correct output
-- non-duplicative output
-- actionable failure details
-- zero "look how powerful I am" backend boasting in tool returns
+#### Forbidden in `zenith-mcp` (rip out on sight)
 
-When unsure whether to include a field, omit it unless it clearly changes the caller's next action.
+These exist in MCP today and must move to TOON:
 
----
+- `computeCompressionBudget`, `isCompressionUseful`, `DEFAULT_COMPRESSION_KEEP_RATIO`, `truncateToBudget`, `compressTextFile` — compression decisions, all TOON’s job
+- MCP-side construction of `StructureBlock[]` or `CompressionContext` (MCP supplies the raw symbol/edge data; TOON shapes it)
+- MCP-side edge weighting for compression purposes (the `Math.sqrt(call_count)` math currently in `getFileBlockEdges` — the **query** can stay; the weighting transform moves to TOON)
+- Any helper / wrapper / adapter / “bridge” file in MCP whose purpose is to pre-shape data for TOON. MCP hands over raw facts; TOON does the shaping.
+- Any new MCP-side file with “compression” or “toon” in its name
 
-## 1. Architecture Snapshot
+Note: MCP keeping `getSymbols`, `getFileBlockEdges`, `findRepoRoot`, the symbol-index DB, etc. is **fine and expected** — those serve `edit_file`, `refactor_batch`, `directory` listings, search, and the AST-fact hand-off to TOON. What’s forbidden is MCP using them to make compression decisions.
 
-Zenith-MCP is a TypeScript monorepo managed with `pnpm`. The repository is split into two workspace packages:
+#### For Subagents
 
-- **`packages/zenith-mcp`** — The core Model Context Protocol (MCP) server.
-- **`packages/zenith-toon`** — The TypeScript-based TOON compression library (zero runtime dependencies).
+If you are about to write compression logic — line selection, budget math, ranking, marker emission, keep-ratio decisions, “useful compression” gates, fallback truncation, anchor extraction, structure shaping — inside `packages/zenith-mcp/`, **stop**. You are wrong. Move to `packages/zenith-toon/` and do it there.
 
-All source code is written in TypeScript and resides inside the respective package `src/` directories. Output builds compile to `dist/` directories via `tsc`.
+If you are about to reimplement SageRank / BMX+ / BudgetAllocator / Deduplicator anywhere — including inside TOON — **stop**. They already exist in `packages/zenith-toon/src/{sagerank,bmx-plus,budget,dedup}.ts`. Delegate to them fully — invoke their complete pipeline as designed, delegate to toon's pre-existing engines, do not import processes from them. Do not cherry-pick pieces of their internals. Do not write a "simpler" version.
 
-### Entry Points
-
-- **`packages/zenith-mcp/src/cli/stdio.ts`** → `dist/cli/stdio.js` (binary: `zenith-mcp`)
-  - stdio transport
-  - One process, one `FilesystemContext`, one `McpServer`
-  - CLI directories provide the baseline allowed-directory sandbox
-  - MCP Roots can replace the allowed directories at initialization/runtime
-
-- **`packages/zenith-mcp/src/server/http.ts`** → `dist/server/http.js` (binary: `zenith-mcp-http`)
-  - Express HTTP server
-  - Streamable HTTP plus legacy SSE
-  - Bearer-token auth (fatal exit if no key set)
-  - Per-session `{ ctx, server }` isolation
-  - Idle session reaping via `session_ttl_ms` config setting
-
-### Core Orchestrator
-
-- **`packages/zenith-mcp/src/core/server.ts`**
-  - Creates the `McpServer`
-  - `TOOL_REGISTRY` constant: single source of truth for all 11 tools
-  - Config-driven tool enable/disable
-  - Loads adapter settings
-  - Retrieval code exists under `src/retrieval/`, but it is disabled by default and excluded from the main package compile
-  - Wires MCP Roots handlers
-
-### Core Modules (`packages/zenith-mcp/src/`)
-
-| Module | Responsibility |
-|--------|----------------|
-| `core/lib.ts` | `FilesystemContext`, path validation, file I/O, diffs, stats |
-| `core/shared.ts` | Ripgrep integration, BM25 search/ranking, sensitive-file detection |
-| `core/tree-sitter.ts` | WASM grammar loading, query loading, symbols, definitions, syntax checks, structural fingerprints |
-| `core/edit-engine.ts` | Pure in-memory content/block/symbol edit verification and application |
-| `core/symbol-index.ts` | SQLite symbol DB, impact graph, version snapshots, patterns |
-| `core/db-adapter.ts` | Node.js native `node:sqlite` abstraction layer (pure functional adapter) |
-| `core/project-context.ts` | Project root resolution ladder (MCP roots → git → markers → registry → global) |
-| `core/project-registry.ts` | Explicit project matching/registration |
-| `core/stash.ts` | SQLite-backed edit/write stash API |
-| `core/compression.ts` | Compression budget math and subprocess bridge invocation |
-| `core/toon_bridge.ts` | In-process TOON compression via `zenith-toon` imports |
-| `adapters/` | MCP client config adapters |
-| `config/` | Adapter settings, config schemas, and wizards |
-| `retrieval/` | Opt-in tool retrieval/filtering pipeline |
-
-### Build Artifacts
-
-- All compiled JS goes to `dist/` (gitignored).
-- `grammars/` (containing WASM grammars) is tracked source in `packages/zenith-mcp/grammars/`.
-- Build copies `grammars/` into `dist/grammars/`.
-
----
-
-## 2. Security Model
-
-### Allowed Directory Sandbox
-
-All filesystem operations must validate target paths through `ctx.validatePath()` before any filesystem read/write/stat/delete/move.
-
-Validation flow:
-
-1. Expand `~`
-2. Resolve to absolute path
-3. Normalize
-4. Check requested path against allowed directories
-5. Resolve symlinks with `realpath`
-6. Re-check resolved path against allowed directories
-7. Return the validated path
-
-If validation fails, the tool must fail before touching the filesystem.
-
-### Sensitive File Filtering
-
-`isSensitive()` blocks credential-like files from search/index/discovery output using configured `minimatch` patterns.
-
-Typical defaults include:
-
-- `.env`
-- `*.pem`
-- `*.key`
-- `*.crt`
-- `*credentials*`
-- `*secret*`
-- `.config/**`
-
-Direct read/write security is primarily the allowed-directory sandbox. Search/index/discovery tools also apply sensitive-file filtering.
-
-### Write Safety
-
-Writes follow the established safe-write pattern:
-
-- Create parent directories when appropriate
-- Use exclusive creation (`wx`) where needed
-- Use temp-file + `rename()` for atomic replacement
-- Verify write size when available
-- Stash failed write payloads when recovery is useful
-
----
-
-## 3. Search & Semantics
-
-### Tree-sitter
-
-Zenith uses `web-tree-sitter` and tracked WASM grammars to parse code structurally (40+ languages, lazy-loaded, LRU-cached).
-
-Tree-sitter powers:
-
-- `edit_file` symbol mode
-- `search_file` symbol lookup
-- `search_files` symbol mode
-- `search_files` definition mode
-- `refactor_batch` symbol loading/outlier detection
-- Syntax warnings after edits
-- Structured compression anchors
-
-Guidelines:
-
-- Use symbols for code-aware targeting.
-- Use grep/content search only when text matching is the right operation.
-- Never fake symbol behavior with line-number guesses when tree-sitter can locate the target.
-
-### BM25 + Ripgrep
-
-`search_files content` uses a staged pipeline:
-
-1. BM25 file pre-filter over file paths and content snippets
-2. Ripgrep over candidate files
-3. BM25 post-rank when result lines exceed the ranking threshold (`RANK_THRESHOLD = 50`)
-4. Budget-aware truncation
-
-The BM25 implementation (`BM25Index` class) is zero-dependency, inline, and uses entropy weighting (high-entropy terms are downweighted) plus sigmoid TF saturation.
-
-Keep output result-focused. Do not dump search diagnostics unless they explain a failure or change the caller's next step.
-
-### Symbol Index
-
-Each project can get a `.mcp/symbols.db` SQLite database.
-
-Key tables:
-
-- `files`
-- `symbols`
-- `edges`
-- `versions`
-- `patterns`
-
-Used for:
-
-- Impact queries
-- Caller/callee traversal
-- Version snapshots
-- Rollback
-- Reapply pattern support
-
-The `.mcp/` database directory is generated project state and should stay gitignored.
-
----
-
-## 4. Editing Model
-
-### `edit_file`
-
-`edit_file` is the primary surgical edit tool.
-
-Supported edit modes:
-
-- `content`
-  - `oldContent`
-  - `newContent`
-
-- `block`
-  - `block_start`
-  - `block_end`
-  - `replacement_block`
-
-- `symbol`
-  - `symbol`
-  - `newText`
-  - `nearLine` (optional)
-
-Top-level args:
-
-- `path`
-- `edits[]`
-- `dryRun`
-
-### Edit Verification
-
-The edit engine is memory-first:
-
-1. Read file
-2. Normalize line endings
-3. Apply every edit to an in-memory working string
-4. If any edit fails, write nothing
-5. If dry-run, return a minimal preview/diff
-6. If successful, atomic-write the result
-7. Snapshot touched symbols best-effort
-8. Return minimal success plus only necessary warnings
-
-Content matching tries:
-
-1. Exact match
-2. Trimmed trailing whitespace match
-3. Indentation-stripped match near `nearLine` (±50-line window)
-
-Symbol matching uses tree-sitter bounds. Prefer this for code edits when the symbol is known.
-
-### Stash Recovery
-
-Failed edit/write payloads can be stashed and retried through `stashRestore`.
-
-Current `stashRestore` modes:
-
-- `apply`
-- `restore`
-- `list`
-- `read`
-
-Important distinction:
-
-- `stashRestore restore` clears a stash entry by ID.
-- Symbol version rollback is handled by `refactor_batch restore`.
-- Symbol history is handled by `refactor_batch history`.
-- Project root registration is not a `stashRestore` mode.
-
-Keep stash responses concise. Return the stash ID and only the failed edit indices/details needed for the next correction.
-
----
-
-## 5. Current Tool Catalog
-
-| Tool | Scope | Key Args |
-|------|-------|----------|
-| `read_file` | Read one text file with windowing/truncation/compression | `path`, `maxChars`, `head`, `tail`, `offset`, `aroundLine`, `context`, `ranges`, `showLineNumbers`, `compression` |
-| `read_media_file` | Read supported media as base64 | `path` |
-| `read_multiple_files` | Read up to 50 files with budget balancing; output is line-numbered by default | `paths`, `maxCharsPerFile`, `compression` |
-| `write_file` | Create/overwrite/append text | `path`, `content`, `failIfExists`, `append` |
-| `edit_file` | Surgical content/block/symbol edits | `path`, `edits[]`, `dryRun` |
-| `directory` | Directory list/tree exploration | `mode: list/tree`, `path`, `depth`, `includeSizes`, `sortBy`, `excludePatterns`, `showSymbols`, `showSymbolNames` |
-| `search_files` | Multi-file content/files/symbol/definition search | `mode`, `path`, mode-specific query fields |
-| `search_file` | Single-file grep or symbol lookup | `path`, `grep`, `grepContext`, `symbol`, `nearLine`, `expandLines`, `maxChars` |
-| `file_manager` | mkdir/delete/move/info | `mode`, `path`, `source`, `destination` |
-| `stashRestore` | Retry/inspect/clear stashed edit/write failures | `mode: apply/restore/list/read`, `stashId`, `corrections`, `newPath`, `dryRun`, `type` |
-| `refactor_batch` | Cross-file symbol refactoring and symbol version rollback | `mode: query/loadDiff/apply/reapply/restore/history` |
-
-### Tool Notes
-
-#### `read_file`
-
-No `mode` enum. Uses a single flat schema, not a discriminated union.
-
-Use it for reading text ranges/windows. Do not add grep or symbol lookup here; those belong to `search_file`.
-
-#### `search_file`
-
-Single-file grep/symbol lookup.
-
-Use for:
-
-- "grep this one file"
-- "read this symbol body"
-- "show context around this symbol"
-
-#### `directory`
-
-Modes:
-
-- `list`
-- `tree`
-
-No `roots` mode. No `listAllowed`.
-
-Allowed roots are negotiated through MCP Roots and exposed through context, not a public directory mode.
-
-#### `search_files`
-
-Modes:
-
-- `content`
-- `files`
-- `symbol`
-- `definition`
-
-Keep modes distinct. Do not make `content` return file metadata beyond what is needed for search hits.
-
-#### `file_manager`
-
-Modes:
-
-- `mkdir`
-- `delete`
-- `move`
-- `info`
-
-`delete` is file-only unless intentionally changed and reviewed.
-
-#### `refactor_batch`
-
-Modes:
-
-- `query`
-- `loadDiff`
-- `apply`
-- `reapply`
-- `restore`
-- `history`
-
-Schema highlights:
-
-- `query`: `target`, `fileScope`, `direction`, `depth`
-- `loadDiff`: `selection`, `contextLines`, `loadMore`
-- `apply`: `payload`, `dryRun`
-- `reapply`: `symbolGroup`, `newTargets`, `ack`, `dryRun`
-- `restore`: `symbol`, `file`, `version`, `dryRun`
-- `history`: `symbol`, `file`
-
-Do not document or call `load`; the mode is `loadDiff`.
-
-Do not use `target`/`fileScope` for `restore` or `history`; those use `symbol`/`file`.
-
----
-
-## 6. Project Root Resolution
-
-Project root resolution is separate from filesystem access control.
-
-Allowed directories answer:
-
-> What can the agent access?
-
-Project root resolution answers:
-
-> Where should project-scoped state such as `.mcp/symbols.db` live?
-
-Resolution ladder:
-
-1. Git repo from the file path or cwd
-2. MCP roots / allowed directories
-3. Project markers such as `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, etc.
-4. Explicit project registry
-5. Global fallback at `~/.zenith-mcp/`
-
-Never let project-root fallback expand filesystem permissions. Only `allowedDirectories` control access.
-
----
-
-## 7. Refactor Workflow
-
-Typical safe workflow:
-
-1. `search_files` or `refactor_batch query`
-2. `refactor_batch loadDiff`
-3. Inspect outliers
-4. `refactor_batch apply` with `dryRun: true`
-5. `refactor_batch apply`
-6. `refactor_batch history` / `restore` only when rollback is needed
-
-### Query
-
-`query` uses the symbol graph:
-
-- `forward`: callers of target
-- `reverse`: callees from target
-- `depth`: 1–5
-
-### loadDiff
-
-`loadDiff` loads symbol bodies plus context.
-
-It also computes outlier flags from symbol structure:
-
-- Parameter shape
-- Return type
-- Parent scope
-- Decorators
-- Modifiers
-
-### apply
-
-`apply` gates on:
-
-- Loaded cache exists
-- Payload parses
-- Outliers acknowledged
-- Character budget
-- Syntax checks
-- Per-file edit atomicity
-
-A failed edit in one file must not write that file. Other independent files may still apply if their bundles pass.
-
-### reapply
-
-`reapply` uses a cached successful payload against new targets.
-
-It must repeat outlier detection and syntax gates. Cached payload is not permission to skip validation.
-
-### restore/history
-
-Use these for symbol version snapshots:
-
-```json
-{"mode":"history","symbol":"AuthService.login","file":"src/auth.ts"}
-```
-
-```json
-{"mode":"restore","symbol":"AuthService.login","file":"src/auth.ts","version":0,"dryRun":true}
-```
-
----
-
-## 8. Adapter System
-
-Adapters live in `packages/zenith-mcp/src/adapters/`.
-
-Purpose: auto-configure external MCP clients to register Zenith.
-
-Key pieces:
-
-- `packages/zenith-mcp/src/adapters/base.ts`
-  - `MCPConfigAdapter` abstract base class
-- `packages/zenith-mcp/src/adapters/platforms/`
-  - Per-client adapter implementations
-- `packages/zenith-mcp/src/adapters/registry.ts`
-  - Adapter registry with `configureRegistry()`, `getAdapter()`, `listAdapters()`
-- `packages/zenith-mcp/src/adapters/helpers/`
-  - JSON5, TOML, YAML parsing and output format helpers
-
-Settings (in `~/.zenith-mcp/config`):
-
-- `auto_write.status` — enable/disable auto-write
-- `auto_write.backup_dir` — backup directory for config file changes
-- `auto_write.backup_mode` — `file`, `sqlite`, or `none`
-- `auto_write.custom_mcp_paths` — additional MCP config paths to scan
-
-There is no separate CLI — the first-run wizard handles initial setup.
-
-Keep adapter write operations conservative:
-
-- Read native config
-- Preserve unknown fields
-- Backup before mutation
-- Write only necessary changes
-- Never print entire config files unless explicitly requested
-
----
-
-## 9. Config Management
-
-Config management lives in `packages/zenith-mcp/src/config/`.
-
-Config file: `~/.zenith-mcp/config` (plain-text format with `###` subsection headers, `key: value` pairs, `#` comments).
-
-Modules:
-
-- `parser.ts` — Reads/writes the plain-text config format; produces an ordered `RawConfig` array for round-trip fidelity
-- `schema.ts` — `ZenithConfig` interface, `DEFAULT_CONFIG`, `configToRaw()`, `rawToConfig()`
-- `loader.ts` — `loadConfig()`, `saveConfig()`, `mergeToolsIntoConfig()` (dynamic tool discovery)
-- `wizard.ts` — First-run interactive wizard (auto-write, backup mode, port, char_budget)
-- `auto-write.ts` — Registers Zenith in other MCP clients via adapters
-- `backup.ts` — SQLite/file/none backup modes
-
-Key sections in the config file: `### Tools` (dynamic enable/disable), `### Auto Write`, `### Zenith-Rag`, `### Advanced` (all tuning params).
-
-Developer rule: MCP tool responses should remain minimal regardless of config system verbosity.
-
----
-
-## 10. Retrieval Pipeline
-
-Retrieval is opt-in and disabled by default.
-
-Enabled via `defaultRetrievalConfig()` in `packages/zenith-mcp/src/retrieval/models.ts` (defaults to `enabled: false`).
-
-Purpose: reduce active tool-list bloat when Zenith manages or proxies larger tool sets.
-
-Fallback ladder:
-
-1. BMXF blend of environment + conversation signals
-2. BMXF environment-only
-3. Keyword environment-only
-4. Static project categories
-5. Frequency prior
-6. Universal fallback
-
-Key components:
-
-- `packages/zenith-mcp/src/retrieval/pipeline.ts`
-- `packages/zenith-mcp/src/retrieval/session.ts`
-- `packages/zenith-mcp/src/retrieval/ranking/`
-- `packages/zenith-mcp/src/retrieval/telemetry/`
-- `packages/zenith-mcp/src/retrieval/observability/`
-- `packages/zenith-mcp/src/retrieval/routing-tool.ts`
-- `packages/zenith-mcp/src/retrieval/zenith-integration.ts`
-
-The synthetic routing tool can expose demoted tools on demand. Track proxy usage separately from direct usage.
-
-> **Note:** The retrieval source directory is currently excluded from the main TypeScript compilation in `tsconfig.json`.
-
----
-
-## 11. Compression
-
-Compression is TypeScript-based under `packages/zenith-toon` and has no Python dependency.
-
-Flow:
-
-1. `read_file` / `read_multiple_files` request compression
-2. `compressTextFile()` computes the budget (`DEFAULT_COMPRESSION_KEEP_RATIO = 0.70`)
-3. `runToonBridge()` spawns the compiled JS bridge (subprocess with 30s timeout)
-4. `toon_bridge_cli.js` reads the file, parses tree-sitter structure, and performs compression in-process via `zenith-toon` package
-5. Caller accepts compressed output only if it is actually useful (`isCompressionUseful()`)
-
-Important nuance:
-
-- `compression.ts` uses a Node subprocess for isolation/timeouts.
-- The bridge itself performs in-process TypeScript compression.
-- "No Python" does not mean "no child process."
-
----
-
-## 12. Adding or Changing a Tool
-
-Checklist:
-
-1. Add or edit `packages/zenith-mcp/src/tools/<tool>.ts`.
-2. Export `register(server, ctx)`.
-3. Use strict Zod schemas.
-4. Every filesystem path must pass through `ctx.validatePath()` before filesystem access.
-5. Set annotations:
-   - `readOnlyHint`
-   - `idempotentHint`
-   - `destructiveHint`
-6. Register the tool in `TOOL_REGISTRY` in `packages/zenith-mcp/src/core/server.ts`.
-7. Add/update tests.
-8. Keep output minimal.
-9. Update README only for public-facing behavior.
-10. Update ARCHITECTURE.md for detailed implementation behavior.
-11. Update this file for developer-facing cheat-sheet changes.
-
-Path field checklist:
-
-- Single target: `path`
-- Source/destination pair: `source`, `destination`
-- Refactor symbol file hint: `file`
-- Query scope hint: `fileScope`
-
-Do not invent parallel names unless there is a compatibility reason.
-
----
-
-## 13. Testing Notes
-
-The project uses **Vitest**.
-
-General flow:
-
-```bash
-pnpm install
-pnpm build
-pnpm test          # vitest run --coverage
-```
-
-Tests may import compiled `dist/` modules or source directly (Vitest compiles TS on-the-fly).
-
-Tree-sitter tests require grammars to exist under `packages/zenith-mcp/dist/grammars/`, which the build script copies from `packages/zenith-mcp/grammars/`.
-
-Generated local state to clean when needed:
-
-- `dist/` directories
-- `coverage/`
-- `.mcp/`
-- `~/.zenith-mcp/`
-
----
-
-## 14. Code Snippets
-
-### Find a Symbol
+MCP’s side of the integration seam should look approximately like:
 
 ```ts
-import { findSymbol } from '../core/tree-sitter.js';
+// MCP gathers facts it already has
+const languageInfo = getLangForFile(path);
+const symbolInfo   = await getSymbols(rawText, languageInfo);    // reused from MCP’s existing index
+const edgeInfo     = getFileBlockEdges(db, relPath, defNames);   // raw query result, no weighting
 
-const matches = await findSymbol(sourceCode, 'javascript', 'AuthService.login', {
-  kindFilter: 'def',
+// Hand them to TOON — TOON decides everything from here
+const compressed = await zenithToon.compressFile({
+  rawText, languageInfo, symbolInfo, edgeInfo, budget, projectRoot,
 });
+
+return { content: [{ type: ‘text’, text: compressed }] };
 ```
 
-### Rank Search Results
-
-```ts
-import { bm25RankResults, getCharBudget } from '../core/shared.js';
-
-const ranked = bm25RankResults(rawRipgrepLines, 'authentication logic', getCharBudget());
-```
-
-### Validate Before Filesystem Access
-
-```ts
-const validPath = await ctx.validatePath(args.path);
-const content = await fs.readFile(validPath, 'utf8');
-```
-
-### Minimal Tool Return
-
-```ts
-return {
-  content: [{ type: 'text', text: 'Applied.' }],
-};
-```
+If MCP’s side of the seam contains keep-ratio math, structure construction, edge weighting, fallback selection, or anything that looks like a decision, something has leaked out of TOON that should not have.
 
 ---
 
-## 15. Things Not To Regress
+### Rule 1 — `_MIN_OMISSION_THRESHOLD` Must Remain Enforced (= 6)
 
-- Do not reintroduce `read_text_file`.
-- Do not add grep or symbol modes back into `read_file`.
-- Do not document `directory.roots`.
-- Do not document `directory.listAllowed`.
-- Do not use `refactor_batch load`; use `loadDiff`.
-- Do not use `target`/`fileScope` for `refactor_batch restore/history`; use `symbol`/`file`.
-- Do not move runtime-only generated state into git.
-- Do not put grammars back under `dist/` as source of truth.
-- Do not make tool returns verbose just because the backend has impressive internals.
-- Do not describe BMX-Plus as BPE or as using pre-trained models — it is an original, unpublished lexical search algorithm built on BM25's TF saturation curve with term-adaptive entropy-aware IDF, variance-blended informativeness, and tanh Soft-AND coverage bonus. TAAT posting-list architecture. No pre-trained components. Benchmarked on 9 BEIR datasets (~8.2M docs), 1.5–26× speedups, NDCG@10 within ±0.02 of BM25.
+**The rule:** No two truncation markers in the output may be closer than 6 lines from each other. The minimum block of shown content between any two markers must be at least 6 lines.
+
+**What this prevents — Bad, not allowed (3-lines before another truncation occurs):**
+```
+[TRUNCATED: lines 1-20]
+21. code
+22. code
+23. code
+[TRUNCATED: lines 24-50]
+```
+
+**Good — must produce at least 6 continuous lines between markers:**
+```
+[TRUNCATED: lines 03-18]
+19. code
+20. code
+21. code
+22.code
+23. code
+24. code
+25.code
+26. code
+[TRUNCATED: lines 27-50]
+```
+
+**Good — good (6 lines of code, meets constraint):**
+```
+[TRUNCATED: lines 03-13]
+14.code
+15. code
+16. code
+17. code
+18.code
+19. code
+20. code
+[TRUNCATED: lines 20-56]
+```
+
+**Bad — fewer than 6 lines of code between markers, makes result useless:**
+```
+[TRUNCATED: lines 03-13]
+14.code
+15. code
+16. code
+[TRUNCATED: lines 17-21]
+22.code
+23. code
+24. code
+[TRUNCATED: lines 25-50]
+```
+
+**Resolution is AST-driven, not mechanical:** This rule does NOT have a default resolution. The selection intelligence decides:
+- If the short block contains important lines (high-value anchors, central logic) → expand the shown block to meet the 6-line minimum
+- If the short block contains unimportant lines → merge them into the surrounding truncation (drop them)
+
+There is no mechanical default. The selection intelligence decides which resolution is correct based on what those lines actually contain.
+
+**Critical:** This constraint does NOT permit rearranging, altering, or synthesizing code. The output is still verbatim lines from the file at their real line numbers. You are choosing which contiguous blocks to SHOW and which to DROP — never moving, editing, or reordering lines.
+
+---
+
+### Rule 2 — Output Lines Must Be Verbatim (Character-Perfect Copies)
+
+Every line in the compressed output that is NOT an omission marker MUST be the original line prefixed ONLY with its line number (`N. `). The content after the prefix must be a character-for-character copy of the corresponding line in the original file. Do not:
+
+- Paraphrase or summarize code
+- Remove or add whitespace (beyond the `N. ` prefix)
+- Reformat or restructure lines
+- Create “smart” condensed representations
+- Generate synthetic JSON summaries like `{ items: 47, showing: [0,1,2] }`
+- Append annotations, suffixes, or metadata to lines
+
+**Why:** The compressed output is consumed by a model that may need to edit the file. The model must be able to reference any visible line by its exact content and know that content exists verbatim in the real file, true down to the line numbers aligning. If you alter even one character, edits targeting that line will fail.
+
+---
+
+### Rule 3 — Omission Markers Must Be Present and Must Report Line Ranges
+
+When lines ARE omitted (and the count >= `_MIN_OMISSION_THRESHOLD`), the output MUST contain a marker that tells the reader exactly which lines are missing. The marker format is exactly:
+
+```
+[TRUNCATED: lines X-Y]
+```
+
+This is the single unified marker format for everything TOON touches. Do NOT use `# ... [N lines omitted]`, count-only formats, or indented variants.
+
+**Why:** Without markers, the model sees what looks like a continuous file and has no idea content is missing. It may attempt edits that span a gap, producing corrupted results. The marker is the model’s only signal that there’s a discontinuity. Additionally these markers must be easy and consistent for the model utilizing the tool to identify. Do not implement any other form of a truncation marker.
+
+---
+
+### Rule 4 — No “Smart” Per-Item JSON/Array Compression
+
+Do not implement item-level compression for JSON arrays (e.g., “showing items 0, 24, 47 of 50”). JSON files are edited by line number, same as every other file type. The line-based compression model applies uniformly to all content types when operating in the structured-source path.
+
+---
+
+### Rule 5 — Output Must Include Original Line Numbers
+
+Every output line must be prefixed with its original 1-based line number in the standard format used by file-reading tools:
+
+```
+1. import path from ‘path’;
+2. import { normalizeLineEndings } from ‘../core/lib.js’;
+...
+52. }
+[TRUNCATED: lines 53-132]
+133. function mapTrimmedIndex(original: string, trimmed: string, trimmedIdx: number): number {
+134.   const originalChars = [...original];
+```
+
+The line number prefix (`N. `) tells the model exactly which line it’s looking at in the real file. Combined with `[TRUNCATED: lines X-Y]` markers, there is zero ambiguity about file position. This is the same numbering format every file-reading tool uses — the compression output must match it exactly.
+
+---
+
+### Rule 6 — NO Non-Null Assertions
+
+Do not use TypeScript non-null assertions (`!`). They suppress the type checker and hide real nullability issues. If a value might be `null` or `undefined`, handle it explicitly: use a proper type guard. Non-null assertions are never acceptable as a shortcut.
+
+---
+
+### Rule 7 — Tool Call Sandboxing Must Be Explicitly Opted In
+
+Tool call sandboxing or blocking of tool usage must only be active if explicitly enabled in Zenith’s configuration. The default behavior must never block a tool call. Blocking is opt-in, not opt-out.
+
+---
+
+### Rule 8 — API Key Validation Belongs Only in HTTP Streamable Endpoints
+
+API key / bearer token validation must only exist in the HTTP streamable transport. SSE and stdio transports are local — they must remain key-free. Do not add authentication checks to SSE or stdio endpoints.
+
+---
+
+### Rule 9 — All Schemas Must Be Strict
+
+Every Zod schema (and any other validation schema) must be strict. No passthrough, no partial, no loose validation. Unknown fields must be rejected, not silently dropped or forwarded. If a schema needs to evolve, update it explicitly — do not loosen it as a workaround.
+
+---
+
+### Rule 10 — Line Numbering in Output Is Always Mandatory
+
+Line numbers must always be present in TOON output and in all tool output that returns file content. There must never be a parameter, flag, option, or config knob that disables or removes line numbering. Line numbers are not a display preference — they are structural metadata the model depends on for edits. Making them optional would silently break edit reliability.
+
+---
+
+### Rule 11 — No Helpers, No Wrappers — Inline Corrections Only
+
+Do NOT create helper functions, wrapper functions, or utility abstractions to “clean up” or “centralize” marker logic, output formatting, or any existing inline behavior. If a marker is being emitted incorrectly, fix the literal line where the marker string is constructed. If line selection logic is wrong, fix it where it lives.
+
+**Why:** Every time a model creates a `formatOmissionMarker()` helper or an `emitLines()` wrapper, it introduces a layer of indirection that:
+- Makes it trivial to accidentally change output format in one place and break all call sites
+- Obscures the actual control flow (you can’t see what’s emitted by reading the loop)
+- Invites future models to “improve” the helper and silently break invariants
+
+The existing code is intentionally inline. Keep it that way. If you need to change how a marker is formatted, change the template string literal at the point of emission. If you need to change how lines are selected, change the loop/condition that selects them. No abstractions, no indirection, no “minimal” wrappers.
+
+---
+
+### Rule 12 — TOON Must Never Deny a Compression Request
+
+Both the structured (AST-aware) path and the unstructured (text-based) path must always produce compressed output. TOON must never return without having compressed through at least one path. Unsupported languages are a mandatory fallback to the unstructured path — not a refusal. The unstructured path is independently capable of intelligent compression at ~70% retention with no language or AST data at all. It is the universal fallback and must never be removed or degraded. If either path can fail to produce output, the implementation is broken — stop and fix it immediately.
+
+---
+
+### Rule 13 — Always Choose the Most Robust Solution
+
+When two valid approaches exist for the same problem, always implement the most robust, highest-quality one. Never the "minimal safe option" or the simpler-but-weaker alternative. Ask: which approach is more correct, more resilient to edge cases, and better for the codebase long-term? That is always the answer.
+
+---
+
+### Rule 14 — Never Defer a Real Bug or Correctness Issue
+
+When something is identified as broken, it gets fixed. Not deferred, not noted, not ticketed and silently forgotten. There is no such thing as "out of scope" — agents must think in terms of what improves the MCP as a whole, not in terms of PR boundaries. If something is broken, it is always in scope.
+
+---
+
+### Rule 15 — `facts.path` Across the MCP→TOON Seam Must Be Repo-Relative
+
+The `facts.path` field passed to TOON must be a repo-relative path, not an absolute path. Passing an absolute path is a bug. Convert before crossing the seam.
+
+---
+
+### Rule 16 — These Documents Outrank Bot Review Findings
+
+When a code review bot's finding contradicts a documented constraint or goal, these documents win. Bot findings are advisory. No agent should act on a bot suggestion that conflicts with the documented rules here — the correct answer always comes from these files and from the user directly.
+
+---
+
+### Rule 17 — Use the Real Engines — Delegate Fully
+
+Do not make a fake baby version of something that already exists.
+
+The repo already has the smart thing. Delegate to it fully — invoke its complete pipeline as designed. Do not cherry-pick pieces of its internals. Do not write a "simpler" version:
+
+- SageRank: `packages/zenith-toon/src/sagerank.ts`
+- BMX+: `packages/zenith-toon/src/bmx-plus.ts`
+- Budget allocation: `packages/zenith-toon/src/budget.ts`
+- Deduplication: `packages/zenith-toon/src/dedup.ts`
+- Routing/config: `packages/zenith-toon/src/router.ts`, `packages/zenith-toon/src/config.ts`
+- Pipeline/string codec: `packages/zenith-toon/src/pipeline.ts`, `packages/zenith-toon/src/string-codec.ts`
+
+SageRank is not PageRank. Do not replace it with generic centrality scoring or a simplified graph-ranker. Read and integrate the actual implementation.
+
+---
+
+### Rule 18 — Forbidden Designs
+
+Do not propose or implement:
+
+- Fake local SageRank, BMX/BM25, graph ranking, budget allocators, or dedupers
+- One giant pipeline file that recreates existing engines
+- MCP-side compression intelligence or tree-sitter-to-TOON adapters
+- CLI bridge scripts as the main architecture
+- Summarization or synthetic output
+- Anything that makes the model distrust what line number it is looking at
+
+---
+
+### Constraints on the Implementation
+
+- Do not change the function signature: `(text, budget, structure, astEdges?) → string`
+- Do not change the public API (`compressSourceStructured` export)
+- `_MIN_OMISSION_THRESHOLD` (6) must remain enforced in the reassembly loop — no marker for gaps < 6 lines
+- Every non-marker output line must be a character-perfect copy of the input
+- Still works correctly when `astEdges` is undefined/empty (fallback = no connectivity boost, same behavior as today minus fixes 1-4/6)
+- The 70% budget floor (`Math.max(budget, Math.floor(text.length * 0.70))`) is intentional and must NOT be changed
+- All changes are inline in `_compressSourceStructured()` — no new helper functions, no new files
+
+---
+
+### ANTI-PATTERNS TO EXPLICITLY AVOID
+
+| Anti-pattern | Why it fails |
+|---|---|
+| Setting `_MIN_OMISSION_THRESHOLD = 1` or removing the check | Creates useless single-line markers that cost more than showing the line |
+| Generating “summary” lines like `// 3 helper functions omitted` | Not verbatim — model can’t use these for edits |
+| Per-JSON-item markers like `{ showing: [0,1,2], total: 50 }` | JSON is line-edited, not item-edited |
+| Stripping comments to “save space” | Comments are verbatim file content; stripping them means output doesn’t map to real file |
+| Reordering output lines to group by importance | Breaks line-number correspondence |
+| Adding new marker formats without the line range info | Model loses track of what’s missing |
+| Making the threshold configurable per-call | Unnecessary complexity; 6 is the right value |
+| Removing blank lines between blocks to “save budget” | Breaks line-number mapping |
+| Creating helper/wrapper functions like `formatMarker()` or `emitLine()` | Adds indirection that obscures control flow and invites future silent breakage — fix logic inline where it lives |
+| “Centralizing” marker emission into a single utility | Same problem; the code is inline by design, keep it inline |
+| Skipping signature allocation “to save body budget” | 80 chars per signature is negligible vs body lines; invisible functions are catastrophic for comprehension |
+| Emitting signatures with `# L{n}` annotations instead of proper line number prefixes | The `# L{n}` suffix is a hack; use standard `N. ` prefix on every line like file-reading tools do |
+| Using `# ... [N lines omitted]` format (count-only) | Doesn’t tell the model WHICH lines are missing; use `[TRUNCATED: lines X-Y]` |
+| Adding indentation/prefix to truncation markers | Markers must be flush-left so they’re visually unambiguous as metadata, not code |
+| Filling partial blocks top-down ignoring anchors | Wastes budget on variable declarations instead of showing returns/control flow |
+| Adding signatures AFTER/BEYOND the budget as a “second pass” | Defeats the entire purpose of compression; everything must fit WITHIN the 70% budget, signatures included |
+| Using TypeScript non-null assertions (`!`) | Suppresses the type checker and hides real nullability issues; handle nullability explicitly |
+| Enabling tool call sandboxing/blocking without explicit config opt-in | Default behavior must never block a tool call; blocking is opt-in |
+| Using loose/passthrough schemas | Unknown fields must be rejected; schemas must be strict |
+| Adding a `showLineNumbers` / `lineNumbers` opt-out param | Line numbers are mandatory structural metadata, not a display option — never make them optional |
+
+
+---
+
+
+## TOON GOALS
+
+- This is what toons end goal looks like, why we're creating it, why it matters, and how every constraint above is a contract that must be followed to create the vision of toon, and deviation is more than a simple deviation, its changing the primary core decisions toon was designed from. 
+
+### The Problem This Solves
+
+Reading a codebase is expensive. Every file a model reads consumes context. In a large project, a full codebase scan can cost a million tokens or more — and that is before the model has written a single line. The model arrives at the task with a bloated context window, less room to reason, and a clouded perspective built from thousands of lines it did not actually need to read in full.
+
+The user pays for every token. The model performs worse with less room to think. Both problems have the same root cause: **files are read at full cost when full cost is not necessary.**
+
+`zenith-toon` exists to fix that.
+
+---
+
+### What zenith-toon Does
+
+`zenith-toon` is the compression brain of the Zenith MCP. Its job is to take a source file and produce a compressed version that gives a model the same understanding of that file at 70% of the contextual and token cost.
+
+The target: **70% of the file retained, 30% compressed away.**
+
+At that ratio, a codebase that would have cost 1,000,000 tokens to read and understand now costs 700,000. The model gets 300,000 tokens of extra room to reason, plan, and implement — before it has even written anything. That headroom is not a nice-to-have. It directly improves the quality of what follows.
+
+This is not summarization. The model receives real file content: verbatim lines, real line numbers, explicit markers showing exactly what was omitted. Nothing is paraphrased, synthesized, or invented. Every line the model sees is a character-perfect copy of the real file at the real line number. The model can trust what it reads, and it can edit from it safely.
+
+---
+
+### How This Fits Into the MCP
+
+The compression model is built around how agents actually use file reads:
+
+**`read_multiple_files` — compressed by default.**
+Batch file reads are for understanding a codebase, not for making targeted edits. Compression is on by default. An agent that wants uncompressed batch reads must explicitly opt in — the choice should be intentional, not the path of least resistance.
+
+**`read_file` — uncompressed by default.**
+A targeted single-file read is usually for editing. The agent knows which file it wants, it knows why, and it will likely be writing against the content it receives. Uncompressed is the right default. A `compress: true` param exists for when the agent wants to read a file for orientation rather than editing.
+
+The compression path should be invisible and trustworthy. An agent using `read_multiple_files` should not have to think about compression — it should simply receive a faithful, compact representation of every file and get on with its work.
+
+---
+
+### What Good Compression Looks Like
+
+The 30% that gets dropped must be the right 30%.
+
+A good compressed file gives the model a complete understanding of:
+
+- What the file defines and exports
+- Which functions, classes, and modules are structurally important
+- How the important pieces relate to each other
+- Which logic is central, reused, or entry-point-like
+- The coding patterns and nuances specific to this file
+- Where content was removed and exactly which line ranges were omitted
+
+What gets dropped is the low-signal body — the implementation details that follow predictably from the visible structure, the boilerplate that adds no new information, the repetitive patterns where seeing one instance is as good as seeing all of them.
+
+The compression is not mechanical. It is intelligent. TOON uses AST structure, symbol graphs, call edges, and ranking engines (SageRank, BMX+) to determine what actually matters in a file. The goal is for a model that reads a TOON-compressed file to come away with the same mental model of that file as if it had read the full thing — just at 70 cents on the dollar and 70 percent of the contextual cost. 
+
+---
+
+### The Trust Contract
+
+For compression to be useful it must be trustworthy. An agent that doubts what it is reading is worse than an agent that read nothing.
+
+The contract is absolute:
+
+- Every line shown maps verbatim to the real file at the exact line number shown
+- Every omission is explicitly marked with the real line range that was removed
+- There are no gaps the agent does not know about
+- There is no invented, paraphrased, or synthesized content
+
+If an agent reads line 48 in TOON output, line 48 in the actual file must contain exactly that content. No exceptions. This is not a formatting preference — it is the foundation the entire tool is built on. Violating it destroys trust and makes the tool worse than useless.
+
+---
+
+### The Long-Term Trajectory
+
+70% retained is the current target. It is a reasonable goal that delivers real, measurable value. If we hit it reliably and intelligently, we have already accomplished creating a solution to a significant problem.
+
+But the ceiling is higher. As compression intelligence improves — as TOON's AST awareness deepens, as ranking gets more precise, as the engines improve — the goal is to eventually move to 60%, then possibly 50%, while still giving the model a complete understanding of the file. The compression ratio improves; the quality of understanding does not regress.
+
+That is the long-term bet: not just "smaller output" but "the same understanding, at a fraction of the cost," pushed as far as the intelligence of the compression can carry it.
+
+---
+
+### Design Consideration — Two Sides of the Same Cut
+
+Most compression thinking starts from one direction: find the best 70% and keep it. That produces a good structural skeleton — anchors, exports, high-ranked definitions all make it through. But it has a blind spot: content can survive the cut simply by being near something important, or by scoring just above the threshold, without actually adding new information.
+
+The other direction is worth equal attention: actively identify the weakest 30% and ask what earns removal. The question shifts from "is this valuable?" to "does this add anything the model doesn't already have from what else is shown?" That is a much more surgical lens.
+
+Content that earns removal on that basis:
+- Boilerplate that follows mechanically from a visible signature
+- Error handling patterns already shown multiple times in the same file
+- Comments that restate what the surrounding code already clearly says
+- Middle cases in long switch/if chains where the pattern is obvious after the first few
+- Getter/setter bodies when the field declaration is already visible
+
+The signal for removal is **redundancy relative to already-shown content** — not just low absolute importance, but low *marginal* information given everything else the model sees in the output.
+
+The best compression approach likely works both directions simultaneously: rank everything, anchor the high-value structure first, then fill the remaining budget by removing the most redundant content rather than purely adding the most valuable. The deduplicator already exists for exactly this purpose — it may be the most underutilized engine in the pipeline.
+
+The place where these two perspectives meet is where compression gets genuinely intelligent.
+
+---
+
+### Package Ownership
+
+`zenith-toon` owns all compression intelligence. This is non-negotiable.
+
+`zenith-mcp` is the context provider and the pipe. It supplies:
+
+- File text
+- File path (repo-relative)
+- Project root
+- Budget / maxChars
+- DB path or read-only project metadata
+- Language and context hints
+- Raw AST / symbol / edge facts it has already computed for other purposes
+
+`zenith-mcp` must not decide which lines, symbols, blocks, or AST nodes matter for compression. It hands over raw facts. TOON does the reasoning.
+
+---
+
+### AST-Awareness Is Always the Direction
+
+When choosing between two valid implementations of the same feature, ask which one improves AST awareness and makes the MCP more intelligent. The approach that uses actual AST structure — byte offsets, node boundaries, real scope containment — is always preferred over line-number approximations or row comparisons. This is the direction the codebase is moving.
+
+---
+
+### Codebase Alignment
+
+The goal is to align the codebase with the intended design documented in these files. Agent-generated code that drifted from the intended design is not acceptable just because tests pass. Green tests with wrong architecture is still wrong. When code does not match the documented intent, it gets corrected — not worked around.
+
+---
+
+### Performance Is Correctness
+
+N+1 queries, missing statement caching, unbounded operations with no size cap — these are bugs, not polish. They degrade the system for real use and they get fixed alongside everything else. There is no such thing as deferring a performance issue.
