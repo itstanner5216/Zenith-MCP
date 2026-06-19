@@ -251,6 +251,9 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             else if (sourceStats.isFile()) {
                 await copyFileAtomic(validSourcePath, validDestPath, sourceStats);
             }
+            else {
+                throw new Error('Cannot copy special file types (socket, FIFO, block/character device).');
+            }
             return { content: [{ type: "text", text: "Copied." }] };
         }
         // mode === "tree"
