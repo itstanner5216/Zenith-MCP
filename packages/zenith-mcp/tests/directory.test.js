@@ -397,4 +397,188 @@ describe('directory tool — copy mode', () => {
         expect(fs.existsSync(path.join(destination, '.env'))).toBe(false);
         expect(fs.existsSync(path.join(destination, 'node_modules'))).toBe(false);
     });
+
+    it('throws when source is missing in copy mode', async () => {
+        const destination = path.join(tmpDir, 'destination.txt');
+        await expect(handler({ mode: 'copy', destination })).rejects.toThrow('source required for copy.');
+    });
+
+    it('throws when destination is missing in copy mode', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        fs.writeFileSync(source, 'data');
+        await expect(handler({ mode: 'copy', source })).rejects.toThrow('destination required for copy.');
+    });
+
+    it('throws when destination path is an existing directory', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'dest-dir');
+        fs.writeFileSync(source, 'data');
+        fs.mkdirSync(destination);
+
+        await expect(handler({ mode: 'copy', source, destination })).rejects.toThrow('Destination is a directory.');
+    });
+
+    it('does not preserve mode when preserveMode is false', async () => {
+        const source = path.join(tmpDir, 'source.sh');
+        const destination = path.join(tmpDir, 'destination.sh');
+        fs.writeFileSync(source, '#!/bin/sh\necho hi\n');
+        fs.chmodSync(source, 0o744);
+
+        const chmodSpy = vi.spyOn(fsp, 'chmod');
+        try {
+            await handler({ mode: 'copy', source, destination, preserveMode: false });
+            expect(chmodSpy).not.toHaveBeenCalled();
+        } finally {
+            chmodSpy.mockRestore();
+        }
+    });
+
+    it('does not preserve timestamps when preserveTimestamps is false', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'data');
+
+        const utimesSpy = vi.spyOn(fsp, 'utimes');
+        try {
+            await handler({ mode: 'copy', source, destination, preserveTimestamps: false });
+            expect(utimesSpy).not.toHaveBeenCalled();
+        } finally {
+            utimesSpy.mockRestore();
+        }
+    });
+
+    it('creates intermediate parent directories for nested destination', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'a', 'b', 'c', 'destination.txt');
+        fs.writeFileSync(source, 'nested-dest');
+
+        await handler({ mode: 'copy', source, destination });
+
+        expect(fs.readFileSync(destination, 'utf8')).toBe('nested-dest');
+    });
+
+    it('throws when a symlink is encountered inside a recursive directory copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        const realFile = path.join(tmpDir, 'real.txt');
+        fs.mkdirSync(source);
+        fs.writeFileSync(realFile, 'real');
+        fs.symlinkSync(realFile, path.join(source, 'link.txt'));
+
+        await expect(handler({ mode: 'copy', source, destination, recursive: true })).rejects.toThrow('Cannot copy symbolic links.');
+    });
+
+    it('copies an empty file without error', async () => {
+        const source = path.join(tmpDir, 'empty.txt');
+        const destination = path.join(tmpDir, 'empty-dest.txt');
+        fs.writeFileSync(source, '');
+
+        const result = await handler({ mode: 'copy', source, destination });
+
+        expect(result.content[0].text).toBe('Copied.');
+        expect(fs.readFileSync(destination, 'utf8')).toBe('');
+        expect(fs.statSync(destination).size).toBe(0);
+    });
+
+    it('copies binary file content faithfully', async () => {
+        const source = path.join(tmpDir, 'binary.bin');
+        const destination = path.join(tmpDir, 'binary-dest.bin');
+        const binaryContent = Buffer.from([0x00, 0x01, 0xFF, 0xFE, 0x80, 0x7F]);
+        fs.writeFileSync(source, binaryContent);
+
+        await handler({ mode: 'copy', source, destination });
+
+        const destContent = fs.readFileSync(destination);
+        expect(destContent).toEqual(binaryContent);
+    });
+
+    it('copies multiple levels of nested directories recursively', async () => {
+        const source = path.join(tmpDir, 'root');
+        const destination = path.join(tmpDir, 'root-copy');
+        fs.mkdirSync(path.join(source, 'a', 'b', 'c'), { recursive: true });
+        fs.writeFileSync(path.join(source, 'top.txt'), 'top');
+        fs.writeFileSync(path.join(source, 'a', 'mid.txt'), 'mid');
+        fs.writeFileSync(path.join(source, 'a', 'b', 'c', 'deep.txt'), 'deep');
+
+        await handler({ mode: 'copy', source, destination, recursive: true });
+
+        expect(fs.readFileSync(path.join(destination, 'top.txt'), 'utf8')).toBe('top');
+        expect(fs.readFileSync(path.join(destination, 'a', 'mid.txt'), 'utf8')).toBe('mid');
+        expect(fs.readFileSync(path.join(destination, 'a', 'b', 'c', 'deep.txt'), 'utf8')).toBe('deep');
+    });
+
+    it('overwrites existing files during recursive copy when overwrite is true', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(source);
+        fs.mkdirSync(destination);
+        fs.writeFileSync(path.join(source, 'file.txt'), 'updated');
+        fs.writeFileSync(path.join(destination, 'file.txt'), 'original');
+
+        await handler({ mode: 'copy', source, destination, recursive: true, overwrite: true });
+
+        expect(fs.readFileSync(path.join(destination, 'file.txt'), 'utf8')).toBe('updated');
+    });
+
+    it('cleans up temp file when copy fails mid-operation', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'data');
+
+        const originalRename = fsp.rename;
+        vi.spyOn(fsp, 'rename').mockImplementation(async () => {
+            throw new Error('rename failed');
+        });
+        try {
+            await expect(handler({ mode: 'copy', source, destination })).rejects.toThrow('rename failed');
+            // No temp files should remain in tmpDir
+            const remaining = fs.readdirSync(tmpDir).filter(f => f.startsWith('.zenith-copy-'));
+            expect(remaining).toHaveLength(0);
+        } finally {
+            fsp.rename = originalRename;
+            vi.restoreAllMocks();
+        }
+    });
+
+    it('copies an empty source directory without error', async () => {
+        const source = path.join(tmpDir, 'empty-dir');
+        const destination = path.join(tmpDir, 'empty-dir-copy');
+        fs.mkdirSync(source);
+
+        const result = await handler({ mode: 'copy', source, destination, recursive: true });
+
+        expect(result.content[0].text).toBe('Copied.');
+        expect(fs.statSync(destination).isDirectory()).toBe(true);
+    });
+
+    it('validates each child source path during recursive directory copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(source);
+        fs.writeFileSync(path.join(source, 'child.txt'), 'child');
+
+        const validatePath = vi.fn(async (p) => path.resolve(p));
+        ctx.validatePath = validatePath;
+
+        await handler({ mode: 'copy', source, destination, recursive: true });
+
+        // Called once for source itself, once for the child inside copyDirectorySafe
+        const calls = validatePath.mock.calls.map(c => c[0]);
+        expect(calls.some(p => p.includes('child.txt'))).toBe(true);
+    });
+
+    it('validates each child destination path during recursive directory copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(source);
+        fs.writeFileSync(path.join(source, 'child.txt'), 'child');
+
+        const validateNewFilePath = vi.fn(async (p) => path.resolve(p));
+        ctx.validateNewFilePath = validateNewFilePath;
+
+        await handler({ mode: 'copy', source, destination, recursive: true });
+
+        const calls = validateNewFilePath.mock.calls.map(c => c[0]);
+        expect(calls.some(p => p.includes('child.txt'))).toBe(true);
+    });
 });
