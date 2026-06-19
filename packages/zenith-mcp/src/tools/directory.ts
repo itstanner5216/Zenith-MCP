@@ -239,6 +239,13 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             if (sourceStats.isSymbolicLink()) throw new Error('Cannot copy symbolic links.');
             if (sourceStats.isDirectory()) {
                 if (args.recursive !== true) throw new Error('recursive required for directory copy.');
+                const relativeDest = path.relative(validSourcePath, validDestPath);
+                const copyingIntoOwnSubdirectory = relativeDest !== ''
+                    && !relativeDest.startsWith('..')
+                    && !path.isAbsolute(relativeDest);
+                if (copyingIntoOwnSubdirectory) {
+                    throw new Error('Cannot copy a directory into its own subdirectory.');
+                }
                 await copyDirectorySafe(validSourcePath, validDestPath);
             }
             else if (sourceStats.isFile()) {
