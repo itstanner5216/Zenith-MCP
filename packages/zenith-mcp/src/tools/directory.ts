@@ -107,7 +107,18 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         }
 
         async function copyDirectorySafe(sourceDir: string, destDir: string, rootSource = sourceDir): Promise<void> {
-            await fs.mkdir(destDir, { recursive: true });
+            try {
+                const destStats = await fs.lstat(destDir);
+                if (!destStats.isDirectory()) throw new Error('Destination exists.');
+                if (!args.overwrite) {
+                    const existing = await fs.readdir(destDir);
+                    if (existing.length > 0) throw new Error('Destination exists.');
+                }
+            }
+            catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                await fs.mkdir(destDir, { recursive: true });
+            }
             const entries = await fs.readdir(sourceDir, { withFileTypes: true });
             for (const entry of entries) {
                 const childSourcePath = path.join(sourceDir, entry.name);
