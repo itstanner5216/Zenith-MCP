@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
@@ -20,6 +21,7 @@ function captureHandler() {
 function mkCtx(baseDir) {
     return {
         validatePath: async (p) => path.resolve(p),
+        validateNewFilePath: async (p) => path.resolve(p),
         getAllowedDirectories: () => [baseDir],
     };
 }
@@ -116,13 +118,22 @@ describe('directory tool — list mode', () => {
 
     it('returns [DENIED] for unreadable subdirectory', async () => {
         fs.mkdirSync(path.join(tmpDir, 'denied'), { recursive: true });
-        fs.chmodSync(path.join(tmpDir, 'denied'), 0o000);
+        const deniedPath = path.join(tmpDir, 'denied');
+        const originalReaddir = fsp.readdir;
+        const readdir = vi.spyOn(fsp, 'readdir').mockImplementation(async (target, options) => {
+            if (path.resolve(String(target)) === deniedPath) {
+                const error = new Error('permission denied');
+                error.code = 'EACCES';
+                throw error;
+            }
+            return await originalReaddir(target, options);
+        });
         try {
             const result = await handler({ mode: 'list', path: tmpDir, depth: 3 });
             const text = result.content[0].text;
             expect(text).toContain('[DENIED]');
         } finally {
-            fs.chmodSync(path.join(tmpDir, 'denied'), 0o755);
+            readdir.mockRestore();
         }
     });
 
@@ -230,5 +241,160 @@ describe('directory tool — tree mode', () => {
         const result = await handler({ mode: 'tree' });
         const text = result.content[0].text;
         expect(typeof text).toBe('string');
+    });
+});
+
+
+describe('directory tool — copy mode', () => {
+    let tmpDir;
+    let ctx;
+    let registration;
+    let handler;
+
+    beforeEach(async () => {
+        tmpDir = mkTmpDir();
+        ctx = mkCtx(tmpDir);
+        const mod = await importDirectory();
+        const { server, calls } = captureHandler();
+        mod.register(server, ctx);
+        registration = calls[0].schema;
+        handler = calls[0].handler;
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('schema includes copy', () => {
+        const parsed = registration.inputSchema.parse({
+            mode: 'copy',
+            source: path.join(tmpDir, 'src.txt'),
+            destination: path.join(tmpDir, 'dest.txt'),
+        });
+
+        expect(parsed.mode).toBe('copy');
+        expect(parsed.overwrite).toBe(false);
+        expect(parsed.recursive).toBe(false);
+        expect(parsed.preserveTimestamps).toBe(true);
+        expect(parsed.preserveMode).toBe(true);
+        expect(registration.annotations).toMatchObject({
+            readOnlyHint: false,
+            idempotentHint: false,
+            destructiveHint: false,
+        });
+    });
+
+    it('copies one file to a new destination', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'hello');
+
+        const result = await handler({ mode: 'copy', source, destination });
+
+        expect(result.content[0].text).toBe('Copied.');
+        expect(fs.readFileSync(destination, 'utf8')).toBe('hello');
+    });
+
+    it('refuses to overwrite existing destination by default', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'new');
+        fs.writeFileSync(destination, 'old');
+
+        await expect(handler({ mode: 'copy', source, destination })).rejects.toThrow('Destination exists.');
+        expect(fs.readFileSync(destination, 'utf8')).toBe('old');
+    });
+
+    it('overwrites only when overwrite is true', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'new');
+        fs.writeFileSync(destination, 'old');
+
+        await handler({ mode: 'copy', source, destination, overwrite: true });
+
+        expect(fs.readFileSync(destination, 'utf8')).toBe('new');
+    });
+
+    it('preserves file contents and mode', async () => {
+        const source = path.join(tmpDir, 'source.sh');
+        const destination = path.join(tmpDir, 'destination.sh');
+        fs.writeFileSync(source, '#!/bin/sh\necho ok\n');
+        fs.chmodSync(source, 0o744);
+
+        await handler({ mode: 'copy', source, destination });
+
+        expect(fs.readFileSync(destination, 'utf8')).toBe('#!/bin/sh\necho ok\n');
+        expect(fs.statSync(destination).mode & 0o777).toBe(0o744);
+    });
+
+    it('copies directories only when recursive is true', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(path.join(source, 'nested'), { recursive: true });
+        fs.writeFileSync(path.join(source, 'nested', 'file.txt'), 'data');
+
+        await handler({ mode: 'copy', source, destination, recursive: true });
+
+        expect(fs.readFileSync(path.join(destination, 'nested', 'file.txt'), 'utf8')).toBe('data');
+    });
+
+    it('rejects directory copy without recursive', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(source);
+
+        await expect(handler({ mode: 'copy', source, destination })).rejects.toThrow('recursive required for directory copy.');
+        expect(fs.existsSync(destination)).toBe(false);
+    });
+
+    it('rejects symlink source', async () => {
+        const target = path.join(tmpDir, 'target.txt');
+        const source = path.join(tmpDir, 'link.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(target, 'target');
+        fs.symlinkSync(target, source);
+
+        await expect(handler({ mode: 'copy', source, destination })).rejects.toThrow('Cannot copy symbolic links.');
+        expect(fs.existsSync(destination)).toBe(false);
+    });
+
+    it('validates source through validatePath', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'data');
+        const validatePath = vi.fn(async (p) => path.resolve(p));
+        ctx.validatePath = validatePath;
+
+        await handler({ mode: 'copy', source, destination });
+
+        expect(validatePath).toHaveBeenCalledWith(source);
+    });
+
+    it('validates destination through validateNewFilePath', async () => {
+        const source = path.join(tmpDir, 'source.txt');
+        const destination = path.join(tmpDir, 'destination.txt');
+        fs.writeFileSync(source, 'data');
+        const validateNewFilePath = vi.fn(async (p) => path.resolve(p));
+        ctx.validateNewFilePath = validateNewFilePath;
+
+        await handler({ mode: 'copy', source, destination });
+
+        expect(validateNewFilePath).toHaveBeenCalledWith(destination);
+    });
+
+    it('does not include sensitive/default-excluded files during recursive copy', async () => {
+        const source = path.join(tmpDir, 'source-dir');
+        const destination = path.join(tmpDir, 'destination-dir');
+        fs.mkdirSync(path.join(source, 'node_modules'), { recursive: true });
+        fs.writeFileSync(path.join(source, 'keep.txt'), 'keep');
+        fs.writeFileSync(path.join(source, '.env'), 'secret');
+        fs.writeFileSync(path.join(source, 'node_modules', 'pkg.js'), 'excluded');
+
+        await handler({ mode: 'copy', source, destination, recursive: true });
+
+        expect(fs.readFileSync(path.join(destination, 'keep.txt'), 'utf8')).toBe('keep');
+        expect(fs.existsSync(path.join(destination, '.env'))).toBe(false);
+        expect(fs.existsSync(path.join(destination, 'node_modules'))).toBe(false);
     });
 });

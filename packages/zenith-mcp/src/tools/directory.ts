@@ -1,7 +1,8 @@
 import { z } from "zod";
 import fs from "fs/promises";
 import path from "path";
-import { Dirent } from "fs";
+import { Dirent, constants as fsConstants } from "fs";
+import { randomBytes } from "crypto";
 import { minimatch } from "minimatch";
 import { formatSize } from '../core/lib.js';
 import { getDefaultExcludes, isSensitive } from '../core/shared.js';
@@ -33,8 +34,14 @@ interface FileTreeEntry {
 }
 
 interface DirectoryArgs {
-    mode: "list" | "tree";
+    mode: "list" | "tree" | "copy";
     path?: string;
+    source?: string;
+    destination?: string;
+    overwrite?: boolean;
+    recursive?: boolean;
+    preserveTimestamps?: boolean;
+    preserveMode?: boolean;
     depth?: number;
     includeSizes?: boolean;
     sortBy?: "name" | "size";
@@ -46,10 +53,16 @@ interface DirectoryArgs {
 export function register(server: ToolServer, ctx: ToolContext): void {
     server.registerTool("directory", {
         title: "Directory",
-        description: "List directory contents or show a recursive tree.",
+        description: "List directory contents, show a recursive tree, or copy files safely. This tool is write-capable because copy mutates the filesystem.",
         inputSchema: z.object({
-            mode: z.enum(["list", "tree"]).describe("Operation mode."),
+            mode: z.enum(["list", "tree", "copy"]).describe("Operation mode."),
             path: z.string().optional().describe("Dir path."),
+            source: z.string().optional().describe("Source path for copy."),
+            destination: z.string().optional().describe("Destination path for copy."),
+            overwrite: z.boolean().optional().default(false).describe("Overwrite existing destination."),
+            recursive: z.boolean().optional().default(false).describe("Copy directories recursively."),
+            preserveTimestamps: z.boolean().optional().default(true).describe("Preserve source timestamps."),
+            preserveMode: z.boolean().optional().default(true).describe("Preserve source mode."),
             depth: z.number().int().min(1).max(10).optional().describe("Recursion depth. Defaults to 1 for list, unlimited for tree."),
             includeSizes: z.boolean().optional().default(false).describe("Show file sizes."),
             sortBy: z.enum(["name", "size"]).optional().default("name").describe("Sort order."),
@@ -57,8 +70,62 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             showSymbols: z.boolean().optional().default(false).describe("Show symbol counts."),
             showSymbolNames: z.boolean().optional().default(false).describe("Show symbol names."),
         }),
-        annotations: { readOnlyHint: true }
+        annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false }
     }, async (args: DirectoryArgs) => {
+        async function copyFileAtomic(validSourcePath: string, validDestPath: string, sourceStats: Awaited<ReturnType<typeof fs.lstat>>): Promise<void> {
+            await fs.mkdir(path.dirname(validDestPath), { recursive: true });
+            try {
+                const destStats = await fs.lstat(validDestPath);
+                if (destStats.isDirectory()) throw new Error('Destination is a directory.');
+                if (!args.overwrite) throw new Error('Destination exists.');
+            }
+            catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            }
+
+            const tempPath = path.join(path.dirname(validDestPath), `.zenith-copy-${process.pid}-${randomBytes(8).toString('hex')}.tmp`);
+            try {
+                await fs.copyFile(validSourcePath, tempPath, args.overwrite ? 0 : fsConstants.COPYFILE_EXCL);
+                const tempStats = await fs.stat(tempPath);
+                if (tempStats.size !== sourceStats.size) throw new Error('Copied size mismatch.');
+                if (args.preserveMode !== false) await fs.chmod(tempPath, Number(sourceStats.mode) & 0o777);
+                if (args.preserveTimestamps !== false) await fs.utimes(tempPath, sourceStats.atime, sourceStats.mtime);
+                await fs.rename(tempPath, validDestPath);
+            }
+            catch (error) {
+                try { await fs.unlink(tempPath); } catch { }
+                throw error;
+            }
+        }
+
+        function shouldSkipCopyChild(rootSource: string, childSource: string, name: string): boolean {
+            if (isSensitive(childSource)) return true;
+            const relativePath = path.relative(rootSource, childSource);
+            return getDefaultExcludes().some(p => name === p ||
+                minimatch(relativePath, p, { dot: true }) ||
+                minimatch(relativePath, `**/${p}`, { dot: true }));
+        }
+
+        async function copyDirectorySafe(sourceDir: string, destDir: string, rootSource = sourceDir): Promise<void> {
+            await fs.mkdir(destDir, { recursive: true });
+            const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+            for (const entry of entries) {
+                const childSourcePath = path.join(sourceDir, entry.name);
+                if (shouldSkipCopyChild(rootSource, childSourcePath, entry.name)) continue;
+                const validChildSourcePath = await ctx.validatePath(childSourcePath);
+                const childStats = await fs.lstat(validChildSourcePath);
+                if (childStats.isSymbolicLink()) throw new Error('Cannot copy symbolic links.');
+                const childDestPath = path.join(destDir, entry.name);
+                const validChildDestPath = await ctx.validateNewFilePath(childDestPath);
+                if (childStats.isDirectory()) {
+                    await copyDirectorySafe(validChildSourcePath, validChildDestPath, rootSource);
+                }
+                else if (childStats.isFile()) {
+                    await copyFileAtomic(validChildSourcePath, validChildDestPath, childStats);
+                }
+            }
+        }
+
         if (args.mode === "list") {
             const validPath = await ctx.validatePath(args.path ?? '');
             const depth = Math.max(1, Math.min(args.depth || 1, 10));
@@ -161,6 +228,23 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             }
             const lines = await listRecursive(validPath, 0, '');
             return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+        if (args.mode === "copy") {
+            if (!args.source) throw new Error('source required for copy.');
+            if (!args.destination) throw new Error('destination required for copy.');
+
+            const validSourcePath = await ctx.validatePath(args.source);
+            const validDestPath = await ctx.validateNewFilePath(args.destination);
+            const sourceStats = await fs.lstat(validSourcePath);
+            if (sourceStats.isSymbolicLink()) throw new Error('Cannot copy symbolic links.');
+            if (sourceStats.isDirectory()) {
+                if (args.recursive !== true) throw new Error('recursive required for directory copy.');
+                await copyDirectorySafe(validSourcePath, validDestPath);
+            }
+            else if (sourceStats.isFile()) {
+                await copyFileAtomic(validSourcePath, validDestPath, sourceStats);
+            }
+            return { content: [{ type: "text", text: "Copied." }] };
         }
         // mode === "tree"
         const rootPath = await ctx.validatePath(args.path ?? '');
