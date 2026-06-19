@@ -36,15 +36,6 @@ describe('Priority 0 — structured engine line-number truth', () => {
         const out = compressSourceStructured(source, budget, structure);
         const { shown, markers } = assertLineTruth(source, out, {
           minGap: 6, // structured engine guarantees the 6-line floor via Phase H
-          // The engine compresses by dropping the budget-truncated tail without a
-          // trailing marker (pervasive across all paths/budgets). That conflicts
-          // with a strict Priority-0 reading (constraints.md:126 ends with a
-          // trailing marker) and is ESCALATED to maintainers — see the skipped
-          // specs in escalation-eof-markers.test.ts. Every other Priority-0
-          // guarantee (verbatim, ascending, internal gap accounting, marker
-          // ranges) is still enforced here.
-          requireTrailingMarker: false,
-          requireLeadingMarker: false,
           label: `${fixture}@${frac}`,
         });
         // Compression must actually engage somewhere across the budget sweep:
@@ -63,8 +54,7 @@ describe('Priority 0 — synthetic structured fixtures', () => {
       it(`${name} @ ${frac}`, () => {
         const budget = Math.floor(source.length * frac);
         const out = compressSourceStructured(source, budget, structure);
-        assertLineTruth(source, out, { minGap: 6, requireTrailingMarker: false,
-          requireLeadingMarker: false, label: `${name}@${frac}` });
+        assertLineTruth(source, out, { minGap: 6, label: `${name}@${frac}` });
       });
     }
   }
@@ -79,8 +69,7 @@ describe('Priority 0 — plain source path (compressString) line-number truth', 
       it(`${name} @ ${frac}`, () => {
         const budget = Math.floor(source.length * frac);
         const out = compressString(source, budget);
-        assertLineTruth(source, out, { requireTrailingMarker: false,
-          requireLeadingMarker: false, label: `${name}@${frac}` });
+        assertLineTruth(source, out, { label: `${name}@${frac}` });
       });
     }
   }
@@ -116,8 +105,7 @@ describe('Priority 0 — compressFile end-to-end (real facts shape)', () => {
       // compressFile returns null only when compression is not useful; the real
       // fixtures are large enough to always compress.
       expect(out).not.toBeNull();
-      assertLineTruth(source, out as string, { minGap: 6, requireTrailingMarker: false,
-          requireLeadingMarker: false, label: `${fixture}/compressFile` });
+      assertLineTruth(source, out as string, { minGap: 6, label: `${fixture}/compressFile` });
     });
   }
 });

@@ -52,6 +52,8 @@ describe('Ownership — forbidden compression decisions are absent from MCP', ()
     // structure or choosing a codec — a compression decision.
     for (const { rel, text } of readAll()) {
       const toonImport = text.match(/import\s+\{([\s\S]*?)\}\s+from\s+['"]zenith-toon['"]/);
+      if (!toonImport) continue; // file doesn't import from TOON — nothing to check
+      const named = toonImport[1].split(',').map((s) => s.trim()).filter(Boolean);
       expect(named, `zenith-mcp/src/${rel} imports more than compressFile from TOON`).toEqual(['compressFile']);
     }
   });

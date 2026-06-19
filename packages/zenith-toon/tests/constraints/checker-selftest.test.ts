@@ -58,7 +58,7 @@ describe('checker self-test — rejects every violation class', () => {
 
   it('rejects a silent trailing gap when trailing markers are required', () => {
     const out = [shown(1), shown(2), shown(3)].join('\n'); // 4-10 dropped, no marker
-    expect(() => assertLineTruth(SOURCE, out, { requireTrailingMarker: true })).toThrow(/silent trailing gap/);
+    expect(() => assertLineTruth(SOURCE, out)).toThrow(/silent trailing gap/);
   });
 
   it('rejects a marker whose range does not abut the next shown line', () => {

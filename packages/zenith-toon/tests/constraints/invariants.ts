@@ -38,24 +38,6 @@ export interface InvariantOptions {
    * plain `compressString` source path makes no such promise, so callers opt in.
    */
   minGap?: number;
-  /**
-   * Require that an omission running to EOF carries a closing
-   * `[TRUNCATED: lines X-end]` marker, i.e. the last shown line must be the last
-   * source line unless a trailing marker accounts for the tail. Defaults to
-   * true. The structured engine's budget-break path currently drops the tail
-   * without a marker, so the sweeps that exercise that path opt out explicitly
-   * (and the gap is escalated separately); every other call keeps it strict.
-   */
-  requireTrailingMarker?: boolean;
-  /**
-   * Require that an omission starting at the top of the file carries an opening
-   * `[TRUNCATED: lines 1-X]` marker, i.e. the first shown line must be line 1
-   * unless a leading marker accounts for the head. Defaults to true. The
-   * structured engine's budget-break path can drop leading low-priority lines
-   * (e.g. blank/comment runs) without a marker, so the sweeps that exercise that
-   * path opt out explicitly (escalated separately); every other call stays strict.
-   */
-  requireLeadingMarker?: boolean;
   /** Human label surfaced in assertion messages. */
   label?: string;
 }
@@ -76,8 +58,6 @@ export function assertLineTruth(
   opts: InvariantOptions = {},
 ): { shown: number[]; markers: Array<{ x: number; y: number }> } {
   const label = opts.label ? `[${opts.label}] ` : '';
-  const requireTrailingMarker = opts.requireTrailingMarker ?? true;
-  const requireLeadingMarker = opts.requireLeadingMarker ?? true;
   const srcLines = source.split('\n');
   const total = srcLines.length;
 
@@ -165,7 +145,7 @@ export function assertLineTruth(
     } else if (lastShown === 0) {
       // First emitted content is a shown line. If it is not line 1, lines
       // 1..n-1 were dropped with no leading marker — a silent leading gap.
-      if (n !== 1 && requireLeadingMarker) {
+      if (n !== 1) {
         throw new Error(`${label}silent leading gap: output starts at line ${n} with no marker for lines 1-${n - 1}`);
       }
     } else if (n !== lastShown + 1) {
@@ -187,7 +167,7 @@ export function assertLineTruth(
   }
   // Output that ends on a shown line short of EOF dropped the tail with no
   // marker — a silent trailing gap. The model would believe the file ends early.
-  if (!pending && requireTrailingMarker && lastShown !== 0 && lastShown !== total) {
+  if (!pending && lastShown !== 0 && lastShown !== total) {
     throw new Error(
       `${label}silent trailing gap: output ends at line ${lastShown} but file has ${total} lines (no trailing marker)`,
     );
