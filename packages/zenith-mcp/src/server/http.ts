@@ -368,8 +368,15 @@ app.post('/mcp', authRateLimiter, requireApiKey, async (req, res) => {
     // ── Existing session: forward the message ──
     if (sessionId) {
         const entry = sessions.get(sessionId as string);
-        if (!entry || entry.type !== 'streamable') {
-            res.status(400).json({ error: 'Unknown or mismatched session' });
+        // Reaped/unknown session: answer 404 (not 400) so the client starts a
+        // fresh session per the MCP Streamable HTTP spec instead of looping on
+        // a dead session id.
+        if (!entry) {
+            res.status(404).json({ error: 'Session not found' });
+            return;
+        }
+        if (entry.type !== 'streamable') {
+            res.status(400).json({ error: 'Session is not a streamable session — do not mix transport types' });
             return;
         }
         try {
@@ -442,8 +449,13 @@ app.get('/mcp', authRateLimiter, requireApiKey, async (req, res) => {
         return;
     }
     const entry = sessions.get(sessionId as string);
-    if (!entry || entry.type !== 'streamable') {
-        res.status(400).json({ error: 'Unknown or mismatched session' });
+    // Reaped/unknown session: 404 is the spec's re-init trigger for the client.
+    if (!entry) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+    }
+    if (entry.type !== 'streamable') {
+        res.status(400).json({ error: 'Session is not a streamable session — do not mix transport types' });
         return;
     }
 
