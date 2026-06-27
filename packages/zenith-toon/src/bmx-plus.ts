@@ -8,7 +8,17 @@
  *   3. tanh Soft-AND coverage bonus (RankEvolve-inspired, anti-dominance)
  *
  * All executed within a TAAT posting-list architecture for 3.4–30× speedup.
+ *
+ * For the source route this is the lexical RELEVANCE engine: build the index
+ * once over code blocks (chunk_id = block/line-range id), search once with a
+ * scan query, read the ranking. The index is build-once / read-once — the
+ * incremental streaming API (updateIndex/removeFromIndex + lazy dirty-term
+ * recomputation) and the unused alpha/beta self-tuning knobs were removed;
+ * neither ever fed search().
  */
+
+import type { Payload } from './compress-source.js';
+import { removalEngine } from './removal.js';
 
 // Module-level word regex
 // JS \w is not unicode-aware — use \p{L} and \p{N} for equivalent behavior
@@ -33,8 +43,6 @@ interface Chunk {
 
 export class BMXPlusIndex {
   // ── Public configuration ──
-  readonly alphaOverride: number | null;
-  readonly betaOverride: number | null;
   readonly normalizeScores: boolean;
 
   // ── Document storage ──
@@ -55,20 +63,11 @@ export class BMXPlusIndex {
   private _termTotalFreqs: Map<string, number>;
   private _termEntropy: Map<string, number>;
   private _termInfo: Map<string, number>;
-  private _dirtyTerms: Set<string>;
 
-  // ── Self-tuning parameters ──
-  private _alpha: number;
-  private _beta: number;
+  // ── Term-adaptive scaling ──
   private _idfMax: number;
 
-  constructor(
-    alphaOverride: number | null = null,
-    betaOverride: number | null = null,
-    normalizeScores: boolean = false
-  ) {
-    this.alphaOverride = alphaOverride;
-    this.betaOverride = betaOverride;
+  constructor(normalizeScores: boolean = false) {
     this.normalizeScores = normalizeScores;
 
     this._documents = new Map();
@@ -84,10 +83,7 @@ export class BMXPlusIndex {
     this._termTotalFreqs = new Map();
     this._termEntropy = new Map();
     this._termInfo = new Map();
-    this._dirtyTerms = new Set();
 
-    this._alpha = 1.0;
-    this._beta = 0.01;
     this._idfMax = 1.0;
   }
 
@@ -108,25 +104,10 @@ export class BMXPlusIndex {
   }
 
   // ════════════════════════════════════════════════════════════════════
-  //  Self-Tuning Parameters
+  //  Term-Adaptive Scaling
   // ════════════════════════════════════════════════════════════════════
 
-  private _computeParameters(): void {
-    const N = this._totalDocs;
-    const avgdl = this._avgDocLength;
-
-    this._alpha =
-      this.alphaOverride !== null
-        ? this.alphaOverride
-        : Math.max(0.5, Math.min(1.5, avgdl / 100.0));
-
-    this._beta =
-      this.betaOverride !== null
-        ? this.betaOverride
-        : N > 0
-        ? 1.0 / Math.log(1.0 + N)
-        : 0.01;
-
+  private _computeIdfMax(): void {
     // Compute IDF_max for term-adaptive scaling: γt = IDFt / IDF_max
     // Rare terms get full entropy weight, common terms get none,
     // independent of corpus size.
@@ -235,21 +216,6 @@ export class BMXPlusIndex {
     }
   }
 
-  /** Lazily recompute entropies only for dirty terms in the query. */
-  private _flushDirtyEntropies(queryTerms: Set<string>): void {
-    if (this._dirtyTerms.size === 0) return;
-    const toFlush: Set<string> = new Set();
-    for (const t of this._dirtyTerms) {
-      if (queryTerms.has(t)) toFlush.add(t);
-    }
-    if (toFlush.size > 0) {
-      this._computeTermEntropies(toFlush);
-      for (const t of toFlush) {
-        this._dirtyTerms.delete(t);
-      }
-    }
-  }
-
   // ════════════════════════════════════════════════════════════════════
   //  Build Index
   // ════════════════════════════════════════════════════════════════════
@@ -264,7 +230,6 @@ export class BMXPlusIndex {
     this._termTotalFreqs.clear();
     this._termEntropy.clear();
     this._termInfo.clear();
-    this._dirtyTerms.clear();
     this._avgDocLength = 0.0;
     this._totalDocs = 0;
     this._isBuilt = false;
@@ -316,7 +281,7 @@ export class BMXPlusIndex {
     }
 
     this._computeTermEntropies(); // also populates _idfCache
-    this._computeParameters();    // uses _idfCache for _idfMax
+    this._computeIdfMax();        // uses _idfCache for _idfMax
     this._isBuilt = true;
   }
 
@@ -343,8 +308,6 @@ export class BMXPlusIndex {
     }
     const uniqueQuery = new Set(queryTokens);
     const m = uniqueQuery.size;
-
-    this._flushDirtyEntropies(uniqueQuery);
 
     // Cache locals for the hot loop
     const k1 = 1.5;
@@ -428,127 +391,183 @@ export class BMXPlusIndex {
 
     return finalScores.slice(0, topK);
   }
+}
 
-  // ════════════════════════════════════════════════════════════════════
-  //  Incremental Updates
-  // ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════
+//  Line-level relevance — BMX+'s lane in the source route.
+//
+//  SageRank values a BLOCK / line-range; BMX+ values an individual LINE. This
+//  is BMX+'s OWN logic, kept inside the engine: BMX+ builds its query from the
+//  structural facts it is handed and scores every line with the SAME TAAT
+//  algorithm above (untouched — these are additive entry points, not edits to
+//  buildIndex/search). Nothing outside BMX+ constructs its query or shapes its
+//  scores. Lane-pure: the query is derived from structural FACTS, never from
+//  another engine's output. It SCORES lines; it never drops them.
+// ════════════════════════════════════════════════════════════════════════
 
-  /** Add or replace a document (lazy entropy recomputation). */
-  updateIndex(chunkId: string, text: string): void {
-    if (this._documents.has(chunkId)) {
-      this.removeFromIndex(chunkId);
-    }
+/** A single source line to score, carrying its stable absolute line number. */
+export interface LineUnit {
+  readonly line: number; // 1-based absolute line number — identity, never recomputed
+  readonly text: string; // line content (no line-number prefix)
+}
 
-    const tokens = BMXPlusIndex._tokenize(text);
-    this._documents.set(chunkId, tokens);
-    this._docLengths.set(chunkId, tokens.length);
+/**
+ * The structural facts BMX+ builds its query from. The route's `SourceFacts`
+ * satisfies this structurally, so facts pipe straight in untransformed.
+ */
+export interface BmxScoringFacts {
+  readonly defs: ReadonlyArray<{ readonly name: string; readonly startLine: number }>;
+  readonly edges: ReadonlyArray<{ readonly calleeLine: number; readonly callCount: number }>;
+}
 
-    // Counter equivalent
-    const termCounts = new Map<string, number>();
-    for (const token of tokens) {
-      termCounts.set(token, (termCounts.get(token) ?? 0) + 1);
-    }
-    const affected: Set<string> = new Set();
+/** Split an identifier into lowercase word tokens (camelCase / snake / kebab). */
+function _splitIdentifier(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/[_\-.]/g, " ")
+    .replace(/[^A-Za-z0-9 ]/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 1);
+}
 
-    for (const [term, count] of termCounts.entries()) {
-      if (!this._postingLists.has(term)) {
-        this._postingLists.set(term, new Map());
-      }
-      this._postingLists.get(term)!.set(chunkId, count);
+/**
+ * Build BMX+'s line-scoring query from structural facts (+ optional scan focus).
+ * Symbol names dominate; a name's weight grows with how often it is CALLED
+ * (log2 of inbound call-degree, keyed by the callee's stable start line) so
+ * heavily-used symbols pull harder. Repetition is the only "weighting" — it
+ * rides BMX+'s own query-term-frequency, no external scoring.
+ */
+function _buildLineQuery(
+  facts?: BmxScoringFacts,
+  scanQuery?: string | null,
+): string {
+  const parts: string[] = [];
 
-      this._docFreqs.set(term, (this._docFreqs.get(term) ?? 0) + 1);
-      this._termTotalFreqs.set(
-        term,
-        (this._termTotalFreqs.get(term) ?? 0) + count
+  if (scanQuery && scanQuery.trim().length > 0) {
+    // Caller intent leads — repeated for qtf emphasis.
+    parts.push(scanQuery, scanQuery, scanQuery);
+  }
+
+  if (facts && facts.defs.length > 0) {
+    const inboundDegree = new Map<number, number>();
+    for (const e of facts.edges) {
+      if (!Number.isFinite(e.callCount) || e.callCount <= 0) continue;
+      inboundDegree.set(
+        e.calleeLine,
+        (inboundDegree.get(e.calleeLine) ?? 0) + e.callCount,
       );
-      affected.add(term);
     }
-
-    this._totalDocs = this._documents.size;
-    let totalLen = 0;
-    for (const l of this._docLengths.values()) totalLen += l;
-    this._avgDocLength = totalLen / this._totalDocs;
-    this._computeParameters();
-    for (const t of affected) this._dirtyTerms.add(t);
-  }
-
-  /** Remove a document (lazy entropy recomputation). */
-  removeFromIndex(chunkId: string): void {
-    if (!this._documents.has(chunkId)) return;
-
-    const tokens = this._documents.get(chunkId)!;
-    // Counter equivalent
-    const termCounts = new Map<string, number>();
-    for (const token of tokens) {
-      termCounts.set(token, (termCounts.get(token) ?? 0) + 1);
-    }
-    const affected: Set<string> = new Set();
-
-    for (const [term, count] of termCounts.entries()) {
-      const posting = this._postingLists.get(term);
-      if (posting && posting.has(chunkId)) {
-        posting.delete(chunkId);
-        if (posting.size === 0) {
-          this._postingLists.delete(term);
-        }
+    for (const d of facts.defs) {
+      // Emit BOTH the whole identifier (as BMX+'s tokeniser sees it on the code
+      // line, e.g. `computeBudget` -> `computebudget`) AND its split word tokens
+      // (`compute budget`, to match prose / separate uses). Weighted by inbound
+      // call-degree via repetition (rides BMX+'s own qtf — no external scoring).
+      const whole = d.name.toLowerCase().match(/[\p{L}\p{N}_]+/gu)?.join(" ") ?? "";
+      const split = _splitIdentifier(d.name).join(" ");
+      if (whole.length === 0 && split.length === 0) continue;
+      const deg = inboundDegree.get(d.startLine) ?? 0;
+      const weight = 1 + Math.floor(Math.log2(1 + deg));
+      for (let r = 0; r < weight; r++) {
+        if (whole.length > 0) parts.push(whole);
+        if (split.length > 0 && split !== whole) parts.push(split);
       }
-
-      const newDf = Math.max((this._docFreqs.get(term) ?? 1) - 1, 0);
-      this._docFreqs.set(term, newDf);
-      if (newDf === 0) {
-        this._docFreqs.delete(term);
-        this._idfCache.delete(term);
-        this._termEntropy.delete(term);
-        this._termInfo.delete(term);
-      }
-
-      const newTtf = Math.max(
-        (this._termTotalFreqs.get(term) ?? count) - count,
-        0
-      );
-      this._termTotalFreqs.set(term, newTtf);
-      if (newTtf === 0) {
-        this._termTotalFreqs.delete(term);
-      }
-
-      affected.add(term);
     }
+  }
 
-    this._documents.delete(chunkId);
-    this._docLengths.delete(chunkId);
+  return parts.join(" ").trim();
+}
 
-    this._totalDocs = this._documents.size;
-    if (this._totalDocs > 0) {
-      let totalLen = 0;
-      for (const l of this._docLengths.values()) totalLen += l;
-      this._avgDocLength = totalLen / this._totalDocs;
-    } else {
-      this._avgDocLength = 0.0;
+/**
+ * Score every line by lexical relevance to the structural query. Indexes ALL
+ * lines in ONE BMX+ index (global IDF → scores are comparable across the whole
+ * file), searches once, and returns a score per ABSOLUTE line number in [0,1].
+ *
+ * Blank lines carry no information and score 0. Every other line is valued on
+ * ONE blended query: the structural facts (symbol names weighted by call-degree
+ * — lines naming important structure score highest) PLUS the corpus's own terms
+ * (so each line carries a graduated intrinsic value via BMX+'s entropy-aware IDF,
+ * rather than every non-symbol line tying at 0). With no facts/scan focus this
+ * reduces to a pure informativeness ranking — a per-line signal is NEVER denied.
+ *
+ * This SCORES; it does not drop. Removal is the gate's lane.
+ */
+export function scoreLines(
+  lines: ReadonlyArray<LineUnit>,
+  facts?: BmxScoringFacts,
+  scanQuery?: string | null,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const u of lines) out.set(u.line, 0.0); // every line present; blanks stay 0
+  if (lines.length === 0) return out;
+
+  const chunks: Chunk[] = [];
+  for (const u of lines) {
+    const content = u.text.trim();
+    if (content.length > 0) chunks.push({ chunk_id: String(u.line), text: content });
+  }
+  if (chunks.length === 0) return out;
+
+  // BMX+ values every line on ONE blended query: the structural facts (symbol
+  // names, repeated/weighted by call-degree, so lines naming important structure
+  // dominate) PLUS the corpus's own terms (so every line carries a graduated
+  // intrinsic-informativeness value — rare-token lines outrank boilerplate,
+  // instead of every non-symbol line tying at 0). Symbol material leads because
+  // it is repeated; corpus terms only break ties below it. Lines with no word
+  // tokens (braces, blanks) match nothing and stay 0. When no facts/scan focus
+  // exist this naturally reduces to a pure informativeness ranking (never denied).
+  const corpusTerms = chunks.map((c) => c.text).join(" ");
+  const factsQuery = _buildLineQuery(facts, scanQuery);
+  const query = factsQuery.length > 0 ? factsQuery + " " + corpusTerms : corpusTerms;
+
+  const index = new BMXPlusIndex(true); // normalize → globally comparable [0,1]
+  index.buildIndex(chunks);
+  for (const [cid, score] of index.search(query, chunks.length)) {
+    const ln = Number(cid);
+    if (Number.isInteger(ln) && out.has(ln)) out.set(ln, score);
+  }
+  return out;
+}
+
+/**
+ * BMX+'s determination — the `bmx` metadata key it owns. A relevance value in
+ * [0,1] for every ABSOLUTE source line number. Defined and owned HERE; only
+ * later engines (removal) consume it.
+ */
+export type BMXMetadata = ReadonlyMap<number, number>;
+
+/**
+ * BMX+'s core process, operating on the payload: flatten the source blocks into
+ * their individual lines (line identity comes straight from each block's range
+ * — `startLine + offset` — never re-parsed), score every line via `scoreLines`,
+ * drop that per-line determination onto the payload's `bmx` key, and hand the
+ * payload to the next engine ITSELF. The flattening below is part of BMX+'s own
+ * core (the LINE is its unit); nothing outside the engine shapes its input.
+ */
+export function bmxEngine(payload: Payload): Payload {
+  const lines: LineUnit[] = [];
+  for (const b of payload.source.blocks) {
+    const physical = b.text.split("\n");
+    for (let i = 0; i < physical.length; i++) {
+      // Strip the visual "N. " prefix from the SCORED text ONLY — line-number
+      // digits must never enter BMX+'s tokeniser. The source text and its line
+      // numbers themselves are never altered or recomputed.
+      const content = (physical[i] ?? "").replace(/^\s*\d+[.:]\s?/, "");
+      lines.push({ line: b.startLine + i, text: content });
     }
-    this._computeParameters();
-    for (const t of affected) this._dirtyTerms.add(t);
   }
 
-  // ════════════════════════════════════════════════════════════════════
-  //  Properties
-  // ════════════════════════════════════════════════════════════════════
+  // Drop the stone in the backpack: BMX+'s own per-line determination.
+  const determination: BMXMetadata = scoreLines(
+    lines,
+    payload.source.facts,
+    payload.source.query,
+  );
+  payload.metadata.bmx = determination;
 
-  get documentCount(): number {
-    return this._totalDocs;
-  }
-
-  get vocabularySize(): number {
-    return this._postingLists.size;
-  }
-
-  getStats(): Record<string, unknown> {
-    return {
-      total_docs: this._totalDocs,
-      vocabulary_size: this.vocabularySize,
-      avg_doc_length: Math.round(this._avgDocLength * 100) / 100,
-      alpha: Math.round(this._alpha * 10000) / 10000,
-      beta: Math.round(this._beta * 10000) / 10000,
-      idf_max: Math.round(this._idfMax * 10000) / 10000,
-    };
-  }
+  // Hand the payload forward to the removal engine itself. (The removal engine
+  // is still being built — this is the live handoff into it. The forward flow
+  // ends here for now; the build does not resolve `./removal.js` yet, by design.)
+  return removalEngine(payload);
 }

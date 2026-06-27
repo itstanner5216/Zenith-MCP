@@ -1,7 +1,7 @@
 {
   "name": "zenith-toon",
-  "version": "2026.1.14",
-  "description": "TOON compression codec library",
+  "version": "2026.6.27",
+  "description": "TOON compression codec library (source-code line-range compressor — refactor)",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

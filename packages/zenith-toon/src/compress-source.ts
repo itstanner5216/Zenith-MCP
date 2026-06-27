@@ -1,0 +1,107 @@
+// compress-source.ts — the entry point. It is the FIRST ENGINE.
+//
+// It is NOT an orchestrator: it does not know the downstream sequence, does not
+// call BMX/removal/render, and never reads another engine's metadata. What it
+// DOES — its own core process — is weigh every line by its share of the total
+// file content and drop that determination onto the payload's `entry` metadata
+// key, then hand the payload to its successor (SageRank). From there each engine
+// drops its own stone and hands the payload to its own successor
+// (SageRank -> BMX+ -> Removal -> Render). The compressed result emerges at the
+// forward END of that chain — it never comes back here.
+//
+// Why the per-line file-share is the WHOLE reason this engine exists:
+//   • FEASIBILITY — a 20K-char file that is 3 giant lines cannot satisfy
+//     line-only removal + the 6-line-gap rule + the 30%-removed / 70%-kept
+//     target. The feasibility check reads these weights to know a file is
+//     impossible for toon's normal process BEFORE it runs, instead of sending it
+//     downstream to fail.
+//   • RENDER REBALANCING — to hold retention inside the 68–72% band the render
+//     engine swaps lines in and out; pulling a line worth 3% of the file means
+//     restoring ~equivalent weight (one ~3% line, or two smaller ones), never a
+//     0.3% line. It can only do that arithmetic because every line already
+//     carries its file-percentage, measured here.
+
+import { SageRank } from './sagerank.js';
+
+/**
+ * One contiguous line-range unit of source. Line numbers are the coordinate
+ * system: `startLine`/`endLine` arrive from the consumer (Zenith-MCP) as ground
+ * truth and are never recomputed; `text` keeps its line-number prefix intact.
+ */
+export interface SourceBlock {
+  readonly startLine: number;  // 1-based inclusive, as received — never re-derived
+  readonly endLine: number;    // 1-based inclusive
+  readonly text: string;       // block source WITH its line-number prefixes preserved
+}
+
+/**
+ * The immutable givens the consumer hands in. The engines READ from here; they
+ * never write back into it. (This is the "source text" the backpack is strapped
+ * onto.)
+ */
+export interface Source {
+  readonly blocks: readonly SourceBlock[];   // numbered source, never re-derived
+  readonly query: string | null;             // scan focus
+  readonly charBudget: number;               // target the removal/render engines work within (chars)
+  readonly modulePath?: string | null;       // optional file/module path; query material only
+}
+
+/**
+ * The artifact that walks the engine chain — the source text plus its backpack.
+ * `source` is immutable input. `metadata` is the OPEN backpack each engine drops
+ * its own key into; every engine owns its key's TYPE in its own file, so nothing
+ * here (and no file outside the engines) enumerates the engines. `output` is set
+ * at the forward end of the chain. This file never reads `metadata` or `output`.
+ */
+export interface Payload {
+  readonly source: Source;
+  readonly metadata: Record<string, unknown>;
+  output?: string;
+}
+
+/**
+ * The entry engine's determination — its `entry` metadata key. Every absolute
+ * line number mapped to its SHARE of the total file content: (characters in the
+ * line) / (characters in the file), in [0,1]; ×100 is the percentage the file is
+ * reasoned about in. Display line-number prefixes are excluded — only real
+ * source content is weighed. Owned HERE; consumed by the feasibility check and
+ * the render rebalancer, never re-computed downstream.
+ */
+export type EntryMetadata = ReadonlyMap<number, number>;
+
+/**
+ * The entry point and FIRST engine. Its core process: weigh every line by its
+ * share of the whole file, drop that onto the payload's `entry` key, and hand
+ * the payload to the next engine (SageRank) itself. It computes only its OWN
+ * determination and reads no other engine's metadata; once it hands off it is
+ * done — the engines carry the flow forward themselves.
+ */
+export function compressSource(source: Source): void {
+  const payload: Payload = { source, metadata: {} };
+
+  // ── Entry engine's core process: each line's share of the whole file ──────
+  // Line identity is the absolute line number (block startLine + offset). The
+  // visual "N. " line-number prefix is stripped so only real source content is
+  // weighed. First pass counts characters per line; second pass normalises each
+  // to a fraction of the file's total characters.
+  const lineWeights = new Map<number, number>();
+  let totalChars = 0;
+  for (const b of source.blocks) {
+    const physical = b.text.split('\n');
+    for (let i = 0; i < physical.length; i++) {
+      const content = (physical[i] ?? '').replace(/^\s*\d+[.:]\s?/, '');
+      lineWeights.set(b.startLine + i, content.length);
+      totalChars += content.length;
+    }
+  }
+  if (totalChars > 0) {
+    for (const [line, chars] of lineWeights) {
+      lineWeights.set(line, chars / totalChars); // [0,1] share of total file content
+    }
+  }
+  const determination: EntryMetadata = lineWeights;
+  payload.metadata.entry = determination;
+
+  // Hand the payload to its successor. From here the engines carry the flow.
+  new SageRank().run(payload);
+}
