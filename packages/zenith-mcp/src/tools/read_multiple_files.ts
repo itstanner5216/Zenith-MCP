@@ -138,6 +138,19 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     await fd.close();
                 }
 
+                // read_multiple_files places the `N. ` line-number prefix ONCE here,
+                // up front (Rule 10: line numbers are mandatory; Priority 0: they must
+                // be true). This prefixed text is canonical — it feeds BOTH the
+                // compression path and the plain path, and nothing downstream ever
+                // recomputes or re-prefixes a line. compressForTool strips the prefix
+                // only to index the real code; TOON strips only to weigh lines and
+                // emits each one verbatim, so the number a line carries is the one set
+                // here. (A partial window keeps lines 1..K from the file start, so its
+                // numbers stay true too.)
+                const srcLines = content.split('\n');
+                if (srcLines[srcLines.length - 1] === '') srcLines.pop();
+                content = srcLines.map((line, i) => `${i + 1}. ${line}`).join('\n');
+
                 const effectiveBudget = Math.max(0, budget - entryPrefix.length);
 
                 if (args.compression !== false && fileInfo.size <= byteLimit) {
@@ -146,8 +159,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     // entire file is in hand), so TOON sees the real source and its line
                     // numbers/markers tell the truth. Partial windows (size > cap) skip
                     // compression (the markers would lie) and use the truncate fallback below.
-                    // Priority 0.5 seam: TOON gets RAW, FULL text + caller's budget. Its
-                    // return is emitted VERBATIM (no "N:" prefixing, no '[truncated]' suffix).
+                    // Priority 0.5 seam: TOON gets the N.-prefixed, FULL text + caller's
+                    // budget. Its return is emitted VERBATIM (no re-prefixing, no
+                    // '[truncated]' suffix).
                     const compressed = await compressForTool(validPath, content, effectiveBudget);
                     if (compressed !== null) {
                         return `${entryPrefix}${compressed}`;
@@ -161,14 +175,6 @@ export function register(server: ToolServer, ctx: ToolContext) {
                     content = content.slice(0, cutoff);
                     truncated = true;
                 }
-
-                const lines = content.split('\n');
-                if (lines[lines.length - 1] === '')
-                    lines.pop();
-                // Rule 10: line numbers are MANDATORY structural metadata — there is no
-                // opt-out. The "N:" prefix is always applied (anti-pattern table forbids a
-                // showLineNumbers toggle).
-                content = lines.map((line, i) => `${i + 1}:${line}`).join('\n');
 
                 return truncated
                     ? `${entryPrefix}${content}\n[truncated]`

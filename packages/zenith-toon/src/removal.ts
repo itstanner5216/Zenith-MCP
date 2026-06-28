@@ -46,9 +46,15 @@
 // (P2) The marker lines cost characters, so the band now constrains the RENDERED
 // size (kept content + marker chars), not kept content alone — the DP's objective is
 // NET removal (dropped content minus the marker chars its gaps add), charged exactly
-// per gap. The Phase-H line-fidelity verification and wiring `compressFile` to RETURN
-// this output remain sub-stage 5D (it still returns null for now — this proves the
-// rendered selection on the payload, it does not yet surface it to the caller).
+// per gap.
+//
+// SUB-STAGE 5D SCOPE: the lights come on. `verifyOutput` (below) is the Phase-H
+// line-fidelity gate — it re-parses the FINAL output and THROWS on any trust-contract
+// violation (H1-H7; H2 the verbatim keystone), so `compressFile` (index.ts) can now
+// RETURN genuinely-compressed output, verified, and degrade to raw on any failure.
+// The source crossing the seam is already `N. `-prefixed (read_file is the one
+// authority that places line numbers); the gate strips that prefix only to weigh
+// lines and emits every kept line verbatim, so a number never lies about its content.
 
 import type { Payload } from './compress-source.js';
 
@@ -641,4 +647,207 @@ export function selectDropsToBand(
   }
 
   return { drop, netRemoved: chosenNet, bandSatisfied };
+}
+
+/**
+ * PHASE-H VERIFICATION (sub-stage 5D) — the trust contract made mechanical.
+ *
+ * Runs over the FINAL compressed output — the exact string `compressFile` is about to
+ * return — and THROWS on ANY violation. That throw is caught at toon's public boundary
+ * (index.ts `compressFile`), which degrades to "use raw," so a cut that fails
+ * verification is NEVER shipped. It re-derives everything from the output string and
+ * the original source INDEPENDENTLY of the engine's own bookkeeping (it re-parses the
+ * output rather than trusting removalEngine's flat arrays), so a gate bug cannot hide
+ * behind self-consistent metadata. The single most important property is H2: a kept
+ * line's number can never lie about its content — that is what makes the output safe to
+ * edit against. The original source is the SAME prefixed text the chain compressed, so
+ * absolute line k is `originalSource.split('\n')[k-1]` (read_file is the one authority
+ * that placed the `N. ` prefix; nothing here recomputes or re-prefixes it).
+ *
+ *   H1 ELIGIBILITY — every dropped (marker-covered) line had eligible=true, and the
+ *      marker coverage equals the gate's recorded dropped set (no protected line cut).
+ *   H2 VERBATIM + IDENTITY (KEYSTONE) — every non-marker output line is
+ *      character-for-character identical to the original line whose number it carries,
+ *      the `N. ` prefix included.
+ *   H3 ASCENDING + FULLY ACCOUNTED — the output tiles the original range [1..N] exactly
+ *      once: kept numbers strictly ascend, every gap is filled by exactly one marker
+ *      whose range is the missing span, no unmarked gap, no marker without a gap, no two
+ *      markers adjacent.
+ *   H4 OMISSION FLOOR — every marker spans >= 6 lines.
+ *   H5 INTERIOR-BLOCK FLOOR — every kept run BETWEEN two markers is >= 6 lines.
+ *   H6 BAND — the rendered size recomputed from the output equals the gate's recorded
+ *      renderedSize, and lands in [LO, keptCeiling] iff bandSatisfied (else the gate
+ *      proved the band infeasible and took the nearest legal cut).
+ *   H7 MARKER FORMAT — every marker is exactly `[TRUNCATED: lines <int>-<int>]`,
+ *      flush-left (column 0, no leading whitespace, no `#`).
+ *
+ * Inputs are ONLY the output string, the original source, the gate's own determination,
+ * and the char budget — char counts and the eligible booleans, never a score or rank.
+ */
+export function verifyOutput(
+  originalSource: string,
+  output: string,
+  meta: RemovalMetadata,
+  charBudget: number,
+): void {
+  const MARKER_RE = /^\[TRUNCATED: lines (\d+)-(\d+)\]$/;
+  const PREFIX_RE = /^(\d+)\. /; // the single N. prefix read_file places; never recomputed here
+  const stripPrefix = (s: string): string => s.replace(/^\s*\d+[.:]\s?/, ''); // size only, IDENTICAL to the engines
+
+  const originalLines = originalSource.split('\n');
+  const n = originalLines.length;
+  const outputLines = output.split('\n');
+
+  // ── Parse the output into an ordered segment list (kept lines + markers). A line
+  //    that is neither the exact flush-left marker nor an `N. ` numbered line fails
+  //    loud. A TRUNCATED-bearing line that is not the exact marker is a malformed
+  //    marker (H7). A kept line that merely CONTAINS "TRUNCATED" still carries its
+  //    `N. ` prefix, so it classifies as kept first and is never mistaken for a marker. ─
+  type Item = { kind: 'kept'; num: number; text: string } | { kind: 'marker'; x: number; y: number };
+  const seq: Item[] = [];
+  for (let i = 0; i < outputLines.length; i++) {
+    const line = outputLines[i] ?? '';
+    const mm = MARKER_RE.exec(line);
+    if (mm !== null) {
+      seq.push({ kind: 'marker', x: Number(mm[1]), y: Number(mm[2]) });
+      continue;
+    }
+    const pm = PREFIX_RE.exec(line);
+    if (pm !== null) {
+      seq.push({ kind: 'kept', num: Number(pm[1]), text: line });
+      continue;
+    }
+    if (line.includes('TRUNCATED')) {
+      throw new Error(
+        'verifyOutput[H7]: malformed truncation marker (must be exactly "[TRUNCATED: lines X-Y]", ' +
+          `flush-left, no prefix/indent/#): ${JSON.stringify(line)}`,
+      );
+    }
+    throw new Error(
+      `verifyOutput: output line ${i} is neither a marker nor an "N. " numbered line: ${JSON.stringify(line)}`,
+    );
+  }
+
+  // ── H2: VERBATIM + IDENTITY (the keystone) — each kept line equals the original at
+  //    the SAME absolute number, prefix and all. ──────────────────────────────────
+  for (const it of seq) {
+    if (it.kind !== 'kept') continue;
+    const orig = originalLines[it.num - 1];
+    if (orig === undefined) {
+      throw new Error(`verifyOutput[H2]: kept line claims number ${it.num}, outside the original 1..${n} range.`);
+    }
+    if (it.text !== orig) {
+      throw new Error(
+        `verifyOutput[H2]: VERBATIM MISMATCH at line ${it.num} — a kept line's number lies about its content. ` +
+          `output=${JSON.stringify(it.text)} original=${JSON.stringify(orig)}`,
+      );
+    }
+  }
+
+  // ── H3: ASCENDING + FULLY ACCOUNTED — the output tiles [1..n] exactly once. ─────
+  let expected = 1;
+  let prevKeptNum = 0;
+  let prevWasMarker = false;
+  for (const it of seq) {
+    if (it.kind === 'kept') {
+      if (it.num !== expected) {
+        throw new Error(`verifyOutput[H3]: expected line ${expected} next, got kept line ${it.num} (unaccounted gap or overlap).`);
+      }
+      if (it.num <= prevKeptNum) {
+        throw new Error(`verifyOutput[H3]: kept line numbers not strictly ascending (${it.num} after ${prevKeptNum}).`);
+      }
+      prevKeptNum = it.num;
+      expected = it.num + 1;
+      prevWasMarker = false;
+    } else {
+      if (it.x > it.y) {
+        throw new Error(`verifyOutput[H3]: marker range start ${it.x} exceeds end ${it.y}.`);
+      }
+      if (prevWasMarker) {
+        throw new Error(`verifyOutput[H3]: two markers adjacent (empty kept run) at lines ${it.x}-${it.y}.`);
+      }
+      if (it.x !== expected) {
+        throw new Error(`verifyOutput[H3]: expected line ${expected} next, got marker starting at ${it.x} (unaccounted gap or overlap).`);
+      }
+      expected = it.y + 1;
+      prevWasMarker = true;
+    }
+  }
+  if (expected !== n + 1) {
+    throw new Error(`verifyOutput[H3]: output accounts for lines 1..${expected - 1}, but the original has ${n} lines (tail unaccounted).`);
+  }
+
+  // ── H4: OMISSION FLOOR — every marker spans >= 6 lines. ────────────────────────
+  for (const it of seq) {
+    if (it.kind !== 'marker') continue;
+    const span = it.y - it.x + 1;
+    if (span < 6) {
+      throw new Error(`verifyOutput[H4]: marker lines ${it.x}-${it.y} spans ${span} < 6 (omission floor).`);
+    }
+  }
+
+  // ── H5: INTERIOR-BLOCK FLOOR — a kept run with a marker on BOTH sides is >= 6. ──
+  for (let i = 0; i < seq.length; i++) {
+    const it = seq[i];
+    if (it === undefined || it.kind !== 'kept') continue;
+    const prev = i > 0 ? seq[i - 1] : undefined;
+    if (prev !== undefined && prev.kind === 'kept') continue; // not the start of a run
+    let j = i;
+    while (j < seq.length) {
+      const s = seq[j];
+      if (s === undefined || s.kind !== 'kept') break;
+      j++;
+    }
+    const before = i > 0 ? seq[i - 1] : undefined;
+    const after = j < seq.length ? seq[j] : undefined;
+    const interior = before !== undefined && before.kind === 'marker' && after !== undefined && after.kind === 'marker';
+    if (interior && j - i < 6) {
+      throw new Error(`verifyOutput[H5]: interior kept run of ${j - i} < 6 lines between two markers.`);
+    }
+  }
+
+  // ── H1: ELIGIBILITY — marker coverage == gate's dropped set, every dropped line
+  //    eligible (no protected line removed). ──────────────────────────────────────
+  const covered = new Set<number>();
+  for (const it of seq) {
+    if (it.kind !== 'marker') continue;
+    for (let ln = it.x; ln <= it.y; ln++) covered.add(ln);
+  }
+  if (covered.size !== meta.dropped.size) {
+    throw new Error(`verifyOutput[H1]: marker-covered lines (${covered.size}) != gate's dropped set (${meta.dropped.size}).`);
+  }
+  for (const ln of covered) {
+    if (!meta.dropped.has(ln)) {
+      throw new Error(`verifyOutput[H1]: line ${ln} is marker-covered but absent from the gate's dropped set.`);
+    }
+    if (meta.eligible.get(ln) !== true) {
+      throw new Error(`verifyOutput[H1]: dropped line ${ln} was NOT eligible — a protected line was removed.`);
+    }
+  }
+
+  // ── H6: BAND — rendered recomputed from the output equals the gate's renderedSize,
+  //    and lands in [LO, keptCeiling] iff bandSatisfied (else proven-infeasible). ───
+  let fullSize = 0;
+  for (const l of originalLines) fullSize += stripPrefix(l).length;
+  let renderedRecomputed = 0;
+  for (const it of seq) {
+    if (it.kind === 'kept') renderedRecomputed += stripPrefix(it.text).length;
+    else renderedRecomputed += markerLen(it.x, it.y);
+  }
+  if (renderedRecomputed !== meta.renderedSize) {
+    throw new Error(
+      `verifyOutput[H6]: rendered size recomputed from the output (${renderedRecomputed}) ` +
+        `disagrees with the gate's renderedSize (${meta.renderedSize}).`,
+    );
+  }
+  const LO = Math.ceil(0.68 * fullSize);
+  const HI = Math.floor(0.72 * fullSize);
+  const keptCeiling = Math.min(HI, charBudget);
+  const inBand = meta.renderedSize >= LO && meta.renderedSize <= keptCeiling;
+  if (inBand !== meta.bandSatisfied) {
+    throw new Error(
+      `verifyOutput[H6]: bandSatisfied (${meta.bandSatisfied}) disagrees with whether renderedSize ` +
+        `${meta.renderedSize} is inside [${LO}, ${keptCeiling}] (${inBand}).`,
+    );
+  }
 }

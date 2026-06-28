@@ -7,11 +7,20 @@
 // SageRank weighting, anchor priority, injection preservation, keep-ratio +
 // truncation marker, omission threshold, line-number assertion).
 //
+// LINE-NUMBER PREFIX: read_file / read_multiple_files are the SINGLE authority
+// that places the `N. ` line-number prefix, ONCE, before calling in here. Nothing
+// downstream recomputes or re-prefixes a line. So this pipe receives N.-prefixed
+// text and does two things with it: (1) STRIPS the prefix (the same regex TOON
+// uses) to feed the symbol indexer the REAL code — line N is already prefix N, so
+// facts keep true line numbers and tree-sitter never sees the prefixed text;
+// (2) hands the PREFIXED copy to TOON, which emits its kept lines verbatim.
+//
 // HARD INVARIANTS (grep-checkable after execution):
 //   - Exactly one symbol imported from zenith-toon: compressFile.
 //   - Zero compression decisions here: no ranking, no priority shaping, no edge
 //     transforms, no keep-ratio math, no usefulness gate, no anchor mapping,
-//     no exported-symbol selection, no injection boosting.
+//     no exported-symbol selection, no injection boosting. (Stripping a prefix to
+//     index real code is transport, not a compression decision.)
 //   - One compressFile call. Raw facts in. Compressed string (or null) out.
 // ---------------------------------------------------------------------------
 
@@ -23,10 +32,10 @@ import { getFileFacts, type FileFacts } from './db-adapter.js';
 
 export async function compressForTool(
     validPath: string,
-    rawText: string,
+    prefixedSource: string,
     maxChars: number,
 ): Promise<string | null> {
-    if (maxChars <= 0 || rawText.length <= maxChars) return null;
+    if (maxChars <= 0 || prefixedSource.length <= maxChars) return null;
 
     const langName = getLangForFile(validPath);
     const repoRoot = findRepoRoot(validPath);
@@ -40,18 +49,26 @@ export async function compressForTool(
     if (repoRoot) {
         try {
             const db = getDb(repoRoot);
-            // Content-addressed freshness (C+): index the EXACT bytes we're about to
-            // compress, so the facts describe `rawText` — not whatever is on disk now.
-            // No redundant disk read (we already hold the bytes) and no read-vs-reindex
-            // race. Inside the try so any failure degrades to the empty-facts payload
-            // (Rule 12: TOON still compresses via its text path).
-            await ensureFreshFromContent(db, repoRoot, validPath, rawText);
+            // read_file already placed the `N. ` prefix; strip it (the SAME regex TOON
+            // uses to weigh lines) so the indexer parses the REAL code, never the
+            // prefixed text. The reconstruction is exact for the `N. ` form, so these
+            // bytes equal the on-disk source the background indexer hashed — facts keep
+            // true line numbers (line N is already prefix N) and there is no spurious
+            // re-index. Content-addressed freshness (C+): index the EXACT code bytes we
+            // are about to compress, not whatever is on disk now. Inside the try so any
+            // failure degrades to the empty-facts payload (Rule 12: TOON still
+            // compresses via its text path).
+            const indexedSource = prefixedSource
+                .split('\n')
+                .map(l => l.replace(/^\s*\d+[.:]\s?/, ''))
+                .join('\n');
+            await ensureFreshFromContent(db, repoRoot, validPath, indexedSource);
             dbFacts = getFileFacts(db, relPath);
         } catch { /* DB unavailable — hand TOON the empty-facts payload */ }
     }
 
     return compressFile({
-        source: rawText,
+        source: prefixedSource,
         maxChars,
         facts: {
             path: relPath,
