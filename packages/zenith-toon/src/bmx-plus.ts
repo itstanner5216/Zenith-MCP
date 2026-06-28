@@ -530,12 +530,72 @@ export function scoreLines(
   return out;
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  BMX+ knee — the bounded "core" cut on BMX+'s OWN line-score curve
+// ════════════════════════════════════════════════════════════════════════
+
 /**
- * BMX+'s determination — the `bmx` metadata key it owns. A relevance value in
- * [0,1] for every ABSOLUTE source line number. Defined and owned HERE; only
- * later engines (removal) consume it.
+ * BMX+'s knee. Mirrors SageRank.findScoreCoreCount IN KIND so BMX+ declares its
+ * important minority the same way SageRank declares its block core — letting both
+ * cast a comparable vote in the consensus the removal gate will need.
+ *
+ * Method (identical to findScoreCoreCount): on a DESCENDING score curve, find the
+ * strongest absolute-damped WEIGHTED gap  relGap * (absGap / range)  — a relative
+ * cliff scaled by its absolute size, so a sharp drop on a long low-score tail
+ * cannot masquerade as a knee (the failure mode a mean-relative "2× the mean gap"
+ * gate suffers, inflating the core toward all lines). Skip the first singleton
+ * cliff when n > 3 so one dominant line cannot collapse the core to 1. Below a
+ * 0.05 weighted-gap floor there is no real cliff → fall back to a sqrt(n)-sized
+ * representative core. maxK is a CEILING only; no outside tuning parameter — the
+ * cut derives purely from the curve handed in.
  */
-export type BMXMetadata = ReadonlyMap<number, number>;
+function findBmxCoreCount(sortedScores: number[], maxK: number): number {
+  const n = sortedScores.length;
+  if (n === 0 || maxK <= 0) return 0;
+  const limit = Math.max(1, Math.min(maxK, n));
+  if (n < 3) return limit;
+
+  let minS = Infinity;
+  let maxS = -Infinity;
+  for (const s of sortedScores) {
+    if (s < minS) minS = s;
+    if (s > maxS) maxS = s;
+  }
+  const range = maxS - minS;
+  if (range < 1e-10) {
+    return Math.min(limit, Math.max(1, Math.ceil(Math.sqrt(n))));
+  }
+
+  let bestCut = 1;
+  let bestGap = -Infinity;
+  const start = n > 3 ? 1 : 0; // skip the first singleton cliff when we can
+  for (let i = start; i < n - 1; i++) {
+    const left = sortedScores[i];
+    const right = sortedScores[i + 1];
+    if (left === undefined || right === undefined) continue; // Rule 6: guard, no `!`
+    const absGap = left - right;
+    const relGap = left > 1e-12 ? absGap / left : 0.0;
+    const weightedGap = relGap * (absGap / range);
+    if (weightedGap > bestGap) {
+      bestGap = weightedGap;
+      bestCut = i + 1;
+    }
+  }
+  if (bestGap > 0.05) return Math.min(limit, Math.max(1, bestCut));
+  return Math.min(limit, Math.max(1, Math.ceil(Math.sqrt(n))));
+}
+
+/**
+ * BMX+'s determination — the `bmx` metadata key it owns. Carries BOTH the per-line
+ * relevance value in [0,1] for every ABSOLUTE source line number (`scores`,
+ * byte-for-byte what scoreLines returns) AND BMX+'s own knee: the `core` set of
+ * line numbers it deems important — its vote for the consensus the removal gate
+ * will need. Defined and owned HERE; only later engines (removal) consume it.
+ */
+export interface BMXMetadata {
+  readonly scores: ReadonlyMap<number, number>;  // per-line relevance, unchanged
+  readonly core: ReadonlySet<number>;            // line numbers at/above BMX+'s knee
+}
 
 /**
  * BMX+'s core process, operating on the payload: flatten the source blocks into
@@ -558,12 +618,22 @@ export function bmxEngine(payload: Payload): Payload {
     }
   }
 
-  // Drop the stone in the backpack: BMX+'s own per-line determination.
-  const determination: BMXMetadata = scoreLines(
-    lines,
-    payload.source.facts,
-    payload.source.query,
-  );
+  // BMX+'s own per-line relevance (values are NEVER altered downstream).
+  const scores = scoreLines(lines, payload.source.facts, payload.source.query);
+
+  // BMX+'s knee: the lines BMX+ ITSELF deems important. Only score-bearing lines
+  // shape the curve — blank/zero lines carry no information and must not anchor the
+  // cliff. Sort those scores DESCENDING (line number breaks ties, so the cut is
+  // deterministic), take the weighted-gap core COUNT, and keep the top-`count`
+  // lines. maxK is the curve's OWN length — a non-constraining ceiling, so the cut
+  // comes purely from BMX+'s curve, not an outside knob.
+  const scored = [...scores.entries()].filter(([, s]) => s > 0);
+  scored.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  const count = findBmxCoreCount(scored.map(([, s]) => s), scored.length);
+  const core = new Set<number>(scored.slice(0, count).map(([line]) => line));
+
+  // Drop the stone in the backpack: per-line scores PLUS BMX+'s core.
+  const determination: BMXMetadata = { scores, core };
   payload.metadata.bmx = determination;
 
   // Hand the payload forward to the removal engine itself. (The removal engine
