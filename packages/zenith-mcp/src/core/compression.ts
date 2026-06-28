@@ -44,7 +44,7 @@ export async function compressForTool(
     const relPath = repoRoot ? path.relative(repoRoot, validPath) : path.basename(validPath);
 
     // Empty-facts default. TOON tolerates this and falls back to its text path.
-    let dbFacts: FileFacts = { defs: [], edges: [], anchors: [], imports: [], injections: [] };
+    let dbFacts: FileFacts = { defs: [], edges: [], anchors: [], imports: [], injections: [], scopes: [] };
 
     if (repoRoot) {
         try {
@@ -98,6 +98,11 @@ export async function compressForTool(
             injections: dbFacts.injections.map(j => ({
                 injectedLang: j.injected_lang, startLine: j.start_line, endLine: j.end_line,
             })),
+            // CASING WARNING (C3): reads camelCase scopeKind/startLine/endLine — these MUST match
+            // db-adapter.ts's SELECT aliases in T2. A mismatch silently yields empty scopes with NO
+            // build error. Pure transport: do not filter/rank/normalize/drop small scopes
+            // (AGENTS.md §0.5 / Step F5). camelCase → camelCase identity map, verbatim.
+            scopes: dbFacts.scopes.map(s => ({ scopeKind: s.scopeKind, startLine: s.startLine, endLine: s.endLine })),
         },
     });
 }

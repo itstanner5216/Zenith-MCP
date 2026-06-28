@@ -1291,6 +1291,11 @@ export interface FileFacts {
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
+    // CASING WARNING (C3): these fields are camelCase (scopeKind/startLine/endLine) and MUST stay
+    // character-identical to compression.ts's `.map` reads in T4 AND to the SELECT aliases in
+    // getFileFacts below. A snake_case alias on the query + a camelCase read = silently empty
+    // scopes with NO build error and NO test error. scopes are camelCase end-to-end.
+    scopes: Array<{ scopeKind: string; startLine: number; endLine: number }>;
 }
 
 export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
@@ -1315,7 +1320,22 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];
-    return { defs, edges, anchors, imports, injections };
+    // CASING WARNING (C3): the SELECT aliases below are camelCase (scopeKind/startLine/endLine) and
+    // MUST match compression.ts's `.map` field reads in T4. A snake_case alias here + a camelCase
+    // read there = silently empty scopes, NO build error. Do NOT "match injections' snake_case" —
+    // scopes are camelCase end-to-end. Mirrors the anchors JOIN (s.id = a.symbol_id) above.
+    // The JOIN symbols s ON s.id = ls.symbol_id intentionally excludes null-owner ("module") scopes:
+    // persist.ts:80 never inserts a scope whose owning symbol does not resolve, so such rows do not
+    // exist and have no symbol to join — module-level code legitimately gets no scope sub-blocks.
+    // ORDER BY start_line, end_line gives deterministic tiling input downstream.
+    const scopes = prepareOrCache(conn,
+        `SELECT ls.scope_kind AS scopeKind, ls.start_line AS startLine, ls.end_line AS endLine
+         FROM local_scopes ls
+         JOIN symbols s ON s.id = ls.symbol_id
+         WHERE s.file_path = ?
+         ORDER BY ls.start_line, ls.end_line`
+    ).all(filePath) as FileFacts['scopes'];
+    return { defs, edges, anchors, imports, injections, scopes };
 }
 
 // ---------------------------------------------------------------------------

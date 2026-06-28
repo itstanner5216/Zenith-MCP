@@ -42,6 +42,10 @@ export interface SourceBlock {
  * (`callerLine`/`calleeLine`), RESOLVED in the DB so duplicate/overloaded names can
  * never misroute an edge. SageRank reads `edges`; BMX+ reads `defs` + `edges`.
  */
+// RawFileFacts is the SEAM TRANSPORT shape (every fact MCP hands over). Engines do NOT
+// consume it directly: SageRank reads the narrower SourceFacts (edges); BMX+ reads
+// BmxScoringFacts (defs/edges). Any code reading payload.source.facts MUST guard on
+// `undefined` (Source.facts is optional). Adding fields here is invisible to the engines.
 export interface RawFileFacts {
   readonly path: string;
   readonly langName: string | null;
@@ -74,6 +78,11 @@ export interface RawFileFacts {
     readonly injectedLang: string;
     readonly startLine: number;
     readonly endLine: number;
+  }>;
+  readonly scopes: ReadonlyArray<{
+    readonly scopeKind: string;   // tree-sitter node type (informational; e.g. 'statement_block')
+    readonly startLine: number;   // 1-based, scope's first line
+    readonly endLine: number;     // 1-based, inclusive
   }>;
 }
 
