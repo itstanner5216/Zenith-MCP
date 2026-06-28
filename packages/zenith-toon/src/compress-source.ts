@@ -120,7 +120,7 @@ export type EntryMetadata = ReadonlyMap<number, number>;
  * determination and reads no other engine's metadata; once it hands off it is
  * done — the engines carry the flow forward themselves.
  */
-export function compressSource(source: Source): void {
+export function compressSource(source: Source): Payload {
   const payload: Payload = { source, metadata: {} };
 
   // ── Entry engine's core process: each line's share of the whole file ──────
@@ -147,5 +147,5 @@ export function compressSource(source: Source): void {
   payload.metadata.entry = determination;
 
   // Hand the payload to its successor. From here the engines carry the flow.
-  new SageRank().run(payload);
+  return new SageRank().run(payload);
 }

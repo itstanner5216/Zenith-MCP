@@ -45,7 +45,15 @@ const SRC = [
 const BLOCK: SourceBlock = { startLine: 1, endLine: 14, text: SRC };
 
 function makePayload(): Payload {
-  return { source: { blocks: [BLOCK], query: null, charBudget: 10_000 }, metadata: {} };
+  // bmxEngine ends with `return removalEngine(payload)`. removalEngine is now REAL
+  // (Phase 6, no longer a passthrough stub) and FAILS LOUD without an upstream
+  // SageRank verdict. In the real chain SageRank always runs before BMX+; here we
+  // drive bmxEngine directly, so supply a mocked sagerank core to satisfy the gate.
+  // This test asserts only on metadata.bmx — the sagerank value is immaterial to it.
+  return {
+    source: { blocks: [BLOCK], query: null, charBudget: 10_000 },
+    metadata: { sagerank: { scores: [], rankedIndices: [], coverageOrder: [], coreIndices: [] } },
+  };
 }
 
 // Mirror bmxEngine's own block→line flattening so we can call scoreLines with the
