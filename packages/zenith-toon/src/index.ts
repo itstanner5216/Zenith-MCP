@@ -12,9 +12,10 @@
 // orchestrates, re-ranks, normalizes, aggregates, or re-exports their internals.
 //
 // The engines (SageRank, BMX+, removal, render) and their RESULTS are NOT part of
-// the public API. They retrieve whatever they need themselves — e.g. SageRank
-// pulls its AST call-graph edges from the project symbol DB inside its own core
-// process — so there is nothing for this module to wire, feed, or hand them.
+// the public API. The seam hands them the RESOLVED facts MCP already indexed via
+// `Source.facts`; from there each engine reads what it needs off the payload
+// (SageRank the call-graph edges, BMX+ the defs + edges) and decides everything
+// itself. This module only TRANSPORTS those facts in — it ranks/weighs nothing.
 import { compressSource, type Source, type SourceBlock } from './compress-source.js';
 
 export { compressSource };
@@ -45,8 +46,8 @@ export interface CompressFileRequest {
       readonly captureTag: string | null;
     }>;
     readonly edges: ReadonlyArray<{
-      readonly callerName: string;
-      readonly calleeName: string;
+      readonly callerLine: number;
+      readonly calleeLine: number;
       readonly callCount: number;
     }>;
     readonly anchors: ReadonlyArray<{
@@ -85,12 +86,28 @@ export function compressFile(request: CompressFileRequest): string | null {
   //     block imposes no structure of our own; block-splitting is a TOON-internal
   //     decision for a later stage, not the seam's to make.
   //   • maxChars -> charBudget   • facts.path -> modulePath   • no scan query.
+  //   • facts -> Source.facts: forwarded verbatim EXCEPT defs.line -> defs.startLine
+  //     (MCP's DB column name -> TOON's coordinate vocabulary). Edges already arrive
+  //     RESOLVED + line-keyed from the seam; nothing here re-resolves or re-weights.
   const lineCount = request.source.split('\n').length;
   const source: Source = {
     blocks: [{ startLine: 1, endLine: lineCount, text: request.source }],
     query: null,
     charBudget: request.maxChars,
     modulePath: request.facts.path,
+    facts: {
+      path: request.facts.path,
+      langName: request.facts.langName,
+      defs: request.facts.defs.map(d => ({
+        name: d.name, kind: d.kind, type: d.type,
+        startLine: d.line, endLine: d.endLine,
+        visibility: d.visibility, captureTag: d.captureTag,
+      })),
+      edges: request.facts.edges,
+      anchors: request.facts.anchors,
+      imports: request.facts.imports,
+      injections: request.facts.injections,
+    },
   };
 
   // Ignite the chain (compressSource -> SageRank -> BMX+ -> removal -> render).

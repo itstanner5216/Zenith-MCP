@@ -70,7 +70,7 @@ export async function compressForTool(
                     visibility: d.visibility, captureTag: d.captureTag,
                 })),
             edges: dbFacts.edges.map(e => ({
-                callerName: e.caller_name, calleeName: e.callee_name, callCount: e.call_count,
+                callerLine: e.callerLine, calleeLine: e.calleeLine, callCount: e.callCount,
             })),
             anchors: dbFacts.anchors.map(a => ({
                 symbolName: a.symbol_name, kind: a.kind, line: a.line, text: a.text,

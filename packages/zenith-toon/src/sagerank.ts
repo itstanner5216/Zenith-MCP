@@ -2,29 +2,22 @@ import type { Payload, SourceBlock } from './compress-source.js';
 import { bmxEngine } from './bmx-plus.js';
 
 // ════════════════════════════════════════════════════════════════════════
-//  AST facts — SageRank's OWN structural input
+//  AST facts — SageRank's structural edge input
 // ════════════════════════════════════════════════════════════════════════
 //
-// The RESOLVED symbol facts SageRank turns into call-graph edges, pulled by THIS
-// engine from the project symbol DB — never defined or handed in by an outside
-// file. Caller and callee are identified by their STABLE START LINE (the DB's
-// resolved container_def_id / callee_symbol_id -> symbols.line), NEVER by bare
-// name, so duplicate/overloaded symbol names can never misroute an edge.
+// The RESOLVED call-graph edges SageRank fuses into its similarity graph. They
+// arrive on the payload as `Source.facts.edges`, handed across the seam by the
+// consumer (Zenith-MCP) from its symbol DB. Caller and callee are identified by
+// their STABLE START LINE (the DB's resolved container_def_id / callee_symbol_id
+// -> symbols.line), NEVER by bare name, so duplicate/overloaded symbol names can
+// never misroute an edge. SageRank consumes ONLY edges here; defs are BMX+'s input.
 
-interface SourceFactDef {
-  readonly name: string;
-  readonly startLine: number;   // 1-based; stable identity of the def's block
-  readonly endLine: number;     // 1-based inclusive
-  readonly type?: string;
-  readonly visibility?: string;
-}
 interface SourceFactEdge {
-  readonly callerLine: number;  // start line of the calling def (stable key)
-  readonly calleeLine: number;  // start line of the called def (stable key)
+  readonly callerLine: number;  // resolved start line of the calling def (stable key)
+  readonly calleeLine: number;  // resolved start line of the called def (stable key)
   readonly callCount: number;
 }
 interface SourceFacts {
-  readonly defs: readonly SourceFactDef[];
   readonly edges: readonly SourceFactEdge[];
 }
 
@@ -239,12 +232,11 @@ export class SageRank {
     const texts = blocks.map((b) => b.text);
     const n = texts.length;
 
-    // SOCKET — SageRank pulls its OWN call-graph edges from the project symbol
-    // DB (the DB's RESOLVED, id/line-keyed container_def_id -> callee_symbol_id,
-    // mapped to a def's stable start line; never name-keyed, never handed in by
-    // an outside file). The DB read is NOT wired yet — there is no power in this
-    // socket. No fallback, no fabricated edges: the line below cannot obtain
-    // facts, so the build breaks HERE on purpose until the DB exists.
+    // RESOLVED call-graph edges, handed in on the payload as Source.facts.edges
+    // (the DB's id/line-keyed container_def_id -> callee_symbol_id, projected to
+    // each def's stable start line; never name-keyed). Absent facts -> no edges ->
+    // pure text-similarity ranking (rankSentences); the call-graph fusion is
+    // opt-in on the presence of data, never fabricated.
     const astEdges = this._factsToASTEdges(payload.source.facts, blocks);
     const result = astEdges.length > 0
       ? this.rankWithAST(texts, n, astEdges, payload.source.query)

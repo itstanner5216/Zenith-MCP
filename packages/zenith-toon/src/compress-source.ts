@@ -35,6 +35,49 @@ export interface SourceBlock {
 }
 
 /**
+ * The RESOLVED AST/symbol facts the consumer (Zenith-MCP) already indexed and
+ * hands across the seam — data transport, not intelligence (the engines decide
+ * what to DO with them). Line numbers are the coordinate system: a def's identity
+ * is its `startLine`; an edge's endpoints are the caller/callee defs' lines
+ * (`callerLine`/`calleeLine`), RESOLVED in the DB so duplicate/overloaded names can
+ * never misroute an edge. SageRank reads `edges`; BMX+ reads `defs` + `edges`.
+ */
+export interface RawFileFacts {
+  readonly path: string;
+  readonly langName: string | null;
+  readonly defs: ReadonlyArray<{
+    readonly name: string;
+    readonly kind: string;
+    readonly type: string;
+    readonly startLine: number;   // def identity line (1-based), as resolved by MCP
+    readonly endLine: number;
+    readonly visibility: string | null;
+    readonly captureTag: string | null;
+  }>;
+  readonly edges: ReadonlyArray<{
+    readonly callerLine: number;  // resolved start line of the calling def
+    readonly calleeLine: number;  // resolved start line of the called def
+    readonly callCount: number;
+  }>;
+  readonly anchors: ReadonlyArray<{
+    readonly symbolName: string;
+    readonly kind: string;
+    readonly line: number;
+    readonly text: string;
+  }>;
+  readonly imports: ReadonlyArray<{
+    readonly module: string;
+    readonly importedNames: readonly string[];
+    readonly line: number;
+  }>;
+  readonly injections: ReadonlyArray<{
+    readonly injectedLang: string;
+    readonly startLine: number;
+    readonly endLine: number;
+  }>;
+}
+
+/**
  * The immutable givens the consumer hands in. The engines READ from here; they
  * never write back into it. (This is the "source text" the backpack is strapped
  * onto.)
@@ -44,6 +87,7 @@ export interface Source {
   readonly query: string | null;             // scan focus
   readonly charBudget: number;               // target the removal/render engines work within (chars)
   readonly modulePath?: string | null;       // optional file/module path; query material only
+  readonly facts?: RawFileFacts;             // resolved AST/symbol facts (optional; engines guard on absence)
 }
 
 /**

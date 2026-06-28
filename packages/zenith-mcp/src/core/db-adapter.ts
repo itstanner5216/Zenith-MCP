@@ -1287,7 +1287,7 @@ export interface FileFacts {
     // zenith-toon without a second query. Sourced from the v0→v1 `capture_tag`
     // column on `symbols`.
     defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
-    edges: Array<{ caller_name: string; callee_name: string; call_count: number }>;
+    edges: Array<{ callerLine: number; calleeLine: number; callCount: number }>;
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
@@ -1298,7 +1298,20 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
         `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
          FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
     ).all(filePath) as FileFacts['defs'];
-    const edges = prepareOrCache(conn, `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count FROM edges e JOIN symbols caller ON caller.id = e.container_def_id WHERE caller.file_path = ? AND caller.kind = 'def' GROUP BY caller.name, e.referenced_name`).all(filePath) as FileFacts['edges'];
+    // Resolved, line-keyed edges (Phase 4): join BOTH endpoints to symbols — caller
+    // via container_def_id, callee via the RESOLVED callee_symbol_id — and return each
+    // endpoint's line. The INNER JOIN on callee_symbol_id drops still-unresolved edges
+    // (NULL callee); callee.file_path = ? drops cross-file edges. Both exclusions are
+    // intended: TOON ranks within-file structure. GROUP BY the two symbol IDENTITIES
+    // (not names) so two distinct defs sharing a name can never collapse into one edge.
+    const edges = prepareOrCache(conn,
+        `SELECT caller.line AS callerLine, callee.line AS calleeLine, COUNT(e.id) AS callCount
+         FROM edges e
+         JOIN symbols caller ON caller.id = e.container_def_id
+         JOIN symbols callee ON callee.id = e.callee_symbol_id
+         WHERE caller.file_path = ? AND callee.file_path = ? AND caller.kind = 'def'
+         GROUP BY caller.id, callee.id`
+    ).all(filePath, filePath) as FileFacts['edges'];
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];

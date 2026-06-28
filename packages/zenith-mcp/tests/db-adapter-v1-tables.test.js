@@ -518,17 +518,28 @@ describe('getFileFacts', () => {
         expect(facts.defs[1].name).toBe('funcB');
     });
 
-    it('includes edges grouped by caller/callee name', () => {
+    it('includes RESOLVED edges keyed by caller/callee LINE (not name)', () => {
+        // Phase 4: getFileFacts returns edges by RESOLVED line endpoints, grouped by
+        // symbol IDENTITY — never by name. Only edges whose callee resolves to a def
+        // IN THIS FILE are returned (INNER JOIN on callee_symbol_id + same file_path).
         addFile(db, 'src/edges.ts');
-        addFile(db, 'src/dep.ts');
         const callerId = addSymbol(db, { name: 'caller', kind: 'def', filePath: 'src/edges.ts', line: 1, endLine: 10 });
+        const helperId = addSymbol(db, { name: 'helper', kind: 'def', filePath: 'src/edges.ts', line: 20, endLine: 25 });
         insertEdge(db, callerId, 'helper');
-        insertEdge(db, callerId, 'helper'); // duplicate → call_count = 2
+        insertEdge(db, callerId, 'helper'); // two call sites → callCount = 2
+
+        // Resolve both edges to helper's symbol id (same-file resolution pattern used
+        // by the getUnresolvedEdges/updateEdgeCalleeSymbol tests above).
+        for (const e of getUnresolvedEdges(db, 'src/edges.ts')) {
+            if (e.referenced_name === 'helper') updateEdgeCalleeSymbol(db, e.id, helperId);
+        }
 
         const facts = getFileFacts(db, 'src/edges.ts');
-        const edge = facts.edges.find(e => e.caller_name === 'caller' && e.callee_name === 'helper');
-        expect(edge).toBeDefined();
-        expect(edge.call_count).toBe(2);
+        const edge = facts.edges.find(e => e.callerLine === 1 && e.calleeLine === 20);
+        expect(edge, 'edge keyed by resolved caller/callee LINE').toBeDefined();
+        expect(edge.callCount).toBe(2);
+        expect(edge.caller_name, 'no name keys survive the seam').toBeUndefined();
+        expect(edge.callee_name).toBeUndefined();
     });
 
     it('includes anchors and imports and injections', () => {
