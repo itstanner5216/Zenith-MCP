@@ -1,3 +1,26 @@
+import type { Payload, SourceBlock } from './compress-source.js';
+import { bmxEngine } from './bmx-plus.js';
+
+// ════════════════════════════════════════════════════════════════════════
+//  AST facts — SageRank's structural edge input
+// ════════════════════════════════════════════════════════════════════════
+//
+// The RESOLVED call-graph edges SageRank fuses into its similarity graph. They
+// arrive on the payload as `Source.facts.edges`, handed across the seam by the
+// consumer (Zenith-MCP) from its symbol DB. Caller and callee are identified by
+// their STABLE START LINE (the DB's resolved container_def_id / callee_symbol_id
+// -> symbols.line), NEVER by bare name, so duplicate/overloaded symbol names can
+// never misroute an edge. SageRank consumes ONLY edges here; defs are BMX+'s input.
+
+interface SourceFactEdge {
+  readonly callerLine: number;  // resolved start line of the calling def (stable key)
+  readonly calleeLine: number;  // resolved start line of the called def (stable key)
+  readonly callCount: number;
+}
+interface SourceFacts {
+  readonly edges: readonly SourceFactEdge[];
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  Constants
 // ════════════════════════════════════════════════════════════════════════
@@ -15,43 +38,11 @@ function _fastSigmoid(x: number): number {
   return (x3 + 6.0 * x + 12.0) / (x3 + 12.0 * x + 48.0);
 }
 
-function _segmentSentences(text: string, minLength: number = 10): string[] {
-  // Rule-based sentence segmentation. No dependencies.
-  // Handles paragraphs, line-per-message logs, and standard prose.
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return [];
-
-  const raw: string[] = [];
-  const blocks = trimmed.split(/\n\s*\n/);
-  for (const rawBlock of blocks) {
-    const block = rawBlock.trim();
-    if (block.length === 0) continue;
-    for (const rawLine of block.split("\n")) {
-      const line = rawLine.trim();
-      if (line.length === 0) continue;
-      // Split on sentence-ending punctuation followed by space + capital
-      const parts = line.split(/(?<=[.!?])\s+(?=[A-Z"])/);
-      for (const rawP of parts) {
-        const p = rawP.trim();
-        if (p.length > 0) raw.push(p);
-      }
-    }
-  }
-
-  if (raw.length === 0) return [];
-
-  // Merge very short fragments with previous sentence
-  const merged: string[] = [raw[0]!];
-  for (let i = 1; i < raw.length; i++) {
-    const lastIdx = merged.length - 1;
-    if (merged[lastIdx]!.length < minLength) {
-      merged[lastIdx] = merged[lastIdx]! + " " + raw[i]!;
-    } else {
-      merged.push(raw[i]!);
-    }
-  }
-  return merged;
-}
+// NOTE: the prose-era text wrappers (_segmentSentences + rank/summarize/
+// extractKeywords/rankPassages) were removed. They segmented free prose into
+// sentences — log/tool-output heritage that has no meaning for line-numbered
+// source. The source route feeds SageRank pre-segmented line-blocks directly
+// via rankSentences / rankWithAST; nothing here splits text into "sentences".
 
 // ════════════════════════════════════════════════════════════════════════
 //  Result
@@ -59,7 +50,20 @@ function _segmentSentences(text: string, minLength: number = 10): string[] {
 
 export interface SageResult {
   readonly sentences: string[];
+  /** Per-unit structural importance in [0,1], index-aligned to `sentences`.
+   *  Independent of topK, of input position, and of any scan query. */
   readonly scores: number[];
+  /** Full importance order over every unit, descending by `scores`. */
+  readonly rankedIndices: number[];
+  /** Full greedy coverage order over every unit (non-redundant first). The TAIL
+   *  is the most marginally-redundant material — the signal the removal gate /
+   *  deduplicator uses to drop low-marginal-info ranges (vs `scores`, which is
+   *  absolute importance). Length n. */
+  readonly coverageOrder: number[];
+  /** Bounded representative core: the knee of the score curve, coverage-diverse.
+   *  topK is only a CEILING — this is never the whole file. */
+  readonly coreIndices: number[];
+  /** Bounded representative core. Honest alias of `coreIndices` (legacy name). */
   readonly selectedIndices: number[];
   readonly keywords: [string, number][];
   readonly stats: Record<string, number | boolean | string>;
@@ -74,7 +78,16 @@ function makeSageResult(
   selectedIndices: number[],
   keywords: [string, number][],
   stats: Record<string, number | boolean | string>,
+  rankedIndices?: number[],
+  coreIndices?: number[],
+  coverageOrder?: number[],
 ): SageResult {
+  const fullRanking =
+    rankedIndices ??
+    [...Array(scores.length).keys()].sort((a, b) => scores[b]! - scores[a]!);
+  const core = coreIndices ?? selectedIndices;
+  const coverage = coverageOrder ?? fullRanking;
+
   const summary = [...selectedIndices]
     .sort((a, b) => a - b)
     .map((i) => sentences[i]!)
@@ -85,16 +98,16 @@ function makeSageResult(
     .map((i) => sentences[i]!);
 
   function top(k?: number | null): [number, string, number][] {
-    const ranked = [...Array(scores.length).keys()].sort(
-      (a, b) => scores[b]! - scores[a]!,
-    );
-    const truncated = k != null ? ranked.slice(0, k) : ranked;
+    const truncated = k != null ? fullRanking.slice(0, k) : fullRanking;
     return truncated.map((i) => [i, sentences[i]!, scores[i]!]);
   }
 
   return {
     sentences,
     scores,
+    rankedIndices: fullRanking,
+    coverageOrder: coverage,
+    coreIndices: core,
     selectedIndices,
     keywords,
     stats,
@@ -104,9 +117,66 @@ function makeSageResult(
   };
 }
 
+/**
+ * Bounded representative core size from a score-DESCENDING curve. `maxK` is a
+ * ceiling only — passing n must NOT turn the "core" into the whole file. Finds
+ * the strongest score cliff (relative x absolute gap, normalized by range),
+ * skipping the first singleton cliff when it can so one dominant node (a file or
+ * class node that towers over the rest) cannot collapse the core to 1. Falls
+ * back to a sqrt(n)-sized representative core when there is no clear edge.
+ */
+function findScoreCoreCount(sortedScores: number[], maxK: number): number {
+  const n = sortedScores.length;
+  if (n === 0 || maxK <= 0) return 0;
+  const limit = Math.max(1, Math.min(maxK, n));
+  if (n < 3) return limit;
+
+  let minS = Infinity;
+  let maxS = -Infinity;
+  for (const s of sortedScores) {
+    if (s < minS) minS = s;
+    if (s > maxS) maxS = s;
+  }
+  const range = maxS - minS;
+  if (range < 1e-10) {
+    return Math.min(limit, Math.max(1, Math.ceil(Math.sqrt(n))));
+  }
+
+  let bestCut = 1;
+  let bestGap = -Infinity;
+  const start = n > 3 ? 1 : 0; // skip the first singleton cliff when we can
+  for (let i = start; i < n - 1; i++) {
+    const left = sortedScores[i]!;
+    const right = sortedScores[i + 1]!;
+    const absGap = left - right;
+    const relGap = left > 1e-12 ? absGap / left : 0.0;
+    const weightedGap = relGap * (absGap / range);
+    if (weightedGap > bestGap) {
+      bestGap = weightedGap;
+      bestCut = i + 1;
+    }
+  }
+  if (bestGap > 0.05) return Math.min(limit, Math.max(1, bestCut));
+  return Math.min(limit, Math.max(1, Math.ceil(Math.sqrt(n))));
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  SageRank
 // ════════════════════════════════════════════════════════════════════════
+
+/**
+ * SageRank's determination — the `sagerank` metadata key it owns. Per-block
+ * structural importance (`scores`, index-aligned to `source.blocks`), the full
+ * descending order, the greedy coverage order (whose tail is the most
+ * marginally-redundant material), and the bounded representative core. Defined
+ * and owned HERE; only later engines consume it.
+ */
+export interface SageRankMetadata {
+  readonly scores: readonly number[];
+  readonly rankedIndices: readonly number[];
+  readonly coverageOrder: readonly number[];
+  readonly coreIndices: readonly number[];
+}
 
 export class SageRank {
   private readonly _k1: number;
@@ -115,8 +185,9 @@ export class SageRank {
   private readonly _maxIter: number;
   private readonly _epsilon: number;
   private readonly _coverageWeight: number;
-  private readonly _minSentLen: number;
   private readonly _normalize: boolean;
+  private readonly _usePositionPrior: boolean;
+  private readonly _useQueryBias: boolean;
 
   constructor(
     k1: number = 1.5,
@@ -125,8 +196,12 @@ export class SageRank {
     maxIter: number = 50,
     epsilon: number = 1e-6,
     coverageWeight: number = 0.5,
-    minSentenceLength: number = 10,
     normalize: boolean = true,
+    // Source defaults: NO prose lead/trail position bias and NO query bias, so
+    // `scores` are a pure function of content + graph structure (position- and
+    // query-invariant per-range importance). Prose callers can opt back in.
+    usePositionPrior: boolean = false,
+    useQueryBias: boolean = false,
   ) {
     this._k1 = k1;
     this._b = b;
@@ -134,8 +209,92 @@ export class SageRank {
     this._maxIter = maxIter;
     this._epsilon = epsilon;
     this._coverageWeight = coverageWeight;
-    this._minSentLen = minSentenceLength;
     this._normalize = normalize;
+    this._usePositionPrior = usePositionPrior;
+    this._useQueryBias = useQueryBias;
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  //  Engine entry — SageRank's core process on the payload
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * SageRank's core process, operating on the payload: read the source blocks
+   * (+ resolved AST facts), score every block by PageRank centrality over its
+   * text-similarity graph fused with the call graph, drop that per-range
+   * determination onto the payload's `sagerank` key, and hand the payload to
+   * the next engine ITSELF. No outside actor shapes the input or carries the
+   * result — the projection of facts->edges below is part of this engine's own
+   * core, not a route helper.
+   */
+  run(payload: Payload): Payload {
+    const blocks = payload.source.blocks;
+    const texts = blocks.map((b) => b.text);
+    const n = texts.length;
+
+    // RESOLVED call-graph edges, handed in on the payload as Source.facts.edges
+    // (the DB's id/line-keyed container_def_id -> callee_symbol_id, projected to
+    // each def's stable start line; never name-keyed). Absent facts -> no edges ->
+    // pure text-similarity ranking (rankSentences); the call-graph fusion is
+    // opt-in on the presence of data, never fabricated.
+    const astEdges = this._factsToASTEdges(payload.source.facts, blocks);
+    const result = astEdges.length > 0
+      ? this.rankWithAST(texts, n, astEdges, payload.source.query)
+      : this.rankSentences(texts, n, payload.source.query);
+
+    // Drop the stone in the backpack: SageRank's own per-range determination.
+    const determination: SageRankMetadata = {
+      scores: result.scores,
+      rankedIndices: result.rankedIndices,
+      coverageOrder: result.coverageOrder,
+      coreIndices: result.coreIndices,
+    };
+    payload.metadata.sagerank = determination;
+
+    // Hand the payload forward to the next engine itself.
+    return bmxEngine(payload);
+  }
+
+  /**
+   * Project RESOLVED AST facts into SageRank's index-based edge format. Caller
+   * and callee resolve to a block by STABLE START LINE (exact match first, else
+   * the smallest enclosing span), so duplicate/overloaded symbol names can never
+   * misroute an edge. weight = sqrt(callCount): SageRank's edge tuning lives
+   * HERE, inside the engine — not in the DB and not in a route.
+   */
+  private _factsToASTEdges(
+    facts: SourceFacts | undefined,
+    blocks: readonly SourceBlock[],
+  ): Array<{ from: number; to: number; weight: number }> {
+    if (facts === undefined || facts.edges.length === 0) return [];
+
+    const startLineToIndex = new Map<number, number>();
+    for (let i = 0; i < blocks.length; i++) {
+      startLineToIndex.set(blocks[i]!.startLine, i);
+    }
+    const resolve = (line: number): number | undefined => {
+      const exact = startLineToIndex.get(line);
+      if (exact !== undefined) return exact;
+      let best: { index: number; span: number } | undefined;
+      for (let i = 0; i < blocks.length; i++) {
+        const b = blocks[i]!;
+        if (line >= b.startLine && line <= b.endLine) {
+          const span = b.endLine - b.startLine;
+          if (best === undefined || span < best.span) best = { index: i, span };
+        }
+      }
+      return best?.index;
+    };
+
+    const edges: Array<{ from: number; to: number; weight: number }> = [];
+    for (const e of facts.edges) {
+      if (!Number.isFinite(e.callCount) || e.callCount <= 0) continue;
+      const from = resolve(e.callerLine);
+      const to = resolve(e.calleeLine);
+      if (from === undefined || to === undefined || from === to) continue;
+      edges.push({ from, to, weight: Math.sqrt(e.callCount) });
+    }
+    return edges;
   }
 
   // ────────────────────────────────────────────────────────────────
@@ -661,6 +820,50 @@ export class SageRank {
   }
 
   // ────────────────────────────────────────────────────────────────
+  //  Bounded Core Selection (knee on the score curve)
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Split per-unit importance into a full descending ranking plus a small,
+   * coverage-diverse representative core. The core is sized by the internal
+   * knee detector (topK is only a ceiling) and filled from the coverage order
+   * so it favors NON-redundant high-importance units; any shortfall is topped
+   * up by pure score order. Returns [coreIndices, rankedIndices].
+   */
+  private _selectCore(
+    scores: number[],
+    coverageOrder: number[],
+    maxK: number,
+  ): [number[], number[]] {
+    const rankedIndices = [...scores.keys()].sort(
+      (a, b) => (scores[b] ?? 0) - (scores[a] ?? 0),
+    );
+    if (rankedIndices.length === 0) return [[], []];
+    const coreSize = findScoreCoreCount(
+      rankedIndices.map((i) => scores[i] ?? 0),
+      maxK,
+    );
+    const highImportance = new Set(rankedIndices.slice(0, coreSize));
+    const inCore = new Set<number>();
+    const core: number[] = [];
+    for (const idx of coverageOrder) {
+      if (core.length >= coreSize) break;
+      if (highImportance.has(idx) && !inCore.has(idx)) {
+        core.push(idx);
+        inCore.add(idx);
+      }
+    }
+    for (const idx of rankedIndices) {
+      if (core.length >= coreSize) break;
+      if (!inCore.has(idx)) {
+        core.push(idx);
+        inCore.add(idx);
+      }
+    }
+    return [core, rankedIndices];
+  }
+
+  // ────────────────────────────────────────────────────────────────
   //  Keyword Extraction
   // ────────────────────────────────────────────────────────────────
 
@@ -686,12 +889,14 @@ export class SageRank {
   //  Public API
   // ════════════════════════════════════════════════════════════════
 
+  // Rank pre-segmented units (for the source route: line-blocks, each carrying
+  // its own line range). The caller supplies the units already split; SageRank
+  // never re-segments. Returns per-unit centrality scores + a selected core.
   rankSentences(
     sentences: string[],
     topK: number = 5,
     query: string | null = null,
   ): SageResult {
-    // Rank pre-segmented sentences/passages/messages.
     const n = sentences.length;
     if (n === 0) {
       return makeSageResult([], [], [], [], {});
@@ -736,21 +941,22 @@ export class SageRank {
       centrality.push(sum);
     }
 
-    // 6. Adaptive position prior
-    const position = SageRank._positionPrior(centrality, n);
+    // 6. Position prior. For SOURCE the prose-era lead/trail bias is OFF by
+    //    default (usePositionPrior=false) so a range's score is a pure function
+    //    of its content + graph structure — i.e. position-invariant. Prose
+    //    callers can opt back in.
+    const position = this._usePositionPrior
+      ? SageRank._positionPrior(centrality, n)
+      : new Array<number>(n).fill(1.0);
 
-    // 7. Optional query scoring
+    // 7. Optional query scoring. OFF by default (useQueryBias=false): structural
+    //    importance must not be silently re-weighted by a scan query — relevance
+    //    is BMX+'s engine. Opt-in only; the query param is kept for back-compat.
     let queryScores: Map<number, number> | null = null;
-    if (query !== null && query.length > 0) {
+    if (this._useQueryBias && query !== null && query.length > 0) {
       const qt = SageRank._tokenize(query);
       if (qt.length > 0) {
-        queryScores = this._scoreQuery(
-          qt,
-          postingLists,
-          eidf,
-          docLengths,
-          avgDl,
-        );
+        queryScores = this._scoreQuery(qt, postingLists, eidf, docLengths, avgDl);
       }
     }
 
@@ -764,22 +970,10 @@ export class SageRank {
       personalization.set(i, pVal);
     }
 
-    // 9. PageRank
+    // 9. PageRank — the full per-unit structural importance curve.
     const [prScores, prIters] = this._pagerank(adjacency, personalization, n);
 
-    // 10. Coverage-aware extraction
-    const selected = this._extractWithCoverage(
-      prScores,
-      sentTokens,
-      eidf,
-      effectiveTopK,
-      n,
-    );
-
-    // 11. Keywords
-    const keywords = SageRank._getKeywords(eidf, docFreqs, 10);
-
-    // 12. Normalise scores to [0, 1]
+    // 10. Normalise scores to [0, 1]. THIS is the per-range importance signal.
     let scores: number[] = [];
     for (let i = 0; i < n; i++) {
       scores.push(prScores.get(i) ?? 0.0);
@@ -791,9 +985,27 @@ export class SageRank {
       }
     }
 
-    // lead_bias: recompute position prior first element minus 1
+    // 11. De-overload. Full greedy coverage order over ALL n (non-redundant),
+    //     then a knee-bounded, coverage-diverse representative core. topK is a
+    //     ceiling only — passing n yields all scores without inflating the core.
+    const coverageOrder = this._extractWithCoverage(
+      prScores,
+      sentTokens,
+      eidf,
+      n,
+      n,
+    );
+    const [coreIndices, rankedIndices] = this._selectCore(
+      scores,
+      coverageOrder,
+      effectiveTopK,
+    );
+
+    // 12. Keywords
+    const keywords = SageRank._getKeywords(eidf, docFreqs, 10);
+
     const leadBias =
-      n > 0 ? SageRank._positionPrior(centrality, n)[0]! - 1.0 : 0.0;
+      this._usePositionPrior && n > 0 ? position[0]! - 1.0 : 0.0;
 
     const stats: Record<string, number | boolean | string> = {
       sentences: n,
@@ -802,59 +1014,22 @@ export class SageRank {
       pagerank_iters: prIters,
       idf_max: Math.round(idfMax * 10000) / 10000,
       lead_bias: Math.round(leadBias * 10000) / 10000,
-      query_biased: query !== null,
+      position_prior: this._usePositionPrior,
+      query_biased: this._useQueryBias && query !== null,
+      core_size: coreIndices.length,
+      selection_mode: "bounded_core",
     };
 
-    return makeSageResult(sentences, scores, selected, keywords, stats);
-  }
-
-  // Alias for non-sentence text units (messages, paragraphs, chunks)
-  rankPassages(
-    sentences: string[],
-    topK: number = 5,
-    query: string | null = null,
-  ): SageResult {
-    return this.rankSentences(sentences, topK, query);
-  }
-
-  rank(
-    text: string,
-    topK: number = 5,
-    query: string | null = null,
-  ): SageResult {
-    // Rank sentences in a text document.
-    // Segments text into sentences, then ranks them.
-    const sentences = _segmentSentences(text, this._minSentLen);
-    return this.rankSentences(sentences, topK, query);
-  }
-
-  summarize(
-    text: string,
-    ratio: number = 0.3,
-    query: string | null = null,
-  ): string {
-    // Return an extractive summary at the given compression ratio.
-    const sentences = _segmentSentences(text, this._minSentLen);
-    if (sentences.length === 0) return "";
-    const topK = Math.max(1, Math.floor(sentences.length * ratio));
-    const result = this.rankSentences(sentences, topK, query);
-    return result.summary;
-  }
-
-  extractKeywords(
-    text: string,
-    topK: number = 10,
-  ): [string, number][] {
-    // Extract top keywords using entropy-weighted IDF scoring.
-    // Returns list of [term, score] tuples sorted by importance.
-    const sentences = _segmentSentences(text, this._minSentLen);
-    if (sentences.length === 0) return [];
-    const sentTokens = sentences.map((s) => SageRank._tokenize(s));
-    const [postingLists, docFreqs] =
-      SageRank._buildPostingLists(sentTokens);
-    const n = sentences.length;
-    const [, eidf] = SageRank._computeEidf(postingLists, docFreqs, n);
-    return SageRank._getKeywords(eidf, docFreqs, topK);
+    return makeSageResult(
+      sentences,
+      scores,
+      coreIndices,
+      keywords,
+      stats,
+      rankedIndices,
+      coreIndices,
+      coverageOrder,
+    );
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -864,7 +1039,7 @@ export class SageRank {
   /**
    * Merge AST edges into text-similarity adjacency graph.
    * AST edges represent call/reference relationships from the symbol index.
-   * 
+   *
    * @param textAdjacency - Adjacency from text similarity
    * @param astEdges - Edges from call graph / symbol references
    * @param n - Number of nodes
@@ -910,13 +1085,13 @@ export class SageRank {
 
   /**
    * Rank sentences/blocks with AST call graph awareness.
-   * 
+   *
    * Uses the existing text-similarity graph but augments it with edges
    * from the symbol index call graph. This means:
    * - Functions that call many others have high out-degree → authority
    * - Functions called by many others have high in-degree → hub
    * - Bridge functions connecting clusters have high betweenness
-   * 
+   *
    * @param sentences - Text content of each block/function
    * @param topK - Number of top items to select
    * @param astEdges - Call graph edges from symbol index
@@ -933,10 +1108,10 @@ export class SageRank {
       return makeSageResult([], [], [], [], { ast_aware: true, ast_edges: 0 });
     }
     if (n === 1) {
-      return makeSageResult(sentences, [1.0], [0], [], { 
-        sentences: 1, 
-        ast_aware: true, 
-        ast_edges: astEdges.length 
+      return makeSageResult(sentences, [1.0], [0], [], {
+        sentences: 1,
+        ast_aware: true,
+        ast_edges: astEdges.length
       });
     }
     const effectiveTopK = Math.min(topK, n);
@@ -985,21 +1160,17 @@ export class SageRank {
       centrality.push(sum);
     }
 
-    // 7. Adaptive position prior
-    const position = SageRank._positionPrior(centrality, n);
+    // 7. Position prior — OFF by default for source (see rankSentences).
+    const position = this._usePositionPrior
+      ? SageRank._positionPrior(centrality, n)
+      : new Array<number>(n).fill(1.0);
 
-    // 8. Optional query scoring
+    // 8. Optional query scoring — OFF by default (relevance is BMX+'s engine).
     let queryScores: Map<number, number> | null = null;
-    if (query !== null && query.length > 0) {
+    if (this._useQueryBias && query !== null && query.length > 0) {
       const qt = SageRank._tokenize(query);
       if (qt.length > 0) {
-        queryScores = this._scoreQuery(
-          qt,
-          postingLists,
-          eidf,
-          docLengths,
-          avgDl,
-        );
+        queryScores = this._scoreQuery(qt, postingLists, eidf, docLengths, avgDl);
       }
     }
 
@@ -1013,22 +1184,10 @@ export class SageRank {
       personalization.set(i, pVal);
     }
 
-    // 10. PageRank on merged graph
+    // 10. PageRank on the text+AST merged graph — full per-unit importance curve.
     const [prScores, prIters] = this._pagerank(adjacency, personalization, n);
 
-    // 11. Coverage-aware extraction
-    const selected = this._extractWithCoverage(
-      prScores,
-      sentTokens,
-      eidf,
-      effectiveTopK,
-      n,
-    );
-
-    // 12. Keywords
-    const keywords = SageRank._getKeywords(eidf, docFreqs, 10);
-
-    // 13. Normalise scores to [0, 1]
+    // 11. Normalise scores to [0, 1]. THIS is the per-range importance signal.
     let scores: number[] = [];
     for (let i = 0; i < n; i++) {
       scores.push(prScores.get(i) ?? 0.0);
@@ -1040,8 +1199,25 @@ export class SageRank {
       }
     }
 
+    // 12. De-overload: full coverage order over all n, then a knee-bounded core.
+    const coverageOrder = this._extractWithCoverage(
+      prScores,
+      sentTokens,
+      eidf,
+      n,
+      n,
+    );
+    const [coreIndices, rankedIndices] = this._selectCore(
+      scores,
+      coverageOrder,
+      effectiveTopK,
+    );
+
+    // 13. Keywords
+    const keywords = SageRank._getKeywords(eidf, docFreqs, 10);
+
     const leadBias =
-      n > 0 ? SageRank._positionPrior(centrality, n)[0]! - 1.0 : 0.0;
+      this._usePositionPrior && n > 0 ? position[0]! - 1.0 : 0.0;
 
     const stats: Record<string, number | boolean | string> = {
       sentences: n,
@@ -1052,10 +1228,22 @@ export class SageRank {
       pagerank_iters: prIters,
       idf_max: Math.round(idfMax * 10000) / 10000,
       lead_bias: Math.round(leadBias * 10000) / 10000,
-      query_biased: query !== null,
+      position_prior: this._usePositionPrior,
+      query_biased: this._useQueryBias && query !== null,
+      core_size: coreIndices.length,
+      selection_mode: "bounded_core",
       ast_aware: true,
     };
 
-    return makeSageResult(sentences, scores, selected, keywords, stats);
+    return makeSageResult(
+      sentences,
+      scores,
+      coreIndices,
+      keywords,
+      stats,
+      rankedIndices,
+      coreIndices,
+      coverageOrder,
+    );
   }
 }

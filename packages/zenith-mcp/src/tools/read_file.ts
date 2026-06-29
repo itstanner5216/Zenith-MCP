@@ -73,7 +73,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                         outputLines.push('---');
                         charCount += 4;
                     }
-                    const formatted = `${totalLines}:${line}`;
+                    const formatted = `${totalLines}. ${line}`;
                     if (charCount + formatted.length + 1 <= maxChars) {
                         outputLines.push(formatted);
                         charCount += formatted.length + 1;
@@ -96,7 +96,18 @@ export function register(server: ToolServer, ctx: ToolContext) {
             };
         }
 
-        let content = await readFileContent(validPath);
+        const rawContent = await readFileContent(validPath);
+
+        // read_file is the SINGLE authority that places line-number prefixes. The
+        // `N. ` (number-dot-space) prefix is applied ONCE here, up front, and is the
+        // canonical text from this point on: it feeds BOTH the compression path and
+        // the plain path, and nothing downstream ever recomputes or re-prefixes a line
+        // (Priority 0 line-number fidelity). compressForTool strips the prefix only to
+        // index the real code; TOON strips only to weigh lines and emits each one
+        // verbatim — so the number a line carries is always the one placed right here.
+        const srcLines = rawContent.split('\n');
+        if (srcLines[srcLines.length - 1] === '') srcLines.pop();
+        let content = srcLines.map((line: string, i: number) => `${i + 1}. ${line}`).join('\n');
 
         // Transport/IO bound (same ×4 family as read_multiple_files' byteLimit): the
         // engine's intentional 70% retention floor can exceed the requested budget,
@@ -104,10 +115,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
         // This is a transport ceiling, not a compression decision (TOON still owns
         // usefulness for everything within the bound).
         if (args.compression && content.length <= maxChars * 4) {
-            // Priority 0.5 seam: TOON gets the RAW, FULL text and the caller's budget.
-            // It owns every compression decision, including fit (returns null when its
-            // best view doesn't serve this request) — and its return is emitted
-            // VERBATIM: no "N:" prefixing, no '[truncated]' suffix, no re-truncation.
+            // Priority 0.5 seam: TOON gets the N.-prefixed, FULL text and the caller's
+            // budget. It owns every compression decision, including fit (returns null
+            // when its best view doesn't serve this request) — and its return is
+            // emitted VERBATIM: no re-prefixing, no '[truncated]' suffix, no re-truncation.
             const compressed = await compressForTool(validPath, content, maxChars);
             if (compressed !== null) {
                 return { content: [{ type: "text" as const, text: compressed }] };
@@ -121,9 +132,6 @@ export function register(server: ToolServer, ctx: ToolContext) {
             content = content.slice(0, cutoff);
             truncated = true;
         }
-        const lines = content.split('\n');
-        if (lines[lines.length - 1] === '') lines.pop();
-        content = lines.map((line: string, i: number) => `${i + 1}:${line}`).join('\n');
         const text = truncated ? `${content}\n[truncated]` : content;
         return {
             content: [{ type: "text" as const, text }],
