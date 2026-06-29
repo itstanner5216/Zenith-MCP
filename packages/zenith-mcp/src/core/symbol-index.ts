@@ -322,6 +322,14 @@ export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFi
             reindexed++;
         }
     }
+    // Batch-level resolve: now that every touched file has been reindexed, run ONE
+    // whole-DB pass to resolve unresolved edge targets. NOT per-file (the N+1 the
+    // batch pass exists to avoid) and not never (the bug this fixes: read tools all
+    // route through ensureIndexFresh, which left their edges permanently
+    // unresolved). Guarded by reindexed > 0 so an all-fresh batch costs nothing;
+    // resolveAllEdgeTargets also short-circuits when zero edges are unresolved. Runs
+    // AFTER each indexFile's own persist transaction has completed — not nested.
+    if (reindexed > 0) resolveAllEdgeTargets(db);
     return reindexed;
 }
 
@@ -362,6 +370,12 @@ export async function ensureFreshFromContent(db: DbConnection, repoRoot: string,
     const existingHash = getFileHash(db, relPath);
     if (!existingHash || existingHash !== hash) {
         await indexFile(db, repoRoot, absFilePath, content);
+        // Resolve after indexFile's transaction completes (separate statement, not
+        // nested in persist). The single-file content path (compression seam,
+        // edit_file) just wrote edges that would otherwise stay permanently
+        // unresolved. Only the reindex branch resolves — the return-0 path changed
+        // nothing, so there is nothing to resolve.
+        resolveAllEdgeTargets(db);
         return 1;
     }
     return 0;

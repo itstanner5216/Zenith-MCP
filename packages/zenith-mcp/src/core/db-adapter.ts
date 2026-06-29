@@ -1287,10 +1287,15 @@ export interface FileFacts {
     // zenith-toon without a second query. Sourced from the v0→v1 `capture_tag`
     // column on `symbols`.
     defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
-    edges: Array<{ caller_name: string; callee_name: string; call_count: number }>;
+    edges: Array<{ callerLine: number; calleeLine: number; callCount: number }>;
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
+    // CASING WARNING (C3): these fields are camelCase (scopeKind/startLine/endLine) and MUST stay
+    // character-identical to compression.ts's `.map` reads in T4 AND to the SELECT aliases in
+    // getFileFacts below. A snake_case alias on the query + a camelCase read = silently empty
+    // scopes with NO build error and NO test error. scopes are camelCase end-to-end.
+    scopes: Array<{ scopeKind: string; startLine: number; endLine: number }>;
 }
 
 export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
@@ -1298,11 +1303,39 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
         `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
          FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
     ).all(filePath) as FileFacts['defs'];
-    const edges = prepareOrCache(conn, `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count FROM edges e JOIN symbols caller ON caller.id = e.container_def_id WHERE caller.file_path = ? AND caller.kind = 'def' GROUP BY caller.name, e.referenced_name`).all(filePath) as FileFacts['edges'];
+    // Resolved, line-keyed edges (Phase 4): join BOTH endpoints to symbols — caller
+    // via container_def_id, callee via the RESOLVED callee_symbol_id — and return each
+    // endpoint's line. The INNER JOIN on callee_symbol_id drops still-unresolved edges
+    // (NULL callee); callee.file_path = ? drops cross-file edges. Both exclusions are
+    // intended: TOON ranks within-file structure. GROUP BY the two symbol IDENTITIES
+    // (not names) so two distinct defs sharing a name can never collapse into one edge.
+    const edges = prepareOrCache(conn,
+        `SELECT caller.line AS callerLine, callee.line AS calleeLine, COUNT(e.id) AS callCount
+         FROM edges e
+         JOIN symbols caller ON caller.id = e.container_def_id
+         JOIN symbols callee ON callee.id = e.callee_symbol_id
+         WHERE caller.file_path = ? AND callee.file_path = ? AND caller.kind = 'def'
+         GROUP BY caller.id, callee.id`
+    ).all(filePath, filePath) as FileFacts['edges'];
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];
-    return { defs, edges, anchors, imports, injections };
+    // CASING WARNING (C3): the SELECT aliases below are camelCase (scopeKind/startLine/endLine) and
+    // MUST match compression.ts's `.map` field reads in T4. A snake_case alias here + a camelCase
+    // read there = silently empty scopes, NO build error. Do NOT "match injections' snake_case" —
+    // scopes are camelCase end-to-end. Mirrors the anchors JOIN (s.id = a.symbol_id) above.
+    // The JOIN symbols s ON s.id = ls.symbol_id intentionally excludes null-owner ("module") scopes:
+    // persist.ts:80 never inserts a scope whose owning symbol does not resolve, so such rows do not
+    // exist and have no symbol to join — module-level code legitimately gets no scope sub-blocks.
+    // ORDER BY start_line, end_line gives deterministic tiling input downstream.
+    const scopes = prepareOrCache(conn,
+        `SELECT ls.scope_kind AS scopeKind, ls.start_line AS startLine, ls.end_line AS endLine
+         FROM local_scopes ls
+         JOIN symbols s ON s.id = ls.symbol_id
+         WHERE s.file_path = ?
+         ORDER BY ls.start_line, ls.end_line`
+    ).all(filePath) as FileFacts['scopes'];
+    return { defs, edges, anchors, imports, injections, scopes };
 }
 
 // ---------------------------------------------------------------------------
