@@ -478,10 +478,22 @@ export interface CompressFileRequest {
       readonly visibility: string | null;
       readonly captureTag: string | null;
     }>;
+    readonly references: ReadonlyArray<{
+      readonly name: string;
+      readonly type: string | null;
+      readonly line: number;
+      readonly endLine: number;
+      readonly column: number;
+    }>;
     readonly edges: ReadonlyArray<{
       readonly callerLine: number;
       readonly calleeLine: number;
       readonly callCount: number;
+    }>;
+    readonly referenceEdges: ReadonlyArray<{
+      readonly callerLine: number;
+      readonly referencedName: string;
+      readonly referenceCount: number;
     }>;
     readonly anchors: ReadonlyArray<{
       readonly symbolName: string;
@@ -568,7 +580,9 @@ export function compressFile(request: CompressFileRequest): string | null {
           startLine: d.line, endLine: d.endLine,
           visibility: d.visibility, captureTag: d.captureTag,
         })),
+        references: request.facts.references,
         edges: request.facts.edges,
+        referenceEdges: request.facts.referenceEdges,
         anchors: request.facts.anchors,
         imports: request.facts.imports,
         injections: request.facts.injections,

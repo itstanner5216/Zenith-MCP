@@ -1287,7 +1287,9 @@ export interface FileFacts {
     // zenith-toon without a second query. Sourced from the v0→v1 `capture_tag`
     // column on `symbols`.
     defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
+    references: Array<{ name: string; type: string | null; line: number; endLine: number; column: number }>;
     edges: Array<{ callerLine: number; calleeLine: number; callCount: number }>;
+    referenceEdges: Array<{ callerLine: number; referencedName: string; referenceCount: number }>;
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
@@ -1303,6 +1305,10 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
         `SELECT id, name, line, end_line AS endLine, type, visibility, capture_tag AS captureTag
          FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
     ).all(filePath) as FileFacts['defs'];
+    const references = prepareOrCache(conn,
+        `SELECT name, type, line, end_line AS endLine, column
+         FROM symbols WHERE file_path = ? AND kind = 'ref' ORDER BY line, column`
+    ).all(filePath) as FileFacts['references'];
     // Resolved, line-keyed edges (Phase 4): join BOTH endpoints to symbols — caller
     // via container_def_id, callee via the RESOLVED callee_symbol_id — and return each
     // endpoint's line. The INNER JOIN on callee_symbol_id drops still-unresolved edges
@@ -1317,6 +1323,14 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
          WHERE caller.file_path = ? AND callee.file_path = ? AND caller.kind = 'def'
          GROUP BY caller.id, callee.id`
     ).all(filePath, filePath) as FileFacts['edges'];
+    const referenceEdges = prepareOrCache(conn,
+        `SELECT caller.line AS callerLine, e.referenced_name AS referencedName, COUNT(e.id) AS referenceCount
+         FROM edges e
+         JOIN symbols caller ON caller.id = e.container_def_id
+         WHERE caller.file_path = ? AND caller.kind = 'def'
+         GROUP BY caller.id, e.referenced_name
+         ORDER BY caller.line, e.referenced_name`
+    ).all(filePath) as FileFacts['referenceEdges'];
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];
@@ -1335,7 +1349,7 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
          WHERE s.file_path = ?
          ORDER BY ls.start_line, ls.end_line`
     ).all(filePath) as FileFacts['scopes'];
-    return { defs, edges, anchors, imports, injections, scopes };
+    return { defs, references, edges, referenceEdges, anchors, imports, injections, scopes };
 }
 
 // ---------------------------------------------------------------------------
