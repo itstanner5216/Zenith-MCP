@@ -1,145 +1,99 @@
 version: 2
 updates:
 
-# ── GitHub Actions ──────────────────────────────────────────────────────────
-
-* package-ecosystem: "github-actions"
-  directory: "/"
-  schedule:
-  interval: "weekly"
-  day: "monday"
-  time: "05:00"
-  timezone: "UTC"
-  open-pull-requests-limit: 10
-  labels:
-
-  * "dependencies"
-  * "ci"
+  # ── GitHub Actions ─────────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "ci"
     commit-message:
-    prefix: "ci"
+      prefix: "ci"
     groups:
-    github-actions:
-    applies-to: version-updates
-    patterns:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
 
-    * "*"
-
-# ── Root workspace manifest ──────────────────────────────────────────────────
-
-# Covers: turbo, typescript (root devDeps)
-
-* package-ecosystem: "npm"
-  directory: "/"
-  schedule:
-  interval: "weekly"
-  day: "tuesday"
-  time: "05:00"
-  timezone: "UTC"
-  open-pull-requests-limit: 10
-  labels:
-
-  * "dependencies"
+  # ── npm (all packages — root + workspaces) ──────────────────────────────────
+  # A single entry pointing at "/" with `directories` covering every npm manifest.
+  # Dependabot merges all workspace bumps into ONE PR per group instead of one
+  # PR per package × group.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
     commit-message:
-    prefix: "deps(root)"
+      prefix: "deps"
+
+    # @modelcontextprotocol/sdk is pinned with a pnpm patch in pnpm-workspace.yaml
+    # (patchedDependencies: "@modelcontextprotocol/sdk@1.29.0"). Bumping it here
+    # would break `pnpm install` — upgrade manually and refresh the patch.
+    ignore:
+      - dependency-name: "@modelcontextprotocol/sdk"
+
     groups:
-    typescript:
-    applies-to: version-updates
-    patterns:
-
-    * "typescript"
-      root-other:
-      applies-to: version-updates
-      patterns:
-    * "*"
-
-# ── packages/zenith-mcp ───────────────────────────────────────────────────────
-
-# All runtime and dev dependencies for the MCP server package
-
-* package-ecosystem: "npm"
-  directory: "/packages/zenith-mcp"
-  schedule:
-  interval: "weekly"
-  day: "tuesday"
-  time: "05:30"
-  timezone: "UTC"
-  open-pull-requests-limit: 10
-  labels:
-
-  * "dependencies"
-    commit-message:
-    prefix: "deps(zenith-mcp)"
-
-  # @modelcontextprotocol/sdk is pinned with a pnpm patch (pnpm-workspace.yaml
-
-  # patchedDependencies: "@modelcontextprotocol/sdk@1.29.0"). Dependabot cannot
-
-  # update the patch key — bumping it would break `pnpm install`. Ignore it here;
-
-  # upgrade manually and refresh the patch at the same time.
-
-  ignore:
-
-  * dependency-name: "@modelcontextprotocol/sdk"
-    groups:
-    mcp-sdk:
-    applies-to: version-updates
-    patterns:
-
-    * "@modelcontextprotocol/server"
-      tree-sitter:
-      applies-to: version-updates
-      patterns:
-    * "web-tree-sitter"
-    * "tree-sitter-*"
-    * "@repomix/tree-sitter-wasms"
-      testing:
-      applies-to: version-updates
-      patterns:
-    * "vitest"
-    * "@vitest/*"
-      dependency-type: "development"
+      # All @types/* dev stubs in one PR
       type-stubs:
-      applies-to: version-updates
-      patterns:
-    * "@types/*"
-      dependency-type: "development"
+        applies-to: version-updates
+        patterns:
+          - "@types/*"
+        dependency-type: "development"
+
+      # MCP SDK alpha releases
+      mcp-sdk:
+        applies-to: version-updates
+        patterns:
+          - "@modelcontextprotocol/server"
+          - "@modelcontextprotocol/client"
+
+      # Tree-sitter runtime + CLI + WASM grammars
+      tree-sitter:
+        applies-to: version-updates
+        patterns:
+          - "web-tree-sitter"
+          - "tree-sitter-cli"
+          - "tree-sitter-*"
+          - "@repomix/tree-sitter-wasms"
+
+      # Zod schema ecosystem
       zod:
-      applies-to: version-updates
-      patterns:
-    * "zod"
-    * "zod-*"
-      zenith-mcp-other:
-      applies-to: version-updates
-      patterns:
-    * "*"
+        applies-to: version-updates
+        patterns:
+          - "zod"
+          - "zod-*"
 
-# ── packages/zenith-toon ──────────────────────────────────────────────────────
+      # Vitest testing stack
+      testing:
+        applies-to: version-updates
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+        dependency-type: "development"
 
-# Dev dependencies for the TOON compression library
+      # Build tooling (turbo, typescript, etc.)
+      build-tooling:
+        applies-to: version-updates
+        patterns:
+          - "turbo"
+          - "typescript"
+          - "tsx"
+          - "tsup"
 
-* package-ecosystem: "npm"
-  directory: "/packages/zenith-toon"
-  schedule:
-  interval: "weekly"
-  day: "tuesday"
-  time: "06:00"
-  timezone: "UTC"
-  open-pull-requests-limit: 5
-  labels:
-
-  * "dependencies"
-    commit-message:
-    prefix: "deps(zenith-toon)"
-    groups:
-    type-stubs:
-    applies-to: version-updates
-    patterns:
-
-    * "@types/*"
-      dependency-type: "development"
-      zenith-toon-other:
-      applies-to: version-updates
-      patterns:
-    * "*"
-
+      # Everything else in one catch-all PR
+      all-other-deps:
+        applies-to: version-updates
+        patterns:
+          - "*"
