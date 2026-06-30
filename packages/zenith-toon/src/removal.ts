@@ -403,250 +403,407 @@ export function selectDropsToBand(
     );
   }
 
-  // Rcap = the most CONTENT we could ever remove = Σ weight over ELIGIBLE lines (only
-  // eligible lines may be dropped); it bounds net on the high side (net <= dropped
-  // content <= Rcap). Every number this DP touches is either a char COUNT (a size) or
-  // the eligible boolean — never an importance score.
+  // Per-line marker charges, precomputed once. openCharge[i] is subtracted when a gap
+  // OPENS at line i (start line = lines[i]); closeCharge[i] is owed when a gap CLOSES
+  // at line i (end line = lines[i-1], the line just left). Under noUncheckedIndexedAccess
+  // even typed-array reads are number|undefined, so every consuming read below is guarded
+  // with `?? <inert default>` (Rule 6 — never a non-null `!`); the arrays are densely
+  // filled, so each guard branch is dead and behaviour is exactly the proven engine's.
+  const openCharge = new Int32Array(n);
+  const closeCharge = new Int32Array(n);
+  const wArr = new Int32Array(n);
   let Rcap = 0;
-  let maxLine = 0;
+  let maxWeight = 0;
   for (let i = 0; i < n; i++) {
-    if (eligible[i] === true) Rcap += weights[i] ?? 0; // Rule 6: guard the index, no '!'
-    const li = lines[i] ?? 0;
-    if (li > maxLine) maxLine = li;
+    const w = weights[i] ?? 0;
+    wArr[i] = w;
+    if (w > maxWeight) maxWeight = w;
+    if (eligible[i] === true) Rcap += w;
+    openCharge[i] = markerFixed + digits(lines[i] ?? 0);
+    closeCharge[i] = i >= 1 ? digits(lines[i - 1] ?? 0) : 0;
   }
 
-  // OFFSET bounds how negative net can get mid-pass: net >= −(total marker cost ever
-  // charged). A valid path opens at most ⌊n/6⌋+1 gaps (each closed run is >= 6 lines,
-  // plus one possibly-open trailing run), and each marker costs at most
-  // markerFixed + 2·digits(maxLine). Indexing net at (net + OFFSET) keeps it >= 0. ──
-  const maxGaps = Math.floor(n / 6) + 1;
-  const markerMax = markerFixed + 2 * digits(maxLine);
-  const OFFSET = maxGaps * markerMax;
-  const maxIdx = Rcap + OFFSET; // largest net index (net = Rcap)
-  const netSpan = maxIdx + 1;
-
-  // State encoding. mode 0 = keeping (K), 1 = dropping (D). sawDrop 0/1. runIdx 0..5.
-  //   sidx(mode, sawDrop, runIdx) = ((mode*2)+sawDrop)*6 + runIdx, range 0..23.
-  //   START (no run decided yet) = 24.
+  // ── State encoding (identical to the incumbent). mode 0=keep(K),1=drop(D);
+  //    sawDrop 0/1; runIdx 0..5 (length 1..6+, 5 == "≥6"). sidx∈0..23; START=24.
+  //    Built once into typed transition tables so the hot loop is pure array reads. ────
   const STATES = 25;
   const START = 24;
   const KEEP = 0;
   const DROP = 1;
   const sidx = (mode: number, sawDrop: number, runIdx: number): number => (mode * 2 + sawDrop) * 6 + runIdx;
-  const isDropMode = (s: number): boolean => {
-    if (s === START) return false;
-    return Math.floor(Math.floor(s / 6) / 2) === DROP;
-  };
-
-  // ── RESOURCE GUARD ────────────────────────────────────────────────────────────
-  // The exact band-targeting DP is pseudo-polynomial: its reachability table is
-  // (n+1) × STATES × netSpan cells, where netSpan ≈ Rcap (removable content chars)
-  // plus the small marker OFFSET. For typical source files that is small; for a
-  // pathologically large file it would exhaust memory (or hang) on its way to a
-  // result the caller currently discards. Refuse such an input LOUDLY rather than
-  // crash — compressFile's catch boundary turns this throw into the "use raw"
-  // signal, identical to today's behaviour for those files (no regression) and never
-  // a wrong answer or a relaxed rule. AGENTS.md wants bounded operations; this is
-  // the bound. (Large-file PERFORMANCE — making such files compress rather than fall
-  // back — is a separate, deliberate concern, not this sub-stage's.)
-  const MAX_CELLS = 60_000_000; // ~60MB as Uint8Array, transient and freed per call
-  if ((n + 1) * STATES * netSpan > MAX_CELLS) {
-    throw new Error(
-      `selectDropsToBand: input exceeds the exact-DP size bound ` +
-        `(${n} lines × ${netSpan} net-char states > ${MAX_CELLS} cells). ` +
-        `Degrades to raw upstream.`,
-    );
-  }
-
-  // The DP's transition relation — the SINGLE source of truth for VALIDITY, used by
-  // both the forward fill and the backward reconstruction so they can never diverge.
-  // (The net DELTA for each transition is computed alongside, from the per-line
-  // marker charges below.) keepTarget(s): state after KEEPING a line from s, or -1.
-  const keepTarget = (s: number): number => {
-    if (s === START) return sidx(KEEP, 0, 0); // first line kept: K run len 1, no drop yet
-    const group = Math.floor(s / 6);
-    const runIdx = s % 6;
-    const mode = Math.floor(group / 2);
-    const sawDrop = group % 2;
-    if (mode === KEEP) return sidx(KEEP, sawDrop, Math.min(runIdx + 1, 5)); // extend K run
-    if (runIdx !== 5) return -1; // closing a D run requires it to be >= 6
-    return sidx(KEEP, 1, 0); // a drop has now occurred before this new K run
-  };
-  // dropTarget(s): state after DROPPING a line from s, or -1 if dropping is illegal.
-  // (The caller checks the specific line's eligibility; this is purely structural.)
-  const dropTarget = (s: number): number => {
-    if (s === START) return sidx(DROP, 1, 0); // first line dropped: D run len 1
-    const group = Math.floor(s / 6);
-    const runIdx = s % 6;
-    const mode = Math.floor(group / 2);
-    const sawDrop = group % 2;
-    if (mode === DROP) return sidx(DROP, 1, Math.min(runIdx + 1, 5)); // extend D run
-    // mode === KEEP: closing a K run to open a D run. An interior K run (a drop came
-    // before it, sawDrop=1) must be >= 6; a leading K run (sawDrop=0) has no minimum.
-    if (sawDrop === 1 && runIdx !== 5) return -1;
-    return sidx(DROP, 1, 0);
-  };
-  // accepting(s): may the chain END in state s? Trailing K run = boundary (any len);
-  // trailing D run must be >= 6.
-  const accepting = (s: number): boolean => {
-    if (s === START) return false; // n >= 1 here, so START is never terminal
-    const mode = Math.floor(Math.floor(s / 6) / 2);
-    if (mode === KEEP) return true;
-    return s % 6 === 5; // D run must be >= 6
-  };
-
-  // ── FORWARD FILL. reach[i] is a Uint8Array of STATES*netSpan flags;
-  //    reach[i][s*netSpan + (net + OFFSET)] === 1 iff, after deciding lines 0..i-1,
-  //    we can be in state s having NET-removed exactly `net` chars. (Typed-array
-  //    reads return a number, so only the outer Array<Uint8Array> needs a guard.) ───
-  const reach: Array<Uint8Array> = new Array(n + 1);
-  for (let i = 0; i <= n; i++) reach[i] = new Uint8Array(STATES * netSpan);
-  const layer0 = reach[0];
-  if (layer0 === undefined) throw new Error('selectDropsToBand: layer allocation failed.');
-  layer0[START * netSpan + OFFSET] = 1; // before any line: at START, net 0 (index OFFSET)
-
-  for (let i = 0; i < n; i++) {
-    const cur = reach[i];
-    const next = reach[i + 1];
-    if (cur === undefined || next === undefined) continue; // Rule 6 guard (i is in range)
-    const wi = weights[i] ?? 0;
-    const canDrop = eligible[i] === true;
-    // Per-line marker charges (computed once per line, not per cell):
-    //   openCharge — charged when a gap OPENS at line i (start line = lines[i]);
-    //   closeCharge — charged when a gap CLOSES at line i (end line = lines[i-1]).
-    const openCharge = markerFixed + digits(lines[i] ?? 0);
-    const closeCharge = i >= 1 ? digits(lines[i - 1] ?? 0) : 0;
-    for (let s = 0; s < STATES; s++) {
-      const kt = keepTarget(s);
-      const dt = canDrop ? dropTarget(s) : -1;
-      if (kt < 0 && dt < 0) continue;
-      const keepCloses = kt >= 0 && isDropMode(s); // keeping after a D run closes it
-      const dropOpens = dt >= 0 && !isDropMode(s); // dropping from K/START opens a run
-      const keepDelta = keepCloses ? -closeCharge : 0;
-      const dropDelta = dropOpens ? wi - openCharge : wi;
-      const base = s * netSpan;
-      for (let r = 0; r <= maxIdx; r++) {
-        if (cur[base + r] !== 1) continue;
-        if (kt >= 0) {
-          const nr = r + keepDelta;
-          if (nr >= 0 && nr <= maxIdx) next[kt * netSpan + nr] = 1;
-        }
-        if (dt >= 0) {
-          const nr = r + dropDelta;
-          if (nr >= 0 && nr <= maxIdx) next[dt * netSpan + nr] = 1;
-        }
-      }
-    }
-  }
-
-  const reachN = reach[n];
-  if (reachN === undefined) throw new Error('selectDropsToBand: final layer missing.');
-
-  // A D-run that runs to end-of-file closes THERE (its end line is the last line),
-  // so accepting D-states owe one final close charge that no transition applied.
-  const eofClose = digits(lines[n - 1] ?? 0);
-  const effectiveNet = (s: number, idx: number): number =>
-    idx - OFFSET - (isDropMode(s) ? eofClose : 0);
-
-  // ── CHOOSE the net. In-band: the SMALLEST effective net in [netMin, netMax]
-  //    (gentlest). Otherwise (infeasible): the effective net NEAREST the band,
-  //    smaller net breaking ties. net=0 (drop-nothing) is always reachable, so a
-  //    choice always exists. Iterating states then indices ascending makes the
-  //    representative for any chosen net deterministic (lowest state, lowest index). ─
-  let chosenIdx = -1; // the TRACKED reachability index (pre EOF-close) to reconstruct from
-  let chosenState = -1;
-  let chosenNet = 0; // the EFFECTIVE net removed (what we return / band-check)
-  let bandSatisfied = false;
-  let bestNet = Infinity;
+  const keepTgt = new Int32Array(STATES);
+  const dropTgt = new Int32Array(STATES);
+  const dropMode = new Uint8Array(STATES);
+  const acceptOK = new Uint8Array(STATES);
   for (let s = 0; s < STATES; s++) {
-    if (!accepting(s)) continue;
-    const base = s * netSpan;
-    for (let idx = 0; idx <= maxIdx; idx++) {
-      if (reachN[base + idx] !== 1) continue;
-      const eff = effectiveNet(s, idx);
-      if (eff >= netMin && eff <= netMax && eff < bestNet) {
-        bestNet = eff;
-        chosenIdx = idx;
-        chosenState = s;
-        chosenNet = eff;
-        bandSatisfied = true;
-      }
+    if (s === START) {
+      keepTgt[s] = sidx(KEEP, 0, 0);
+      dropTgt[s] = sidx(DROP, 1, 0);
+      dropMode[s] = 0;
+      acceptOK[s] = 0;
+      continue;
     }
+    const group = Math.floor(s / 6);
+    const runIdx = s % 6;
+    const mode = Math.floor(group / 2);
+    const sawDrop = group % 2;
+    dropMode[s] = mode === DROP ? 1 : 0;
+    if (mode === KEEP) keepTgt[s] = sidx(KEEP, sawDrop, Math.min(runIdx + 1, 5));
+    else if (runIdx === 5) keepTgt[s] = sidx(KEEP, 1, 0);
+    else keepTgt[s] = -1;
+    if (mode === DROP) dropTgt[s] = sidx(DROP, 1, Math.min(runIdx + 1, 5));
+    else if (sawDrop === 1 && runIdx !== 5) dropTgt[s] = -1;
+    else dropTgt[s] = sidx(DROP, 1, 0);
+    acceptOK[s] = mode === KEEP ? 1 : runIdx === 5 ? 1 : 0;
   }
-  if (!bandSatisfied) {
-    let bestDist = Infinity;
-    let bestNetSeen = Infinity;
+
+  // ── CHEAP SCALAR PRE-PASSES: exact minimum and maximum reachable net. Same
+  //    recurrence as the bit DP, tracking only the best net per state. The global
+  //    extrema bound the window without inflating it. O(n·STATES), no net axis. ────────
+  const INF = 0x3fffffff;
+  let curMin = new Int32Array(STATES).fill(INF);
+  let nxtMin = new Int32Array(STATES);
+  let curMax = new Int32Array(STATES).fill(-INF);
+  let nxtMax = new Int32Array(STATES);
+  curMin[START] = 0;
+  curMax[START] = 0;
+  let trueMinNet = 0; // minimum RAW reachable net over all states/layers (≤ 0)
+  let trueMaxRaw = 0; // maximum RAW reachable net over all states/layers (transients included)
+  let trueMaxNet = 0; // maximum EFFECTIVE reachable net over accepting end states
+  for (let i = 0; i < n; i++) {
+    nxtMin.fill(INF);
+    nxtMax.fill(-INF);
+    const wi = wArr[i] ?? 0;
+    const canDrop = eligible[i] === true;
+    const oc = openCharge[i] ?? 0;
+    const cc = closeCharge[i] ?? 0;
     for (let s = 0; s < STATES; s++) {
-      if (!accepting(s)) continue;
-      const base = s * netSpan;
-      for (let idx = 0; idx <= maxIdx; idx++) {
-        if (reachN[base + idx] !== 1) continue;
-        const eff = effectiveNet(s, idx);
-        const dist = eff < netMin ? netMin - eff : eff > netMax ? eff - netMax : 0;
-        if (dist < bestDist || (dist === bestDist && eff < bestNetSeen)) {
-          bestDist = dist;
-          bestNetSeen = eff;
-          chosenIdx = idx;
-          chosenState = s;
-          chosenNet = eff;
+      const vMin = curMin[s] ?? INF;
+      const vMax = curMax[s] ?? -INF;
+      if (vMin === INF && vMax === -INF) continue;
+      const kt = keepTgt[s] ?? -1;
+      const keepDelta = dropMode[s] === 1 ? -cc : 0;
+      if (kt >= 0) {
+        if (vMin !== INF && vMin + keepDelta < (nxtMin[kt] ?? INF)) nxtMin[kt] = vMin + keepDelta;
+        if (vMax !== -INF && vMax + keepDelta > (nxtMax[kt] ?? -INF)) nxtMax[kt] = vMax + keepDelta;
+      }
+      if (canDrop) {
+        const dt = dropTgt[s] ?? -1;
+        if (dt >= 0) {
+          const dropDelta = dropMode[s] === 0 ? wi - oc : wi;
+          if (vMin !== INF && vMin + dropDelta < (nxtMin[dt] ?? INF)) nxtMin[dt] = vMin + dropDelta;
+          if (vMax !== -INF && vMax + dropDelta > (nxtMax[dt] ?? -INF)) nxtMax[dt] = vMax + dropDelta;
         }
       }
     }
+    let tm = curMin; curMin = nxtMin; nxtMin = tm;
+    tm = curMax; curMax = nxtMax; nxtMax = tm;
+    for (let s = 0; s < STATES; s++) {
+      const cm = curMin[s] ?? INF;
+      const cx = curMax[s] ?? -INF;
+      if (cm < trueMinNet) trueMinNet = cm;
+      if (cx !== -INF && cx > trueMaxRaw) trueMaxRaw = cx; // RAW peak (transients)
+    }
   }
-  if (chosenState < 0) throw new Error('selectDropsToBand: no reachable terminal state (internal error).');
+  // trueMaxNet (effective) over ACCEPTING states only (the EOF-close adjustment applies there).
+  const eofClose = digits(lines[n - 1] ?? 0);
+  for (let s = 0; s < STATES; s++) {
+    if (acceptOK[s] !== 1) continue;
+    const cx = curMax[s] ?? -INF;
+    if (cx === -INF) continue;
+    const eff = cx - (dropMode[s] === 1 ? eofClose : 0);
+    if (eff > trueMaxNet) trueMaxNet = eff;
+  }
 
-  // ── RECONSTRUCT. Walk backward from (n, chosenState, chosenIdx), at each line
-  //    finding a predecessor consistent with the forward table — mirroring the SAME
-  //    transitions and net deltas. KEEP is tried first (deterministic, and the
-  //    gentlest move at the margin); a reachable predecessor always exists, so the
-  //    walk never stalls and ends at START with net 0 (index OFFSET). ───────────────
-  const drop: boolean[] = new Array(n).fill(false);
-  let curState = chosenState;
-  let curIdx = chosenIdx;
-  for (let i = n - 1; i >= 0; i--) {
-    const li = reach[i];
-    if (li === undefined) throw new Error('selectDropsToBand: layer missing during reconstruction.');
-    const wi = weights[i] ?? 0;
-    const openCharge = markerFixed + digits(lines[i] ?? 0);
-    const closeCharge = i >= 1 ? digits(lines[i - 1] ?? 0) : 0;
-    let found = false;
-    // KEEP predecessor: keepTarget(p) === curState; its net delta is -closeCharge if
-    // p was dropping (the keep closes that run), else 0.
-    for (let p = 0; p < STATES; p++) {
-      if (keepTarget(p) !== curState) continue;
-      const keepDelta = isDropMode(p) ? -closeCharge : 0;
-      const prevIdx = curIdx - keepDelta;
-      if (prevIdx >= 0 && prevIdx <= maxIdx && li[p * netSpan + prevIdx] === 1) {
-        drop[i] = false;
-        curState = p;
-        curIdx = prevIdx;
-        found = true;
-        break;
+  const windowLo = trueMinNet - 1;
+  const markerMax = markerFixed + 2 * digits(Math.max(1, lines[n - 1] ?? 1));
+  // The window high bound is in RAW net terms. An in-band EFFECTIVE net e (≤ netMax)
+  // can sit at RAW net up to e + eofClose (a drop-to-EOF state), and a run's transient
+  // RAW peak can exceed its final net by a close charge — so the slack covers a marker
+  // and a max line weight on top of eofClose. Capped by the true RAW maximum so we
+  // never over-allocate on sparse inputs.
+  const highSlack = markerMax + maxWeight + eofClose + 1;
+
+  // Count trailing zeros of a non-zero 32-bit word — used to enumerate the set net-bits
+  // when reading the reachability rows. (Local counter `z`, never the outer `n`.)
+  const ctz32 = (b: number): number => {
+    b = b >>> 0;
+    if (b === 0) return 32;
+    let z = 0;
+    if ((b & 0x0000ffff) === 0) { z += 16; b >>>= 16; }
+    if ((b & 0x000000ff) === 0) { z += 8; b >>>= 8; }
+    if ((b & 0x0000000f) === 0) { z += 4; b >>>= 4; }
+    if ((b & 0x00000003) === 0) { z += 2; b >>>= 2; }
+    if ((b & 0x00000001) === 0) { z += 1; }
+    return z;
+  };
+
+  // ── The actual band-targeting solve over a window [windowLo, windowHiTarget].
+  //    windowHi is padded up to a 32-bit boundary so every tracked bit is a valid,
+  //    in-window net. Returns the chosen drop mask + net + band flag, plus the smallest
+  //    effective net it observed strictly ABOVE netMax (or +Inf), so the controller can
+  //    decide whether a wider pass is needed. ───────────────────────────────────────────
+  const solve = (windowHiTarget: number) => {
+    const WORDS = Math.max(1, ((windowHiTarget - windowLo + 1) + 31) >>> 5);
+    const windowHi = windowLo + WORDS * 32 - 1; // real top after word padding
+    const layerWords = STATES * WORDS;
+    const bitForNet = (net: number): number => net - windowLo;
+    const inWindow = (net: number): boolean => net >= windowLo && net <= windowHi;
+
+    const reach = new Uint32Array((n + 1) * layerWords);
+    {
+      const z0 = bitForNet(0);
+      const z0i = START * WORDS + (z0 >>> 5);
+      reach[z0i] = (reach[z0i] ?? 0) | (1 << (z0 & 31));
+    }
+
+    const actLoW = new Int32Array(n + 1);
+    const actHiW = new Int32Array(n + 1);
+    const liveMask = new Int32Array(n + 1);
+    for (let i = 0; i <= n; i++) { actLoW[i] = WORDS; actHiW[i] = -1; liveMask[i] = 0; }
+    {
+      const z0w = bitForNet(0) >>> 5;
+      actLoW[0] = z0w; actHiW[0] = z0w; liveMask[0] = 1 << START;
+    }
+
+    // shift-by-bits (net += delta) then OR, restricted to source live words [sLoW,sHiW];
+    // writes dstSpan{Lo,Hi} (a safe superset of touched dst words) for active-range bookkeeping.
+    // `reach[x] |= y` is written as `reach[x] = (reach[x] ?? 0) | y` so the guarded read
+    // typechecks; for a densely-filled buffer the two are identical (no '!', Rule 6).
+    let dstSpanLo = 0;
+    let dstSpanHi = -1;
+    const shiftOrRange = (dstOff: number, srcOff: number, delta: number, sLoW: number, sHiW: number): void => {
+      if (delta === 0) {
+        for (let w = sLoW; w <= sHiW; w++) reach[dstOff + w] = (reach[dstOff + w] ?? 0) | (reach[srcOff + w] ?? 0);
+        dstSpanLo = sLoW; dstSpanHi = sHiW;
+        return;
+      }
+      if (delta > 0) {
+        const wordShift = delta >>> 5;
+        const bitShift = delta & 31;
+        let lo = sLoW + wordShift;
+        let hi = sHiW + wordShift + (bitShift === 0 ? 0 : 1);
+        if (hi > WORDS - 1) hi = WORDS - 1;
+        if (bitShift === 0) {
+          for (let w = hi; w >= lo; w--) reach[dstOff + w] = (reach[dstOff + w] ?? 0) | (reach[srcOff + w - wordShift] ?? 0);
+        } else {
+          const inv = 32 - bitShift;
+          for (let w = hi; w >= lo; w--) {
+            const k = srcOff + w - wordShift;
+            const a = w - wordShift <= sHiW ? (reach[k] ?? 0) << bitShift : 0;
+            const b = w - wordShift - 1 >= sLoW ? (reach[k - 1] ?? 0) >>> inv : 0;
+            reach[dstOff + w] = (reach[dstOff + w] ?? 0) | ((a | b) >>> 0);
+          }
+        }
+        dstSpanLo = lo; dstSpanHi = hi;
+      } else {
+        const d = -delta;
+        const wordShift = d >>> 5;
+        const bitShift = d & 31;
+        let lo = sLoW - wordShift - (bitShift === 0 ? 0 : 1);
+        let hi = sHiW - wordShift;
+        if (lo < 0) lo = 0;
+        if (hi > WORDS - 1) hi = WORDS - 1;
+        if (bitShift === 0) {
+          for (let w = lo; w <= hi; w++) reach[dstOff + w] = (reach[dstOff + w] ?? 0) | (reach[srcOff + w + wordShift] ?? 0);
+        } else {
+          const inv = 32 - bitShift;
+          for (let w = lo; w <= hi; w++) {
+            const k = srcOff + w + wordShift;
+            const a = w + wordShift <= sHiW ? (reach[k] ?? 0) >>> bitShift : 0;
+            const b = w + wordShift + 1 <= sHiW ? (reach[k + 1] ?? 0) << inv : 0;
+            reach[dstOff + w] = (reach[dstOff + w] ?? 0) | ((a | b) >>> 0);
+          }
+        }
+        dstSpanLo = lo; dstSpanHi = hi;
+      }
+    };
+
+    // ── FORWARD FILL ─────────────────────────────────────────────────────────────────
+    for (let i = 0; i < n; i++) {
+      const curLayer = i * layerWords;
+      const nextLayer = (i + 1) * layerWords;
+      const wi = wArr[i] ?? 0;
+      const canDrop = eligible[i] === true;
+      const oc = openCharge[i] ?? 0;
+      const cc = closeCharge[i] ?? 0;
+      const sLoW = actLoW[i] ?? WORDS;
+      const sHiW = actHiW[i] ?? -1;
+      if (sHiW < sLoW) continue;
+      const live = liveMask[i] ?? 0;
+      let nLive = 0;
+      let nLoW = WORDS;
+      let nHiW = -1;
+      for (let s = 0; s < STATES; s++) {
+        if ((live & (1 << s)) === 0) continue;
+        const srcOff = curLayer + s * WORDS;
+        const sDrop = dropMode[s] === 1;
+        const kt = keepTgt[s] ?? -1;
+        if (kt >= 0) {
+          shiftOrRange(nextLayer + kt * WORDS, srcOff, sDrop ? -cc : 0, sLoW, sHiW);
+          nLive |= 1 << kt;
+          if (dstSpanLo < nLoW) nLoW = dstSpanLo;
+          if (dstSpanHi > nHiW) nHiW = dstSpanHi;
+        }
+        if (canDrop) {
+          const dt = dropTgt[s] ?? -1;
+          if (dt >= 0) {
+            shiftOrRange(nextLayer + dt * WORDS, srcOff, sDrop ? wi : wi - oc, sLoW, sHiW);
+            nLive |= 1 << dt;
+            if (dstSpanLo < nLoW) nLoW = dstSpanLo;
+            if (dstSpanHi > nHiW) nHiW = dstSpanHi;
+          }
+        }
+      }
+      liveMask[i + 1] = nLive;
+      actLoW[i + 1] = nLoW;
+      actHiW[i + 1] = nHiW;
+    }
+
+    // ── CHOOSE the net. In-band: smallest effective net in [netMin,netMax]. Else:
+    //    effective net nearest the band, smaller net breaking ties. Also record the
+    //    smallest effective net strictly above netMax that we saw (aboveSeen). ──────────
+    const finalLayer = n * layerWords;
+    let chosenState = -1;
+    let chosenNetRaw = 0;
+    let chosenNet = 0;
+    let bandSatisfied = false;
+    let bestNet = Infinity;
+    let aboveSeen = Infinity;
+    const aLo0 = actLoW[n] ?? 0;
+    const aHi0 = actHiW[n] ?? -1;
+    const aLo = aLo0 < 0 ? 0 : aLo0;
+    const aHi = aHi0 < 0 ? -1 : aHi0;
+    for (let s = 0; s < STATES; s++) {
+      if (acceptOK[s] !== 1) continue;
+      const base = finalLayer + s * WORDS;
+      const eofAdj = dropMode[s] === 1 ? -eofClose : 0;
+      for (let w = aLo; w <= aHi; w++) {
+        let bits = reach[base + w] ?? 0;
+        while (bits !== 0) {
+          const b = bits & -bits;
+          const bitIdx = (w << 5) + ctz32(b);
+          bits ^= b;
+          const eff = bitIdx + windowLo + eofAdj;
+          if (eff > netMax && eff < aboveSeen) aboveSeen = eff;
+          if (eff >= netMin && eff <= netMax && eff < bestNet) {
+            bestNet = eff;
+            chosenState = s;
+            chosenNetRaw = bitIdx + windowLo;
+            chosenNet = eff;
+            bandSatisfied = true;
+          }
+        }
       }
     }
-    if (!found && eligible[i] === true) {
-      // DROP predecessor: dropTarget(p) === curState; its net delta is wi - openCharge
-      // if p was keeping/START (the drop opens a run), else wi (extends a run).
+    if (!bandSatisfied) {
+      let bestDist = Infinity;
+      let bestNetSeen = Infinity;
+      for (let s = 0; s < STATES; s++) {
+        if (acceptOK[s] !== 1) continue;
+        const base = finalLayer + s * WORDS;
+        const eofAdj = dropMode[s] === 1 ? -eofClose : 0;
+        for (let w = aLo; w <= aHi; w++) {
+          let bits = reach[base + w] ?? 0;
+          while (bits !== 0) {
+            const b = bits & -bits;
+            const bitIdx = (w << 5) + ctz32(b);
+            bits ^= b;
+            const eff = bitIdx + windowLo + eofAdj;
+            const dist = eff < netMin ? netMin - eff : eff > netMax ? eff - netMax : 0;
+            if (dist < bestDist || (dist === bestDist && eff < bestNetSeen)) {
+              bestDist = dist;
+              bestNetSeen = eff;
+              chosenState = s;
+              chosenNetRaw = bitIdx + windowLo;
+              chosenNet = eff;
+            }
+          }
+        }
+      }
+    }
+    if (chosenState < 0) throw new Error('selectDropsToBand: no reachable terminal state (internal error).');
+
+    // ── RECONSTRUCT backward, mirroring the forward transitions/deltas. KEEP first. ────
+    const drop: boolean[] = new Array(n).fill(false);
+    let curState = chosenState;
+    let curNet = chosenNetRaw;
+    for (let i = n - 1; i >= 0; i--) {
+      const layerOff = i * layerWords;
+      const wi = wArr[i] ?? 0;
+      const oc = openCharge[i] ?? 0;
+      const cc = closeCharge[i] ?? 0;
+      let found = false;
       for (let p = 0; p < STATES; p++) {
-        if (dropTarget(p) !== curState) continue;
-        const dropDelta = !isDropMode(p) ? wi - openCharge : wi;
-        const prevIdx = curIdx - dropDelta;
-        if (prevIdx >= 0 && prevIdx <= maxIdx && li[p * netSpan + prevIdx] === 1) {
-          drop[i] = true;
-          curState = p;
-          curIdx = prevIdx;
-          found = true;
-          break;
+        if (keepTgt[p] !== curState) continue;
+        const keepDelta = dropMode[p] === 1 ? -cc : 0;
+        const prevNet = curNet - keepDelta;
+        if (inWindow(prevNet)) {
+          const bi = bitForNet(prevNet);
+          if (((reach[layerOff + p * WORDS + (bi >>> 5)] ?? 0) >>> (bi & 31)) & 1) {
+            drop[i] = false;
+            curState = p;
+            curNet = prevNet;
+            found = true;
+            break;
+          }
         }
       }
+      if (!found && eligible[i] === true) {
+        for (let p = 0; p < STATES; p++) {
+          if (dropTgt[p] !== curState) continue;
+          const dropDelta = dropMode[p] === 0 ? wi - oc : wi;
+          const prevNet = curNet - dropDelta;
+          if (inWindow(prevNet)) {
+            const bi = bitForNet(prevNet);
+            if (((reach[layerOff + p * WORDS + (bi >>> 5)] ?? 0) >>> (bi & 31)) & 1) {
+              drop[i] = true;
+              curState = p;
+              curNet = prevNet;
+              found = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!found) throw new Error('selectDropsToBand: reconstruction failed — DP table inconsistency.');
     }
-    if (!found) throw new Error('selectDropsToBand: reconstruction failed — DP table inconsistency.');
-  }
-  if (curState !== START || curIdx !== OFFSET) {
-    throw new Error('selectDropsToBand: reconstruction did not terminate at START with net 0.');
-  }
+    if (curState !== START || curNet !== 0) {
+      throw new Error('selectDropsToBand: reconstruction did not terminate at START with net 0.');
+    }
 
-  return { drop, netRemoved: chosenNet, bandSatisfied };
+    return { drop, netRemoved: chosenNet, bandSatisfied, aboveSeen, windowHi };
+  };
+
+  // ── CONTROLLER. Phase 1: the tight slack window (cheap). It is EXACT whenever the
+  //    band is feasible (in-band needs only nets ≤ netMax, all captured), and whenever
+  //    the true nearest legal net is ≤ the window top. The only case it can miss is an
+  //    INFEASIBLE band whose nearest legal net is the smallest reachable value strictly
+  //    above the window — which requires a reachable "desert" wider than the slack just
+  //    above netMax, i.e. a sparse reachable set (few eligible lines ⇒ small Rcap). In
+  //    that case Phase 2 widens to the full reachable range (cheap precisely because it
+  //    is sparse) and is exact. We never throw for size; we recompute. ──────────────────
+  const phase1Target = Math.min(trueMaxRaw, netMax + highSlack);
+  const r1 = solve(phase1Target);
+  if (r1.bandSatisfied) {
+    return { drop: r1.drop, netRemoved: r1.netRemoved, bandSatisfied: r1.bandSatisfied };
+  }
+  // Infeasible. Phase 1's nearest is taken over the whole window, so it already has the
+  // exact best candidate at-or-below netMax (net=0 is always reachable) AND — if any
+  // reachable net lies strictly above netMax within the window — the SMALLEST such value
+  // (aboveSeen); a smaller above-band value cannot exist beyond the window since beyond
+  // means a larger net. So Phase 1 is exact when either it spanned the full reachable
+  // range (sawEverything) or it observed an above-band value (the true smallest-above is
+  // then in-window). The only gap: no above-band value in-window AND the window did not
+  // reach the top — then the true nearest could be an above-band net beyond the window
+  // (possible only when the reachable set is sparse — a "desert" above netMax — i.e. few
+  // eligible lines ⇒ small range ⇒ Phase 2 is cheap). We re-solve full; never throw.
+  const sawEverything = r1.windowHi >= trueMaxRaw;
+  if (sawEverything || Number.isFinite(r1.aboveSeen)) {
+    return { drop: r1.drop, netRemoved: r1.netRemoved, bandSatisfied: r1.bandSatisfied };
+  }
+  const r2 = solve(trueMaxRaw);
+  return { drop: r2.drop, netRemoved: r2.netRemoved, bandSatisfied: r2.bandSatisfied };
 }
 
 /**
