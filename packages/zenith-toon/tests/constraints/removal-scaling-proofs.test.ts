@@ -46,7 +46,7 @@ import {
   type RemovalMetadata,
 } from '../../src/removal.js';
 import type { Payload, SourceBlock } from '../../src/compress-source.js';
-import { runsValid, netOf, STATES } from '../../bench/invariants.js';
+import { runsValid, netOf, STATES } from './removal-corpus.js';
 
 // Generous per-test timeout: each giant case allocates a few-hundred-MiB scaled reach
 // table (comparable to the fen suite's n=2000 case at ~203 MiB) and runs in well under a

@@ -1,10 +1,10 @@
 // removal-fen-proofs.test.ts — PRODUCTION-PATH verification of the transplanted
 // fen packed-bitset / tight-window `selectDropsToBand` (now living in
-// src/removal.ts). This suite NEVER imports the bench fen module — it drives the
+// src/removal.ts). This suite NEVER imports a bench module — it drives the
 // REAL exported engine functions (`removalEngine`, `selectDropsToBand`,
 // `verifyOutput`) and the REAL render (removalEngine emits the output exactly as
-// production does). It mirrors the bench corpus generators (bench/corpus.ts) for
-// reproducible inputs across the full size sweep × the four eligibility profiles.
+// production does). It uses the co-located corpus generators (./removal-corpus.ts)
+// for reproducible inputs across the full size sweep × the four eligibility profiles.
 //
 // It does NOT redo the optimality proof (that lives in
 // removal-dp-optimality.test.ts and already passes against brute force). Here we
@@ -27,7 +27,7 @@ import { describe, it, expect } from 'vitest';
 
 import { removalEngine, selectDropsToBand, verifyOutput, type RemovalMetadata } from '../../src/removal.js';
 import type { Payload, SourceBlock } from '../../src/compress-source.js';
-import { sweepCases, PROFILES, type Case } from '../../bench/corpus.js';
+import { sweepCases, PROFILES, type Case } from './removal-corpus.js';
 
 // The exact size sweep the task specifies (also the corpus default). Mixed bodies.
 const SIZES: readonly number[] = [60, 120, 200, 340, 420, 600, 800, 1000, 1250, 1500, 2000];
