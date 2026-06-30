@@ -69,6 +69,13 @@ jobs:
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
+
+        # Exclude legacy/archived test stubs and test result artifacts
+        paths-ignore:
+          - '**/tests/_legacy_old_arch/**'
+          - '**/_legacy_old_arch/**'
+          - 'test-results/**'
+          - '**/*.junit.xml'
         # If you wish to specify custom queries, you can do so here or in a config file.
         # By default, queries listed here will override any specified in a config file.
         # Prefix the list here with "+" to use these queries and those in the config file.
