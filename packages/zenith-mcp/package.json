@@ -63,7 +63,7 @@
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "^4.1.8",
     "shx": "^0.4.0",
-    "tree-sitter-cli": "^0.26.9",
+    "tree-sitter-cli": "^0.26.10",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   }
