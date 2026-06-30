@@ -58,27 +58,47 @@ describe('compressForTool keep-ratio floor', () => {
 
     // Replacement for: "defaults to 0.70"
     it('output length reflects ~70% keep-ratio floor: shorter than input but >= 70% of input', async () => {
-        // Build text that is definitely compressible but long enough to exercise the floor.
-        const lines = [];
-        for (let i = 1; i <= 60; i++) lines.push(`  // comment line ${i} — filler text padding`);
-        lines.unshift('function bigComment() {');
+        // toon's structured engine compresses against the FACTS (defs/edges) MCP
+        // resolves from its symbol index — without defs there is no structure to
+        // rank, so it honestly returns "use raw" (null). compressForTool resolves
+        // those facts from the repo DB, which requires a repo root: give the temp
+        // dir a `.git` marker so findRepoRoot anchors here and on-demand indexing
+        // produces the defs the engine needs.
+        await fs.mkdir(path.join(tmpDir, '.git'));
+
+        // Two small public functions separated by a low-value padding gap. The
+        // exported functions are kept; the padding run between them is the
+        // droppable ~30% that exercises the keep-ratio band.
+        const lines = ['export function alpha() {'];
+        for (let i = 0; i < 5; i++) lines.push(`  const a${i} = ${i};`);
+        lines.push('  return 1;');
+        lines.push('}');
+        for (let i = 0; i < 20; i++) lines.push(`const _padding${i} = 'xxxxxxxxxx';`);
+        lines.push('export function beta() {');
+        for (let i = 0; i < 5; i++) lines.push(`  const b${i} = ${i};`);
+        lines.push('  return 2;');
         lines.push('}');
         const rawText = lines.join('\n');
         // Ensure text is a .js file so getLangForFile returns 'javascript'
         const filePath = path.join(tmpDir, 'fixture.js');
         await fs.writeFile(filePath, rawText);
 
-        const maxChars = rawText.length; // maxChars == len → compressForTool returns null (no-op)
-        // Use maxChars smaller than rawText.length to trigger compression
-        const tightMax = Math.floor(rawText.length * 0.55); // force compression path
-        const result = await compressForTool(filePath, rawText, tightMax);
+        // compressForTool consumes the ALREADY `N. `-prefixed text that read_file
+        // produces (read_file is the single prefix authority across the seam); it
+        // strips the prefix for indexing and hands the prefixed copy to toon, whose
+        // verifyOutput requires every kept line to carry its number. Mirror that here.
+        const prefixed = rawText.split('\n').map((l, i) => `${i + 1}. ${l}`).join('\n');
 
-        // toon's 70% floor means the actual budget used is max(tightMax, floor(len*0.70))
-        // so result is non-null and its length is < rawText.length but the floor
-        // prevents it going below 70% of rawText.length.
+        // Use maxChars smaller than the text length to trigger the compression path.
+        const tightMax = Math.floor(prefixed.length * 0.55); // force compression path
+        const result = await compressForTool(filePath, prefixed, tightMax);
+
+        // toon's keep-ratio band means the actual budget used is bounded near the
+        // 70% floor, so result is non-null and its length is < the input length but
+        // the floor prevents it going below ~70% of the input length.
         expect(result).not.toBeNull();
-        expect(result.length).toBeLessThan(rawText.length);
-        expect(result.length).toBeGreaterThanOrEqual(Math.floor(rawText.length * 0.60));
+        expect(result.length).toBeLessThan(prefixed.length);
+        expect(result.length).toBeGreaterThanOrEqual(Math.floor(prefixed.length * 0.60));
     });
 });
 
