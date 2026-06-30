@@ -21,12 +21,15 @@ updates:
         patterns:
           - "*"
 
-  # ── npm (all packages — root + workspaces) ──────────────────────────────────
-  # A single entry pointing at "/" with `directories` covering every npm manifest.
-  # Dependabot merges all workspace bumps into ONE PR per group instead of one
-  # PR per package × group.
+  # ── npm (root + every workspace, consolidated) ──────────────────────────────
+  # `directories` covers every npm manifest (root + workspaces). Combined with
+  # the groups below, Dependabot merges all workspace bumps into ONE PR per
+  # group across all directories instead of one PR per package × group.
   - package-ecosystem: "npm"
-    directory: "/"
+    directories:
+      - "/"
+      - "/packages/zenith-mcp"
+      - "/packages/zenith-toon"
     schedule:
       interval: "weekly"
       day: "tuesday"
