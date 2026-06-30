@@ -1,217 +1,152 @@
 import { describe, expect, it } from 'vitest';
 
-import { compressSourceStructured } from 'zenith-toon';
-
-// ---------------------------------------------------------------------------
-// Priority-0 invariant tests for the structured-source compression path.
-//
-// These assert directly on real `compressSourceStructured` output:
-//   - every non-marker line is `N. <verbatim content>` (1-based, character-exact)
-//   - markers are exactly `[TRUNCATED: lines X-Y]`, flush-left, ascending,
-//     non-overlapping with shown line numbers
-//   - no two markers sandwich fewer than 6 shown non-blank lines
-//   - the inline Phase-H assertion never throws on valid input
-// Fixtures are tiny and inline; budgets are tight so omissions are forced.
-// ---------------------------------------------------------------------------
+import { compressFile } from 'zenith-toon';
 
 const MARKER_RE = /^\[TRUNCATED: lines (\d+)-(\d+)\]$/;
 const SHOWN_RE = /^(\d+)\. ([\s\S]*)$/;
+const MIN_OMISSION_THRESHOLD = 6;
 
-/** Build a StructureBlock; 0-based start/end inclusive, matching toon's types. */
-function block(name, kind, startLine, endLine, exported, anchors = []) {
-  return { name, kind, type: kind, startLine, endLine, exported, anchors };
+function numberLines(lines) {
+  return lines.map((line, index) => `${index + 1}. ${line}`).join('\n');
 }
 
-function anchor(startLine, endLine, kind = 'return', priority = 300) {
-  return { startLine, endLine, kind, priority };
+function makeFacts(defs, extra = {}) {
+  return {
+    path: 'src/priority0-fixture.ts',
+    langName: 'typescript',
+    defs: defs.map((def) => ({
+      name: def.name,
+      kind: 'def',
+      type: 'function',
+      line: def.line,
+      endLine: def.endLine,
+      visibility: 'public',
+      captureTag: null,
+    })),
+    references: [],
+    edges: [],
+    referenceEdges: [],
+    anchors: [],
+    imports: [],
+    injections: [],
+    scopes: [],
+    ...extra,
+  };
 }
 
-/**
- * Parse + validate the four Priority-0 invariants against the original source.
- * Returns the parsed marker ranges and shown line numbers for further asserts.
- */
-function assertPriority0(original, compressed) {
-  const origLines = original.split('\n');
-  const outLines = compressed.split('\n');
+function buildFunctionFixture() {
+  const rawLines = [];
+  const defs = [];
+  for (let fn = 0; fn < 12; fn += 1) {
+    const start = rawLines.length + 1;
+    rawLines.push(`export function fn${fn}() {`);
+    for (let i = 0; i < 10; i += 1) {
+      rawLines.push(`  const v${fn}_${i} = "xxxxxxxxxxxxxxxxxxxx";`);
+    }
+    rawLines.push(`  return v${fn}_0;`);
+    rawLines.push('}');
+    defs.push({ name: `fn${fn}`, line: start, endLine: rawLines.length });
+  }
+  return { rawLines, source: numberLines(rawLines), facts: makeFacts(defs) };
+}
 
-  const shownNumbers = [];
-  const markerRanges = [];
-  // Tracks count of shown NON-BLANK lines since the previous marker.
-  let nonBlankSincePrevMarker = 0;
-  let sawMarker = false;
-
-  for (const line of outLines) {
-    const m = MARKER_RE.exec(line);
-    if (m) {
-      // No indentation/prefix allowed: the literal must equal the matched form.
-      expect(line).toBe(`[TRUNCATED: lines ${m[1]}-${m[2]}]`);
-      const x = Number(m[1]);
-      const y = Number(m[2]);
-      expect(x).toBeLessThanOrEqual(y); // valid inclusive range
-
-      // No two markers may sandwich < 6 shown non-blank lines.
-      if (sawMarker) {
-        expect(nonBlankSincePrevMarker).toBeGreaterThanOrEqual(6);
-      }
-      sawMarker = true;
-      nonBlankSincePrevMarker = 0;
-      markerRanges.push([x, y]);
+function parseOutput(output) {
+  const visible = [];
+  const markers = [];
+  const outputLines = output.split('\n');
+  for (let index = 0; index < outputLines.length; index += 1) {
+    const line = outputLines[index];
+    const marker = MARKER_RE.exec(line);
+    if (marker !== null) {
+      markers.push({ index, x: Number(marker[1]), y: Number(marker[2]) });
       continue;
     }
-
-    const s = SHOWN_RE.exec(line);
-    expect(s, `every non-marker line must be "N. ...": got ${JSON.stringify(line)}`).not.toBeNull();
-    const num = Number(s[1]);
-    const content = s[2];
-    // Verbatim: content after the prefix equals the original line at that number.
-    expect(content).toBe(origLines[num - 1]);
-    shownNumbers.push(num);
-    if (content.trim() !== '') nonBlankSincePrevMarker += 1;
+    const shown = SHOWN_RE.exec(line);
+    expect(shown, `every non-marker line must be "N. ...": ${JSON.stringify(line)}`).not.toBeNull();
+    visible.push({ index, n: Number(shown[1]), text: line });
   }
-
-  // Shown line numbers strictly ascending.
-  for (let i = 1; i < shownNumbers.length; i++) {
-    expect(shownNumbers[i]).toBeGreaterThan(shownNumbers[i - 1]);
-  }
-
-  // Marker ranges ascending, non-overlapping, and disjoint from shown lines.
-  const shownSet = new Set(shownNumbers);
-  let prevHi = 0;
-  for (const [x, y] of markerRanges) {
-    expect(x).toBeGreaterThan(prevHi); // ascending + non-overlapping
-    prevHi = y;
-    for (let ln = x; ln <= y; ln++) {
-      expect(shownSet.has(ln)).toBe(false); // truncated ranges hold no shown lines
-    }
-  }
-
-  return { shownNumbers, markerRanges };
+  return { outputLines, visible, markers };
 }
 
-describe('compressSourceStructured — Priority-0 output invariants', () => {
-  it('TS fixture: N. verbatim prefixes, flush-left TRUNCATED markers, no <6 sliver', () => {
-    // 40-line TS file: two real functions separated by a long dead middle so a
-    // tight budget must drop the middle and emit a marker.
-    const tsLines = [];
-    tsLines.push(`import { foo } from './foo';`);          // 1
-    tsLines.push(`import { bar } from './bar';`);           // 2
-    tsLines.push(``);                                       // 3
-    tsLines.push(`export function alpha(x: number): number {`); // 4
-    tsLines.push(`  const a = x + 1;`);                     // 5
-    tsLines.push(`  const b = a * 2;`);                     // 6
-    tsLines.push(`  const c = b - 3;`);                     // 7
-    tsLines.push(`  return c;`);                            // 8
-    tsLines.push(`}`);                                      // 9
-    for (let i = 10; i <= 31; i++) {
-      tsLines.push(`const dead${i} = ${i}; // filler line ${i} kept long enough to cost budget`);
+function assertPriority0(source, output) {
+  const sourceLines = source.split('\n');
+  const { outputLines, visible, markers } = parseOutput(output);
+  expect(markers.length, 'fixture must exercise at least one omission marker').toBeGreaterThan(0);
+
+  for (let i = 1; i < visible.length; i += 1) {
+    expect(visible[i].n).toBeGreaterThan(visible[i - 1].n);
+  }
+
+  for (const shown of visible) {
+    expect(shown.text).toBe(sourceLines[shown.n - 1]);
+  }
+
+  const shownSet = new Set(visible.map((line) => line.n));
+  let previousMarkerEnd = 0;
+  for (const marker of markers) {
+    expect(outputLines[marker.index]).toBe(`[TRUNCATED: lines ${marker.x}-${marker.y}]`);
+    expect(marker.x).toBeLessThanOrEqual(marker.y);
+    expect(marker.x).toBeGreaterThan(previousMarkerEnd);
+    previousMarkerEnd = marker.y;
+    for (let line = marker.x; line <= marker.y; line += 1) {
+      expect(shownSet.has(line), `marker ${marker.x}-${marker.y} overlaps shown line ${line}`).toBe(false);
     }
-    tsLines.push(`export function beta(y: number): number {`); // 32
-    tsLines.push(`  const p = y * 10;`);                    // 33
-    tsLines.push(`  const q = p + 7;`);                     // 34
-    tsLines.push(`  const r = q - 2;`);                     // 35
-    tsLines.push(`  const s = r / 1;`);                     // 36
-    tsLines.push(`  const t = s + 0;`);                     // 37
-    tsLines.push(`  return t;`);                            // 38
-    tsLines.push(`}`);                                      // 39
-    tsLines.push(``);                                       // 40
-    const ts = tsLines.join('\n');
+  }
 
-    // 0-based inclusive lines. alpha: 3..8, beta: 31..38 (with return anchors).
-    const structure = [
-      block('alpha', 'function', 3, 8, true, [anchor(7, 7)]),
-      block('beta', 'function', 31, 38, true, [anchor(37, 37)]),
-    ];
+  let expectedLine = 1;
+  for (const line of outputLines) {
+    const marker = MARKER_RE.exec(line);
+    if (marker !== null) {
+      const x = Number(marker[1]);
+      const y = Number(marker[2]);
+      expect(x).toBe(expectedLine);
+      expect(y - x + 1).toBeGreaterThanOrEqual(MIN_OMISSION_THRESHOLD);
+      expectedLine = y + 1;
+      continue;
+    }
+    const shown = SHOWN_RE.exec(line);
+    expect(shown).not.toBeNull();
+    expect(Number(shown[1])).toBe(expectedLine);
+    expectedLine += 1;
+  }
+  expect(expectedLine).toBe(sourceLines.length + 1);
 
-    const budget = Math.floor(ts.length * 0.45); // below 0.70 floor → floor governs
-    const out = compressSourceStructured(ts, budget, structure);
+  for (let i = 1; i < markers.length; i += 1) {
+    const previous = markers[i - 1];
+    const current = markers[i];
+    const visibleBetween = visible.filter((line) => line.index > previous.index && line.index < current.index).length;
+    expect(visibleBetween).toBeGreaterThanOrEqual(MIN_OMISSION_THRESHOLD);
+  }
+}
 
-    // Must have actually compressed (markers present) given the tight budget.
-    expect(out).toMatch(/\[TRUNCATED: lines \d+-\d+\]/);
-    const { markerRanges } = assertPriority0(ts, out);
-    expect(markerRanges.length).toBeGreaterThanOrEqual(1);
+describe('compressFile — Priority-0 output invariants', () => {
+  it('emits only verbatim numbered source lines and exact ranged markers', () => {
+    const { source, facts } = buildFunctionFixture();
+    const output = compressFile({ source, maxChars: Math.floor(source.length * 0.7), facts });
+
+    expect(output).not.toBeNull();
+    assertPriority0(source, output);
   });
 
-  it('Python fixture: verbatim mapping holds and markers cover real ranges', () => {
-    const pyLines = [];
-    pyLines.push(`import os`);                              // 1
-    pyLines.push(`import sys`);                             // 2
-    pyLines.push(``);                                       // 3
-    pyLines.push(`def compute(values):`);                  // 4
-    pyLines.push(`    total = 0`);                          // 5
-    pyLines.push(`    for v in values:`);                   // 6
-    pyLines.push(`        total += v`);                     // 7
-    pyLines.push(`    return total`);                       // 8
-    pyLines.push(``);                                       // 9
-    for (let i = 10; i <= 33; i++) {
-      pyLines.push(`_unused_${i} = ${i}  # padding constant number ${i} to consume budget`);
-    }
-    pyLines.push(`def summarize(rows):`);                   // 34
-    pyLines.push(`    acc = []`);                           // 35
-    pyLines.push(`    for r in rows:`);                     // 36
-    pyLines.push(`        acc.append(r * 2)`);              // 37
-    pyLines.push(`        acc.append(r + 1)`);              // 38
-    pyLines.push(`    result = sum(acc)`);                  // 39
-    pyLines.push(`    return result`);                      // 40
-    const py = pyLines.join('\n');
+  it('keeps the rendered output in the current 68-72% retention band', () => {
+    const { source, facts } = buildFunctionFixture();
+    const output = compressFile({ source, maxChars: Math.floor(source.length * 0.7), facts });
 
-    // compute: 3..7 (return anchor 7), summarize: 33..39 (return anchor 39).
-    const structure = [
-      block('compute', 'function', 3, 7, true, [anchor(7, 7)]),
-      block('summarize', 'function', 33, 39, true, [anchor(39, 39)]),
-    ];
-
-    const budget = Math.floor(py.length * 0.5);
-    const out = compressSourceStructured(py, budget, structure);
-
-    expect(out).toMatch(/\[TRUNCATED: lines \d+-\d+\]/);
-    assertPriority0(py, out);
+    expect(output).not.toBeNull();
+    const ratio = output.length / source.length;
+    expect(ratio).toBeGreaterThanOrEqual(0.68);
+    expect(ratio).toBeLessThanOrEqual(0.72);
   });
 
-  it('Phase-H never throws and emits no <6 shown sliver between two markers', () => {
-    // Force a configuration that, before sliver settling, would leave a tiny
-    // shown island (a single anchor line) between two omitted regions. The
-    // settle step must either expand it to >=6 or drop it — never leave a <6
-    // sliver — and the assertion must not throw.
-    const lines = [];
-    for (let i = 1; i <= 12; i++) lines.push(`head_filler_${i} = ${i}  # leading filler ${i}`); // 1..12
-    lines.push(`def important(a, b, c):`);   // 13
-    lines.push(`    x = a + b`);              // 14
-    lines.push(`    y = x + c`);              // 15
-    lines.push(`    return y`);               // 16 (anchor)
-    for (let i = 17; i <= 40; i++) lines.push(`tail_filler_${i} = ${i}  # trailing filler ${i}`); // 17..40
-    const src = lines.join('\n');
-
-    // Only one tiny important block (with a return anchor) in the middle.
-    const structure = [
-      block('important', 'function', 12, 15, true, [anchor(15, 15)]),
+  it('returns null instead of fabricating compression when no useful drop is possible', () => {
+    const rawLines = [
+      'export function tiny() {',
+      '  return 1;',
+      '}',
     ];
+    const source = numberLines(rawLines);
+    const facts = makeFacts([{ name: 'tiny', line: 1, endLine: 3 }]);
 
-    const budget = Math.floor(src.length * 0.4);
-    // Must not throw the Phase-H assertion on this valid input.
-    const out = compressSourceStructured(src, budget, structure);
-
-    const { markerRanges } = assertPriority0(src, out);
-    // If two markers exist, assertPriority0 already enforced the >=6 sliver rule.
-    // Confirm the important anchor line content is verbatim if shown.
-    if (out.includes('16. ')) {
-      const m = /^16\. (.*)$/m.exec(out);
-      expect(m[1]).toBe('    return y');
-    }
-    expect(Array.isArray(markerRanges)).toBe(true);
-  });
-
-  it('does not throw on a fixture where everything fits (no markers, all verbatim)', () => {
-    const lines = [
-      `export const A = 1;`,
-      `export const B = 2;`,
-      `export function tiny() {`,
-      `  return A + B;`,
-      `}`,
-    ];
-    const src = lines.join('\n');
-    const structure = [block('tiny', 'function', 2, 4, true, [anchor(3, 3)])];
-    // Generous budget: text.length <= budget → returns text unchanged.
-    const out = compressSourceStructured(src, src.length + 100, structure);
-    expect(out).toBe(src); // unchanged, no markers, fully verbatim
+    expect(compressFile({ source, maxChars: source.length + 100, facts })).toBeNull();
   });
 });
