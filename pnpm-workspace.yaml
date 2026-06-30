@@ -3,6 +3,8 @@ packages:
 allowBuilds:
   tree-sitter-cli: true
 
+minimumReleaseAge: 0
+
 # Security overrides for transitive deps flagged by Dependabot (not reachable in
 # Zenith's own code — no CORS/Lambda/cookies; HTTP is Express + bearer auth — but
 # pinned to patched versions to clear the alerts).
