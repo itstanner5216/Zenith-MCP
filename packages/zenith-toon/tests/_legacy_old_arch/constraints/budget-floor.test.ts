@@ -51,7 +51,7 @@ describe('Usefulness gate — TOON owns the "not useful" decision', () => {
     const out = compressFile({
       source: '',
       maxChars: 100,
-      facts: { path: 'x.ts', langName: 'typescript', defs: [], edges: [], anchors: [], imports: [], injections: [] },
+      facts: { path: 'x.ts', langName: 'typescript', defs: [], references: [], edges: [], referenceEdges: [], anchors: [], imports: [], injections: [], scopes: [] },
     });
     expect(out).toBeNull();
   });
@@ -63,7 +63,7 @@ describe('Usefulness gate — TOON owns the "not useful" decision', () => {
     const out = compressFile({
       source,
       maxChars: Math.floor(source.length * 0.3),
-      facts: { path: 'x.unknown', langName: null, defs: [], edges: [], anchors: [], imports: [], injections: [] },
+      facts: { path: 'x.unknown', langName: null, defs: [], references: [], edges: [], referenceEdges: [], anchors: [], imports: [], injections: [], scopes: [] },
     });
     expect(out).not.toBeNull();
     expect((out as string).length).toBeLessThan(source.length);
@@ -81,7 +81,7 @@ describe('Usefulness gate — TOON owns the "not useful" decision', () => {
           name: b.name, kind: 'def' as const, type: b.type,
           line: b.startLine + 1, endLine: b.endLine + 1, visibility: 'public', captureTag: null,
         })),
-        edges: [], anchors: [], imports: [], injections: [],
+        references: [], edges: [], referenceEdges: [], anchors: [], imports: [], injections: [], scopes: [],
       },
     });
     // Either useful compression (non-null) respecting the floor, or null when the

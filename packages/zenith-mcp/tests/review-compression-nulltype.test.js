@@ -88,18 +88,10 @@ describe('compression null-type guard (review finding #8)', () => {
 
             const db = getDb(resolvedRoot);
 
-            // A compressible, source-like file: several exported functions, one
-            // with a long low-value padding body the structural engine drops. Each
-            // def's `type` is set from its capture tag (the normal non-null case).
-            const fns = [['alpha', 2], ['beta', 40], ['gamma', 2], ['delta', 3]];
-            const srcLines = [];
-            for (const [name, bulk] of fns) {
-                srcLines.push(`export function ${name}(input) {`);
-                for (let i = 0; i < bulk; i++) srcLines.push(`  const ${name}_pad${i} = input + ${i};`);
-                srcLines.push(`  return ${name}_pad0;`);
-                srcLines.push('}');
-            }
-            const rawText = srcLines.join('\n');
+            // A compressible, source-like file with one indexed def whose
+            // `type` is set (the normal case — capture-tag-derived).
+            const lines = Array.from({ length: 200 }, (_, i) => `export const value${i} = ${i};`);
+            const rawText = lines.join('\n');
             const relPath = 'src/large.ts';
             const absPath = path.join(resolvedRoot, relPath);
             await fs.mkdir(path.dirname(absPath), { recursive: true });
@@ -107,35 +99,29 @@ describe('compression null-type guard (review finding #8)', () => {
 
             upsertFile(db, relPath, 'hash-normal', Date.now());
             insertSymbol(db, {
-                name: 'alpha',
+                name: 'value0',
                 kind: 'def',
-                type: 'function', // non-null, capture-tag-style
+                type: 'lexical_declaration', // non-null, capture-tag-style
                 filePath: relPath,
                 line: 1,
-                endLine: 4,
+                endLine: 1,
                 column: 0,
             });
 
             // Sanity: the def really is present with a non-null type.
             const facts = getFileFacts(db, relPath);
             expect(facts.defs).toHaveLength(1);
-            expect(facts.defs[0].type).toBe('function');
+            expect(facts.defs[0].type).toBe('lexical_declaration');
 
-            // read_file is the single prefix authority: the seam receives the
-            // `N. `-prefixed text and a budget measured against THAT representation.
-            // compressForTool re-indexes the real file content (ensureFreshFromContent)
-            // and runs the def-mapping. Must NOT throw and must produce output.
-            const prefixed = rawText
-                .split('\n')
-                .map((line, i) => `${i + 1}. ${line}`)
-                .join('\n');
-            const maxChars = Math.floor(prefixed.length * 0.6);
-            const result = await compressForTool(absPath, prefixed, maxChars);
+            // maxChars below rawText.length forces the compression path, which
+            // runs the def-mapping. Must NOT throw and must produce output.
+            const maxChars = Math.floor(rawText.length * 0.5);
+            const result = await compressForTool(absPath, rawText, maxChars);
 
             expect(result).not.toBeNull();
             expect(typeof result).toBe('string');
             expect(result.length).toBeGreaterThan(0);
-            expect(result.length).toBeLessThan(prefixed.length);
+            expect(result.length).toBeLessThan(rawText.length);
         });
     });
 

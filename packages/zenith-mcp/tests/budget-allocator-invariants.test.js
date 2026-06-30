@@ -14,10 +14,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-// BudgetAllocator is an internal engine, not part of zenith-toon's public seam
-// (index.ts exports only the compression entry points), so it is imported directly
-// from its module — the same deep-import pattern the SageRank engine test uses.
-import { BudgetAllocator } from '../../zenith-toon/dist/budget.js';
+import { BudgetAllocator } from 'zenith-toon';
 
 // Minimal EntryMeta shape — only 'content' is required by budget.ts
 function makeEntry(content) {
