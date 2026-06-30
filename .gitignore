@@ -36,3 +36,13 @@ docs/project-scoping-fix-plan.md
 knip.json
 .idea
 Phase2.md
+
+# Legacy test archives (broken/compressed stubs, not runnable)
+**/_legacy_old_arch/
+**/tests/_legacy_old_arch/
+
+# Test results / coverage artifacts
+test-results/
+junit.xml
+*.junit.xml
+lcov.info
