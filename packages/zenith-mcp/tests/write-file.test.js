@@ -157,18 +157,21 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         expect(tmpFiles).toHaveLength(0);
     });
 
-    it('reports error code in write failure message when append mode target is a directory', async () => {
+    it('reports the error code when append mode cannot read an existing directory target', async () => {
         const filePath = path.join(repoDir, 'dir-append-target');
         fs.mkdirSync(filePath);
 
+        // Append reads the existing file first (for overlap dedup); reading a directory
+        // fails with EISDIR on that read path, which surfaces the code in the message.
         await expect(handler({ path: filePath, content: 'appended data', append: true }))
-            .rejects.toThrow(/Write failed \(EISDIR\)\. Cached as stash:\d+\./);
+            .rejects.toThrow(/Cannot read existing file for append: EISDIR/);
     });
 
     it('normalizes CRLF to LF on write', async () => {
         const filePath = path.join(repoDir, 'crlf.txt');
         await handler({ path: filePath, content: 'line1\r\nline2\r\n' });
 
+        const written = fs.readFileSync(filePath, 'utf-8');
         expect(written).not.toContain('\r\n');
         expect(written).toBe('line1\nline2\n');
     });

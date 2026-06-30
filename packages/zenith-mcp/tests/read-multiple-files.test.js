@@ -111,28 +111,28 @@ describe('read_multiple_files', () => {
     });
 
     describe('line numbering (Rule 10: mandatory, no opt-out)', () => {
-        it('ALWAYS prefixes each line with "N:" — there is no way to disable', async () => {
+        it('ALWAYS prefixes each line with "N. " — there is no way to disable', async () => {
             // Rule 10: line numbers are MANDATORY structural metadata. The showLineNumbers
             // opt-out was removed; numbering is unconditional. (Previously this passed
             // `showLineNumbers: true`; the param no longer exists.)
             const fp = makeFile(tmpDir, 'lines.txt', 'alpha\nbeta\ngamma');
             const result = await handler({ paths: [fp], compression: false });
             const text = result.content[0].text;
-            expect(text).toContain('1:alpha');
-            expect(text).toContain('2:beta');
-            expect(text).toContain('3:gamma');
+            expect(text).toContain('1. alpha');
+            expect(text).toContain('2. beta');
+            expect(text).toContain('3. gamma');
         });
 
         it('still line-numbers output even when raw (uncompressed) content is requested', async () => {
             // Rule 10: line numbering cannot be turned off. This case used to assert
             // showLineNumbers:false produced raw, unprefixed lines ("aaa\nbbb") — that
             // encoded Rule-10-FORBIDDEN behavior (the anti-pattern table explicitly bans a
-            // showLineNumbers toggle), so it now asserts the mandatory "N:" prefixes.
+            // showLineNumbers toggle), so it now asserts the mandatory "N. " prefixes.
             const fp = makeFile(tmpDir, 'raw.txt', 'aaa\nbbb');
             const result = await handler({ paths: [fp], compression: false });
             const text = result.content[0].text;
-            expect(text).toContain('1:aaa');
-            expect(text).toContain('2:bbb');
+            expect(text).toContain('1. aaa');
+            expect(text).toContain('2. bbb');
             // And the raw, unprefixed body must NOT appear.
             expect(text).not.toContain('aaa\nbbb');
         });
