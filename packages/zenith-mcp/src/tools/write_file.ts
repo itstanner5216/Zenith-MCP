@@ -71,7 +71,11 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 finalContent = existing + separator + appendContent;
             }
             catch (err) {
-                throw new Error(`Cannot read existing file for append: ${errorMessage(err)}`);
+                const code = (err as NodeJS.ErrnoException)?.code;
+                const stashId = stashWrite(ctx, validPath, normalizedContent, 'append');
+                throw new Error(code
+                    ? `Write failed (${code}). Cached as stash:${stashId}.`
+                    : `Write failed. Cached as stash:${stashId}.`);
             }
         }
         const tempPath = `${validPath}.${randomBytes(16).toString('hex')}.tmp`;

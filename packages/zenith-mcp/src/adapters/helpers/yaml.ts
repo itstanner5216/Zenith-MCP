@@ -1,11 +1,11 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import YAML from "js-yaml";
+import { load as yamlLoad, dump as yamlDump } from "js-yaml";
 
 export function readYaml(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
 
   try {
-    const parsed = YAML.load(readFileSync(path, "utf-8"));
+    const parsed = yamlLoad(readFileSync(path, "utf-8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : {};
@@ -17,5 +17,5 @@ export function readYaml(path: string): Record<string, unknown> {
 }
 
 export function writeYaml(path: string, data: Record<string, unknown>): void {
-  writeFileSync(path, YAML.dump(data), "utf-8");
+  writeFileSync(path, yamlDump(data), "utf-8");
 }

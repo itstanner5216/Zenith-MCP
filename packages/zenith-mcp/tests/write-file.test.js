@@ -169,6 +169,7 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         const filePath = path.join(repoDir, 'crlf.txt');
         await handler({ path: filePath, content: 'line1\r\nline2\r\n' });
 
+        const written = fs.readFileSync(filePath, 'utf-8');
         expect(written).not.toContain('\r\n');
         expect(written).toBe('line1\nline2\n');
     });
