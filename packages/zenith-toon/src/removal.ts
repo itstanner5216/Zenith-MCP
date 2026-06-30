@@ -74,6 +74,25 @@ export function markerLen(a: number, b: number): number {
 }
 
 /**
+ * The hard ceiling on the selection DP's reachability table, in Uint32 WORDS
+ * (×4 bytes ⇒ 500 MiB). The table is `(n+1)·STATES·WORDS` words, and WORDS scales with
+ * the net WINDOW WIDTH — which is pseudo-polynomial in the file's TOTAL character
+ * weight, not its line count. An ordinary file (even the n=2000 stress case) sits near
+ * ~50M words (~200 MiB); only files with megabyte-scale lines push the table toward the
+ * gigabytes. When the EXACT (g = 1) table would exceed this ceiling, the controller in
+ * `selectDropsToBand` divides the net axis by the smallest integer scale `g` that brings
+ * it back under, runs the SAME exact multi-gap `solve` on the coarsened copy, and
+ * recomputes the true net from the ORIGINAL integer weights — so memory is bounded WITHOUT
+ * risking a process OOM and WITHOUT changing behaviour for any normal file (g = 1,
+ * byte-identical to the verified engine).
+ *
+ * It is a `const`: an immutable structural bound, never a runtime-tunable knob. Exported
+ * only so a test can prove the exact (g = 1) table for a given input would exceed it (and
+ * thus that scaling necessarily engaged) — reading it cannot change it.
+ */
+export const MAX_REACH_WORDS = 125_000_000;
+
+/**
  * The removal gate's determination — the `removal` metadata key it owns.
  *
  * `eligible` is the ELIGIBILITY PARTITION (5A): a strict boolean per ABSOLUTE line
@@ -378,6 +397,10 @@ export function selectDropsToBand(
   eligible: readonly boolean[],
   netMin: number,
   netMax: number,
+  // Immutable production ceiling by default (see MAX_REACH_WORDS). Optional ONLY so a
+  // test can force the g > 1 quantization branch with small inputs without allocating
+  // the real 500 MiB table; production callers never pass it. Never a mutable knob.
+  maxReachWords: number = MAX_REACH_WORDS,
 ): DropSelection {
   const n = weights.length;
   if (n !== eligible.length || n !== lines.length) {
@@ -543,7 +566,25 @@ export function selectDropsToBand(
   //    in-window net. Returns the chosen drop mask + net + band flag, plus the smallest
   //    effective net it observed strictly ABOVE netMax (or +Inf), so the controller can
   //    decide whether a wider pass is needed. ───────────────────────────────────────────
-  const solve = (windowHiTarget: number) => {
+  // `solve` runs the exact multi-gap band-targeting DP over a working net axis supplied
+  // ENTIRELY through its parameters. The hot fill/choose/reconstruct loop bodies are
+  // byte-identical to the verified fen engine — they simply read their inputs (the weight
+  // array, the two marker-charge arrays, the EOF close charge, the window floor, and the
+  // band [netMin, netMax]) from these parameters instead of the enclosing closure. The
+  // controller passes the ORIGINAL char-domain arrays for the normal g = 1 case (so the
+  // result is provably byte-identical) and coarsened copies for the g > 1 case. `solve`
+  // is a local closure, so widening its signature has zero external blast radius; the
+  // public `selectDropsToBand` signature is unchanged.
+  const solve = (
+    windowHiTarget: number,
+    wArr: Int32Array,
+    openCharge: Int32Array,
+    closeCharge: Int32Array,
+    eofClose: number,
+    windowLo: number,
+    netMin: number,
+    netMax: number,
+  ) => {
     const WORDS = Math.max(1, ((windowHiTarget - windowLo + 1) + 31) >>> 5);
     const windowHi = windowLo + WORDS * 32 - 1; // real top after word padding
     const layerWords = STATES * WORDS;
@@ -775,6 +816,59 @@ export function selectDropsToBand(
     return { drop, netRemoved: chosenNet, bandSatisfied, aboveSeen, windowHi };
   };
 
+  // ── solveScaled: run `solve` at the smallest net-axis scale g ≥ 1 whose reach table
+  //    fits maxReachWords for THIS target's window. g === 1 for every normal file — the
+  //    ORIGINAL char-domain arrays pass straight through, so the result is provably
+  //    byte-identical to the verified engine. g > 1 only for pathological giant-line files:
+  //    a coarsened copy of the net axis (weights, the two marker-charge arrays, the EOF
+  //    charge, the window floor, the band) is passed in, the SAME solve runs in bounded
+  //    memory, and the controller recomputes the TRUE net from the original integer
+  //    weights. The scaled band is tightened by (n+1) scaled units on each side: the
+  //    per-line/per-marker rounding drift is < 5n/6 scaled units, so any witness solve
+  //    places inside the scaled band has a true net inside [netMin, netMax]; the window is
+  //    padded by the same (n+1) so no reachable scaled net falls off either edge. ─────────
+  const solveScaled = (windowHiTarget: number) => {
+    const windowSpan = windowHiTarget - windowLo + 1;
+    const maxWords = Math.max(1, Math.floor(maxReachWords / ((n + 1) * STATES)));
+    let g = 1;
+    if (windowSpan > maxWords * 32) {
+      const denom = maxWords * 32 - 2 * (n + 1); // headroom for the ±(n+1) window padding
+      g = denom > 0 ? Math.ceil(windowSpan / denom) : windowSpan;
+      // Tighten to the SMALLEST g whose exact padded scaled window fits the ceiling.
+      for (;;) {
+        if (g <= 1) { g = 1; break; }
+        const lo = Math.floor(windowLo / g) - (n + 1);
+        const hi = Math.ceil(windowHiTarget / g) + (n + 1);
+        const words = Math.max(1, ((hi - lo + 1) + 31) >>> 5);
+        if ((n + 1) * STATES * words <= maxReachWords) break;
+        g++;
+      }
+    }
+    if (g === 1) {
+      const r = solve(windowHiTarget, wArr, openCharge, closeCharge, eofClose, windowLo, netMin, netMax);
+      return { drop: r.drop, netRemoved: r.netRemoved, bandSatisfied: r.bandSatisfied, aboveSeen: r.aboveSeen, windowHi: r.windowHi, g };
+    }
+    const sw = new Int32Array(n);
+    const so = new Int32Array(n);
+    const sc = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      sw[i] = Math.round((wArr[i] ?? 0) / g);
+      so[i] = Math.trunc((openCharge[i] ?? 0) / g); // marker charge rounds toward 0
+      sc[i] = Math.trunc((closeCharge[i] ?? 0) / g);
+    }
+    const r = solve(
+      Math.ceil(windowHiTarget / g) + (n + 1),
+      sw,
+      so,
+      sc,
+      Math.trunc(eofClose / g),
+      Math.floor(windowLo / g) - (n + 1),
+      Math.ceil(netMin / g) + (n + 1),
+      Math.floor(netMax / g) - (n + 1),
+    );
+    return { drop: r.drop, netRemoved: r.netRemoved, bandSatisfied: r.bandSatisfied, aboveSeen: r.aboveSeen, windowHi: r.windowHi, g };
+  };
+
   // ── CONTROLLER. Phase 1: the tight slack window (cheap). It is EXACT whenever the
   //    band is feasible (in-band needs only nets ≤ netMax, all captured), and whenever
   //    the true nearest legal net is ≤ the window top. The only case it can miss is an
@@ -782,28 +876,55 @@ export function selectDropsToBand(
   //    above the window — which requires a reachable "desert" wider than the slack just
   //    above netMax, i.e. a sparse reachable set (few eligible lines ⇒ small Rcap). In
   //    that case Phase 2 widens to the full reachable range (cheap precisely because it
-  //    is sparse) and is exact. We never throw for size; we recompute. ──────────────────
+  //    is sparse) and is exact. We never throw for size; we recompute (or, for a giant-
+  //    line file forced into the g > 1 regime, finalize the scaled cut below). ───────────
   const phase1Target = Math.min(trueMaxRaw, netMax + highSlack);
-  const r1 = solve(phase1Target);
-  if (r1.bandSatisfied) {
-    return { drop: r1.drop, netRemoved: r1.netRemoved, bandSatisfied: r1.bandSatisfied };
+  let chosen = solveScaled(phase1Target);
+  // The g === 1 flow here is byte-identical to the verified engine. Phase 1 is exact when
+  // the band is feasible OR the true nearest legal net is at-or-below the window top; the
+  // only gap is an infeasible band whose smallest reachable net sits in a sparse "desert"
+  // beyond the window (few eligible lines ⇒ small range ⇒ Phase 2 is cheap). A scaled
+  // (g > 1) Phase 1 already spans the whole in-band region, so it never needs Phase 2 —
+  // it is finalized in the scaled branch below.
+  if (chosen.g === 1 && !chosen.bandSatisfied) {
+    const sawEverything = chosen.windowHi >= trueMaxRaw;
+    if (!(sawEverything || Number.isFinite(chosen.aboveSeen))) {
+      chosen = solveScaled(trueMaxRaw);
+    }
   }
-  // Infeasible. Phase 1's nearest is taken over the whole window, so it already has the
-  // exact best candidate at-or-below netMax (net=0 is always reachable) AND — if any
-  // reachable net lies strictly above netMax within the window — the SMALLEST such value
-  // (aboveSeen); a smaller above-band value cannot exist beyond the window since beyond
-  // means a larger net. So Phase 1 is exact when either it spanned the full reachable
-  // range (sawEverything) or it observed an above-band value (the true smallest-above is
-  // then in-window). The only gap: no above-band value in-window AND the window did not
-  // reach the top — then the true nearest could be an above-band net beyond the window
-  // (possible only when the reachable set is sparse — a "desert" above netMax — i.e. few
-  // eligible lines ⇒ small range ⇒ Phase 2 is cheap). We re-solve full; never throw.
-  const sawEverything = r1.windowHi >= trueMaxRaw;
-  if (sawEverything || Number.isFinite(r1.aboveSeen)) {
-    return { drop: r1.drop, netRemoved: r1.netRemoved, bandSatisfied: r1.bandSatisfied };
+  if (chosen.g === 1) {
+    return { drop: chosen.drop, netRemoved: chosen.netRemoved, bandSatisfied: chosen.bandSatisfied };
   }
-  const r2 = solve(trueMaxRaw);
-  return { drop: r2.drop, netRemoved: r2.netRemoved, bandSatisfied: r2.bandSatisfied };
+  // ── SCALED REGIME (g > 1). solve picked a STRUCTURALLY valid selection on the coarsened
+  //    net axis; eligibility and the run-length rules are scale-invariant, so only the net
+  //    is approximate. Recompute the TRUE net from the ORIGINAL integer weights and the
+  //    real markerLen over the chosen gaps — exactly mirroring removalEngine's dropped-
+  //    content − marker-chars accounting. Ship the cut ONLY if that true net lands in the
+  //    real [netMin, netMax]; otherwise drop nothing, so the rendered output equals the
+  //    full file, removal's dropped set is empty, and compressFile's usefulness gate serves
+  //    the file raw — never a quantization-skewed out-of-band cut. One return contract:
+  //    always a DropSelection, never a null or sentinel. ───────────────────────────────────
+  let trueNet = 0;
+  let i = 0;
+  while (i < n) {
+    if (chosen.drop[i] === true) {
+      const runStart = i;
+      let runEnd = i;
+      let sum = 0;
+      while (i < n && chosen.drop[i] === true) {
+        sum += wArr[i] ?? 0;
+        runEnd = i;
+        i++;
+      }
+      trueNet += sum - markerLen(lines[runStart] ?? 0, lines[runEnd] ?? 0);
+    } else {
+      i++;
+    }
+  }
+  if (trueNet >= netMin && trueNet <= netMax) {
+    return { drop: chosen.drop, netRemoved: trueNet, bandSatisfied: true };
+  }
+  return { drop: new Array<boolean>(n).fill(false), netRemoved: 0, bandSatisfied: 0 >= netMin && 0 <= netMax };
 }
 
 /**
