@@ -70,9 +70,9 @@ describe('tool compression behavior', () => {
         const handler = await registerTool('../dist/tools/read_file.js', 'read_file', rootDir);
         const result = await handler({ path: 'sample.js' });
 
-        // Tool formats output as N:line (1-based line number colon content)
+        // Tool formats output as 'N. line' (1-based line number, dot, space, content)
         const firstLine = result.content[0].text.split('\n')[0];
-        expect(firstLine).toBe('1:const value = 1;');
+        expect(firstLine).toBe('1. const value = 1;');
         expect(compressForToolMock).not.toHaveBeenCalled();
     });
 
@@ -109,10 +109,10 @@ describe('tool compression behavior', () => {
 
         const raw = await handler({ paths: ['one.js', 'two.js'], compression: false });
 
-        // Without compression the tool emits N:line formatted lines
+        // Without compression the tool emits 'N. line' formatted lines
         const rawText = raw.content[0].text;
-        expect(rawText).toContain('- one.js\n1:export const one = 1;');
-        expect(rawText).toContain('- two.js\n1:export const two = 2;');
+        expect(rawText).toContain('- one.js\n1. export const one = 1;');
+        expect(rawText).toContain('- two.js\n1. export const two = 2;');
         expect(compressForToolMock).not.toHaveBeenCalled();
     });
 
@@ -125,12 +125,12 @@ describe('tool compression behavior', () => {
         const handler = await registerTool('../dist/tools/read_multiple_files.js', 'read_multiple_files', rootDir);
         const result = await handler({ paths: ['plain.txt'], maxCharsPerFile: 5000 });
 
-        // When compressForTool returns null, the tool emits N:line format content
-        // The file fits in one line so the output is "1:" + truncated-a-content
+        // When compressForTool returns null, the tool emits 'N. line' format content
+        // The file fits in one line so the output is "1. " + truncated-a-content
         const resultText = result.content[0].text;
-        expect(resultText).toMatch(/^- plain\.txt\n1:a+$/);
+        expect(resultText).toMatch(/^- plain\.txt\n1\. a+$/);
         // The fallback must have reduced size: the a-run must not exceed the original 1000 chars
-        const aaMatch = resultText.match(/1:(a+)$/);
+        const aaMatch = resultText.match(/1\. (a+)$/);
         expect(aaMatch).not.toBeNull();
         expect(aaMatch[1].length).toBeLessThanOrEqual(1000);
         expect(compressForToolMock).toHaveBeenCalledOnce();
