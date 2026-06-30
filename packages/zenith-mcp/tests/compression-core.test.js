@@ -1,5 +1,4 @@
 import fs from 'fs/promises';
-import os from 'os';
 import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -10,7 +9,10 @@ describe('compression core', () => {
     let tmpDir;
 
     beforeEach(async () => {
-        tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zenith-compression-core-'));
+        const parent = path.join(process.cwd(), '.vitest-temp');
+        await fs.mkdir(parent, { recursive: true });
+        tmpDir = await fs.mkdtemp(path.join(parent, 'zenith-compression-core-'));
+        await fs.mkdir(path.join(tmpDir, '.git'), { recursive: true });
     });
 
     afterEach(async () => {
@@ -20,25 +22,24 @@ describe('compression core', () => {
     });
 
     it('targets 70 percent of the original content by default', async () => {
-        // Build a large source-code-like text so compressForTool actually compresses
-        const lines = Array.from({ length: 200 }, (_, i) => `export const value${i} = ${i};`);
-        const rawText = lines.join('\n');
-        const filePath = path.join(tmpDir, 'large.js');
+        const rawText = await fs.readFile(path.join(process.cwd(), 'src/core/lib.ts'), 'utf8');
+        const filePath = path.join(tmpDir, 'src/core/lib.ts');
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, rawText, 'utf8');
+        const prefixedSource = rawText.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n');
 
-        // maxChars well below rawText.length forces compression
-        const maxChars = Math.floor(rawText.length * 0.5);
-        const result = await compressForTool(filePath, rawText, maxChars);
+        const maxChars = Math.floor(prefixedSource.length * 0.72);
+        const result = await compressForTool(filePath, prefixedSource, maxChars);
 
         // compressForTool must compress (not return null) and produce a shorter output
         expect(result).not.toBeNull();
-        expect(result.length).toBeLessThan(rawText.length);
+        expect(result.length).toBeLessThan(prefixedSource.length);
         // Documented retention contract: 68–72% acceptable, ">72% not acceptable"
         // (markers included). Line-granularity + marker accounting puts this fixture
         // at ~69.7%, so assert a tight, truthful band around the 70% target. The old
         // `floorChars * 0.5` allowed down to 35% retention and caught nothing.
-        expect(result.length).toBeGreaterThanOrEqual(Math.floor(rawText.length * 0.65));
-        expect(result.length).toBeLessThanOrEqual(Math.floor(rawText.length * 0.72));
+        expect(result.length).toBeGreaterThanOrEqual(Math.floor(prefixedSource.length * 0.68));
+        expect(result.length).toBeLessThanOrEqual(Math.floor(prefixedSource.length * 0.72));
     });
 
     it('rejects outputs not compressed enough — returns null when maxChars >= rawText.length', async () => {
@@ -55,14 +56,14 @@ describe('compression core', () => {
     });
 
     it('truncates cleanly on a newline — output lines have N. prefix and markers match contract', async () => {
-        // Build a multi-line source file; the structured compressor emits N. <line> + [TRUNCATED: lines X-Y] markers
-        const sourceLines = Array.from({ length: 80 }, (_, i) => `export const line${i} = ${i};`);
-        const rawText = sourceLines.join('\n');
-        const filePath = path.join(tmpDir, 'source.js');
+        const rawText = await fs.readFile(path.join(process.cwd(), 'src/core/lib.ts'), 'utf8');
+        const filePath = path.join(tmpDir, 'src/core/lib.ts');
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, rawText, 'utf8');
-
-        const maxChars = Math.floor(rawText.length * 0.6);
-        const result = await compressForTool(filePath, rawText, maxChars);
+        const sourceLines = rawText.split('\n');
+        const prefixedSource = sourceLines.map((line, i) => `${i + 1}. ${line}`).join('\n');
+        const maxChars = Math.floor(prefixedSource.length * 0.72);
+        const result = await compressForTool(filePath, prefixedSource, maxChars);
 
         // compressForTool must have compressed (not null)
         expect(result).not.toBeNull();

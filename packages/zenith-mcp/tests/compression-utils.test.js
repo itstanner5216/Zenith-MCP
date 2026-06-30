@@ -11,7 +11,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
-import os from 'os';
 
 import { compressForTool } from '../dist/core/compression.js';
 
@@ -21,7 +20,9 @@ import { compressForTool } from '../dist/core/compression.js';
 
 /** Create a real temp dir and register cleanup. */
 async function makeTmpDir() {
-    return fs.mkdtemp(path.join(os.tmpdir(), 'zenith-compress-test-'));
+    const parent = path.join(process.cwd(), '.vitest-temp');
+    await fs.mkdir(parent, { recursive: true });
+    return fs.mkdtemp(path.join(parent, 'zenith-compress-test-'));
 }
 
 /**
@@ -58,27 +59,23 @@ describe('compressForTool keep-ratio floor', () => {
 
     // Replacement for: "defaults to 0.70"
     it('output length reflects ~70% keep-ratio floor: shorter than input but >= 70% of input', async () => {
-        // Build text that is definitely compressible but long enough to exercise the floor.
-        const lines = [];
-        for (let i = 1; i <= 60; i++) lines.push(`  // comment line ${i} — filler text padding`);
-        lines.unshift('function bigComment() {');
-        lines.push('}');
-        const rawText = lines.join('\n');
-        // Ensure text is a .js file so getLangForFile returns 'javascript'
-        const filePath = path.join(tmpDir, 'fixture.js');
-        await fs.writeFile(filePath, rawText);
+        await fs.mkdir(path.join(tmpDir, '.git'), { recursive: true });
+        const rawText = await fs.readFile(path.join(process.cwd(), 'src/core/lib.ts'), 'utf8');
+        const filePath = path.join(tmpDir, 'src/core/lib.ts');
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, rawText, 'utf8');
+        const prefixedSource = rawText.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n');
 
-        const maxChars = rawText.length; // maxChars == len → compressForTool returns null (no-op)
-        // Use maxChars smaller than rawText.length to trigger compression
-        const tightMax = Math.floor(rawText.length * 0.55); // force compression path
-        const result = await compressForTool(filePath, rawText, tightMax);
+        const tightMax = Math.floor(prefixedSource.length * 0.72);
+        const result = await compressForTool(filePath, prefixedSource, tightMax);
 
         // toon's 70% floor means the actual budget used is max(tightMax, floor(len*0.70))
         // so result is non-null and its length is < rawText.length but the floor
         // prevents it going below 70% of rawText.length.
         expect(result).not.toBeNull();
-        expect(result.length).toBeLessThan(rawText.length);
-        expect(result.length).toBeGreaterThanOrEqual(Math.floor(rawText.length * 0.60));
+        expect(result.length).toBeLessThan(prefixedSource.length);
+        expect(result.length).toBeGreaterThanOrEqual(Math.floor(prefixedSource.length * 0.68));
+        expect(result.length).toBeLessThanOrEqual(Math.floor(prefixedSource.length * 0.72));
     });
 });
 

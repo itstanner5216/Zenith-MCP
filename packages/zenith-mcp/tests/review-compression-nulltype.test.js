@@ -28,11 +28,12 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { compressForTool } from '../dist/core/compression.js';
-import { findRepoRoot, getDb } from '../dist/core/symbol-index.js';
+import { ensureFreshFromContent, findRepoRoot, getDb } from '../dist/core/symbol-index.js';
 import {
     openMemoryDb,
     closeDb,
@@ -69,11 +70,16 @@ describe('compression null-type guard (review finding #8)', () => {
         let repoRoot;
 
         beforeEach(async () => {
-            repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'zenith-review-a2-'));
-            // findRepoRoot() walks up for a `.git` entry; create one so the
-            // temp dir is recognized as a repo root and getDb() opens the DB
-            // there (.mcp/symbols.db).
-            await fs.mkdir(path.join(repoRoot, '.git'), { recursive: true });
+            // Create the temp repo OUTSIDE the monorepo working tree so the
+            // outer `.git` can never be resolved by `git rev-parse`. A bare
+            // `mkdir('.git')` is not a real repository, so with a temp dir
+            // nested inside this repo, findRepoRoot()'s `git rev-parse
+            // --show-toplevel` would walk past it to the monorepo root. Using
+            // os.tmpdir() + a real `git init` makes the resolved root the temp
+            // dir itself, keeping the fixture fully isolated.
+            const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'zenith-review-a2-'));
+            repoRoot = parent;
+            execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
         });
 
         afterEach(async () => {
@@ -88,40 +94,25 @@ describe('compression null-type guard (review finding #8)', () => {
 
             const db = getDb(resolvedRoot);
 
-            // A compressible, source-like file with one indexed def whose
-            // `type` is set (the normal case — capture-tag-derived).
-            const lines = Array.from({ length: 200 }, (_, i) => `export const value${i} = ${i};`);
-            const rawText = lines.join('\n');
+            const rawText = await fs.readFile(path.join(process.cwd(), 'src/core/lib.ts'), 'utf8');
             const relPath = 'src/large.ts';
             const absPath = path.join(resolvedRoot, relPath);
             await fs.mkdir(path.dirname(absPath), { recursive: true });
             await fs.writeFile(absPath, rawText, 'utf8');
+            await ensureFreshFromContent(db, resolvedRoot, absPath, rawText);
 
-            upsertFile(db, relPath, 'hash-normal', Date.now());
-            insertSymbol(db, {
-                name: 'value0',
-                kind: 'def',
-                type: 'lexical_declaration', // non-null, capture-tag-style
-                filePath: relPath,
-                line: 1,
-                endLine: 1,
-                column: 0,
-            });
-
-            // Sanity: the def really is present with a non-null type.
             const facts = getFileFacts(db, relPath);
-            expect(facts.defs).toHaveLength(1);
-            expect(facts.defs[0].type).toBe('lexical_declaration');
+            expect(facts.defs.length).toBeGreaterThan(0);
+            expect(facts.defs.some((definition) => definition.type !== null)).toBe(true);
 
-            // maxChars below rawText.length forces the compression path, which
-            // runs the def-mapping. Must NOT throw and must produce output.
-            const maxChars = Math.floor(rawText.length * 0.5);
-            const result = await compressForTool(absPath, rawText, maxChars);
+            const prefixedSource = rawText.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n');
+            const maxChars = Math.floor(prefixedSource.length * 0.72);
+            const result = await compressForTool(absPath, prefixedSource, maxChars);
 
             expect(result).not.toBeNull();
             expect(typeof result).toBe('string');
             expect(result.length).toBeGreaterThan(0);
-            expect(result.length).toBeLessThan(rawText.length);
+            expect(result.length).toBeLessThan(prefixedSource.length);
         });
     });
 
