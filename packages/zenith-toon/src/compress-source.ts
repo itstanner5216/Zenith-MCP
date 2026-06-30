@@ -58,10 +58,22 @@ export interface RawFileFacts {
     readonly visibility: string | null;
     readonly captureTag: string | null;
   }>;
+  readonly references: ReadonlyArray<{
+    readonly name: string;
+    readonly type: string | null;
+    readonly line: number;
+    readonly endLine: number;
+    readonly column: number;
+  }>;
   readonly edges: ReadonlyArray<{
     readonly callerLine: number;  // resolved start line of the calling def
     readonly calleeLine: number;  // resolved start line of the called def
     readonly callCount: number;
+  }>;
+  readonly referenceEdges: ReadonlyArray<{
+    readonly callerLine: number;      // resolved start line of the containing def
+    readonly referencedName: string;  // raw referenced symbol name, resolved or unresolved
+    readonly referenceCount: number;
   }>;
   readonly anchors: ReadonlyArray<{
     readonly symbolName: string;

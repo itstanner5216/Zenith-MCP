@@ -92,7 +92,9 @@ describe('Priority 0 — compressFile end-to-end (real facts shape)', () => {
         visibility: b.exported ? 'public' : 'private',
         captureTag: null,
       })),
+      references: [],
       edges: [],
+      referenceEdges: [],
       anchors: blocks.flatMap((b) =>
         b.anchors.map((a) => ({ symbolName: b.name, kind: a.kind, line: a.startLine + 1, text: 'return' })),
       ),
