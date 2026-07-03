@@ -15,8 +15,9 @@ import { execFileSync } from 'child_process';
 //     parse actually ran
 //   - permissions survive edits; no temp litter on any path; CRLF/lone-CR/BOM
 //     survive edits
-//   - every write is preceded by a keyed, retrievable snapshot capped at the
-//     10 most recent per session/file
+//   - every write is preceded by per-edit patch snapshots (exact oldText,
+//     exact applied newText, original start line), capped at the 10 most
+//     recent per session/file
 //   - syntax breakage never gates a write; the only hard failures are
 //     missing/unwritable files and genuinely unlocatable targets
 // ---------------------------------------------------------------------------
@@ -567,7 +568,7 @@ describe('injected failure between temp-write and rename', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Snapshots — every write preceded by a keyed, capped, retrievable snapshot
+// Snapshots — the literal patch each edit applied, keyed, capped, retrievable
 // ---------------------------------------------------------------------------
 
 describe('snapshots', () => {
@@ -581,25 +582,68 @@ describe('snapshots', () => {
         };
     }
 
-    it('stores the exact original content before a line edit', async () => {
-        const original = 'a\nb\nc\n';
-        const p = mkFile('a.txt', original);
-        await run(p, [{ startLine: 1, endLine: 1, newContent: 'A' }]);
+    it('stores oldText, applied newText, and the original start line for a line edit', async () => {
+        const p = mkFile('a.txt', 'a\nb\nc\n');
+        await run(p, [{ startLine: 2, endLine: 2, newContent: 'B' }]);
         const { db, rows } = historyFor(p);
         expect(rows.length).toBe(1);
-        expect(symbolIndex.getVersionText(db, rows[0].id)).toBe(original);
+        expect(symbolIndex.getVersionPatch(db, rows[0].id))
+            .toEqual({ original_text: 'b', new_text: 'B', line: 2 });
     });
 
-    it('stores the exact original raw bytes for CRLF files', async () => {
-        const original = 'a\r\nb\r\n';
-        const p = mkFile('a.txt', original);
-        await run(p, [{ oldContent: 'b', newContent: 'B' }]);
+    it('stores the matched span (with consumed trailing whitespace) for a content edit', async () => {
+        const p = mkFile('a.txt', 'one\n    keep me;   \nthree');
+        await run(p, [{ oldContent: '    keep me;', newContent: '    kept;' }]);
         const { db, rows } = historyFor(p);
         expect(rows.length).toBe(1);
-        expect(symbolIndex.getVersionText(db, rows[0].id)).toBe(original);
+        expect(symbolIndex.getVersionPatch(db, rows[0].id))
+            .toEqual({ original_text: '    keep me;   ', new_text: '    kept;', line: 2 });
     });
 
-    it('keeps only the 10 most recent snapshots per session/file, dropping the oldest', async () => {
+    it('stores the replacement as applied — after re-indent fitting', async () => {
+        const p = mkFile('a.txt', 'top\n        old();\nbottom');
+        await run(p, [{ startLine: 2, endLine: 2, newContent: 'new1();\nnew2();' }]);
+        const { db, rows } = historyFor(p);
+        expect(symbolIndex.getVersionPatch(db, rows[0].id)).toEqual({
+            original_text: '        old();',
+            new_text: '        new1();\n        new2();',
+            line: 2,
+        });
+    });
+
+    it('stores a deletion patch with its consumed newline', async () => {
+        const p = mkFile('a.txt', 'a\nb\nc\nd');
+        await run(p, [{ startLine: 2, endLine: 3, newContent: '' }]);
+        const { db, rows } = historyFor(p);
+        expect(symbolIndex.getVersionPatch(db, rows[0].id))
+            .toEqual({ original_text: 'b\nc\n', new_text: '', line: 2 });
+    });
+
+    it('stores patches in the LF-normalized frame for CRLF files', async () => {
+        const p = mkFile('a.txt', 'a\r\nb\r\nc\r\n');
+        await run(p, [{ startLine: 1, endLine: 2, newContent: 'X\nY' }]);
+        const { db, rows } = historyFor(p);
+        expect(symbolIndex.getVersionPatch(db, rows[0].id))
+            .toEqual({ original_text: 'a\nb', new_text: 'X\nY', line: 1 });
+    });
+
+    it('stores one patch per edit, each with its original-relative line', async () => {
+        const p = mkFile('a.txt', 'l1\nl2\nl3\nl4\nl5\nl6');
+        await run(p, [
+            { startLine: 1, endLine: 1, newContent: 'H1\nH2\nH3' },
+            { startLine: 5, endLine: 5, newContent: 'F' },
+        ]);
+        const { db, rows } = historyFor(p);
+        expect(rows.length).toBe(2);
+        const patches = rows.slice().sort((a, b) => a.id - b.id)
+            .map((r) => symbolIndex.getVersionPatch(db, r.id));
+        expect(patches).toEqual([
+            { original_text: 'l1', new_text: 'H1\nH2\nH3', line: 1 },
+            { original_text: 'l5', new_text: 'F', line: 5 },
+        ]);
+    });
+
+    it('keeps only the 10 most recent patches per session/file, dropping the oldest', async () => {
         const p = mkFile('a.txt', 'state 0\nrest\n');
         for (let k = 1; k <= 12; k++) {
             const text = await run(p, [{ startLine: 1, endLine: 1, newContent: `state ${k}` }]);
@@ -607,27 +651,30 @@ describe('snapshots', () => {
         }
         const { db, rows } = historyFor(p);
         expect(rows.length).toBe(10);
-        const texts = rows
-            .slice()
-            .sort((a, b) => a.id - b.id)
-            .map((r) => symbolIndex.getVersionText(db, r.id));
-        // pre-states of edits 3..12 (states 2..11); states 0 and 1 were pruned
-        expect(texts).toEqual(
-            Array.from({ length: 10 }, (_, i) => `state ${i + 2}\nrest\n`));
+        const patches = rows.slice().sort((a, b) => a.id - b.id)
+            .map((r) => symbolIndex.getVersionPatch(db, r.id));
+        expect(patches).toEqual(
+            Array.from({ length: 10 }, (_, i) => ({
+                original_text: `state ${i + 2}`,
+                new_text: `state ${i + 3}`,
+                line: 1,
+            })));
     });
 
-    it('re-snapshotting identical content refreshes its recency instead of duplicating', async () => {
+    it('re-applying an identical patch refreshes its recency instead of duplicating', async () => {
         const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const p = mkFile('a.txt', 'A\n');
-        await run(p, [{ startLine: 1, endLine: 1, newContent: 'B' }]); // snapshots A
+        await run(p, [{ startLine: 1, endLine: 1, newContent: 'B' }]); // patch A->B
         await sleep(5);
-        await run(p, [{ startLine: 1, endLine: 1, newContent: 'A' }]); // snapshots B
+        await run(p, [{ startLine: 1, endLine: 1, newContent: 'A' }]); // patch B->A
         await sleep(5);
-        await run(p, [{ startLine: 1, endLine: 1, newContent: 'C' }]); // snapshots A again
+        await run(p, [{ startLine: 1, endLine: 1, newContent: 'B' }]); // patch A->B again
         const { db, rows } = historyFor(p);
         expect(rows.length).toBe(2);
-        expect(symbolIndex.getVersionText(db, rows[0].id)).toBe('A\n');
-        expect(symbolIndex.getVersionText(db, rows[1].id)).toBe('B\n');
+        expect(symbolIndex.getVersionPatch(db, rows[0].id))
+            .toEqual({ original_text: 'A', new_text: 'B', line: 1 });
+        expect(symbolIndex.getVersionPatch(db, rows[1].id))
+            .toEqual({ original_text: 'B', new_text: 'A', line: 1 });
     });
 
     it('a snapshot-persistence failure does not fail the edit', async () => {
@@ -639,7 +686,7 @@ describe('snapshots', () => {
         expect(fs.readFileSync(p, 'utf-8')).toBe('A\nb\n');
     });
 
-    it('snapshots each file of a multi-file call', async () => {
+    it('snapshots patches per file in a multi-file call', async () => {
         const a = mkFile('a.txt', 'aaa\n');
         const b = mkFile('b.txt', 'bbb\n');
         await run(a, [

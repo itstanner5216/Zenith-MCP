@@ -164,6 +164,18 @@ export function initSymbolSchema(conn: DbConnection): void {
     }
 
     try {
+        db.exec('ALTER TABLE versions ADD COLUMN new_text TEXT');
+    } catch (error: any) {
+        // Only tolerate "column already exists" errors
+        const msg = error?.message || String(error);
+        if (!msg.includes('duplicate column') && !msg.includes('already exists')) {
+            console.error('Unexpected error adding column "new_text" to versions table:', msg);
+            console.error('SQL: ALTER TABLE versions ADD COLUMN new_text TEXT');
+            throw error;
+        }
+    }
+
+    try {
         db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
     } catch (error: any) {
         // Only tolerate "index already exists" or constraint violation errors
@@ -759,22 +771,33 @@ export function snapshotVersion(
 }
 
 /**
- * File-level pre-edit snapshot (the edit tool's undo net), stored in the
+ * Per-edit patch snapshot (the edit tool's undo/reuse net), stored in the
  * existing versions table keyed as symbol_name = `file://<filePath>` — the
- * `://` cannot occur in a code symbol, so file snapshots never collide with
- * symbol snapshots. When the dedup index (symbol_name, file_path, text_hash,
- * session_id) already holds this exact content, the row's created_at is
- * touched instead so undo ordering reflects recency. Retention is capped at
- * FILE_SNAPSHOT_CAP per session/file scope: storing one past the cap deletes
- * only the oldest rows, keeping the newest FILE_SNAPSHOT_CAP restorable.
+ * `://` cannot occur in a code symbol, so patch rows never collide with
+ * symbol snapshots. Each row is the literal patch one edit applied:
+ * original_text = the exact replaced text, new_text = the exact replacement
+ * as applied (post re-indent), line = the 1-based start line in the
+ * original file. Storing the patch instead of a whole-file copy keeps it
+ * mappable after later edits shift line numbers, shows precisely what
+ * changed, and makes the cached oldText→newText pair re-appliable anywhere
+ * in the repo without restating newText.
+ *
+ * text_hash fingerprints BOTH sides of the patch, so the dedup index
+ * (symbol_name, file_path, text_hash, session_id) collapses only identical
+ * patches — the surviving row's created_at/line are refreshed so ordering
+ * reflects recency. Retention is capped at EDIT_SNAPSHOT_CAP per
+ * session/file scope: storing one past the cap deletes only the oldest
+ * rows, keeping the newest EDIT_SNAPSHOT_CAP restorable.
  */
-export const FILE_SNAPSHOT_CAP = 10;
+export const EDIT_SNAPSHOT_CAP = 10;
 
-export function snapshotFileVersion(
+export function snapshotEditVersion(
     conn: DbConnection,
     entry: {
         filePath: string;
-        text: string;
+        oldText: string;
+        newText: string;
+        line: number;
         sessionId: string;
         createdAt: number;
         textHash: string;
@@ -782,15 +805,24 @@ export function snapshotFileVersion(
 ): void {
     const symbolName = `file://${entry.filePath}`;
     runTransaction(conn, () => {
-        const inserted = prepareOrCache(conn, 'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, NULL, ?)')
-            .run(symbolName, entry.filePath, entry.text, entry.sessionId, entry.createdAt, entry.textHash);
+        const inserted = prepareOrCache(conn, 'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, new_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(symbolName, entry.filePath, entry.oldText, entry.newText, entry.sessionId, entry.createdAt, entry.line, entry.textHash);
         if (Number(inserted.changes) === 0) {
-            prepareOrCache(conn, 'UPDATE versions SET created_at = ? WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND text_hash = ?')
-                .run(entry.createdAt, symbolName, entry.filePath, entry.sessionId, entry.textHash);
+            prepareOrCache(conn, 'UPDATE versions SET created_at = ?, line = ? WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND text_hash = ?')
+                .run(entry.createdAt, entry.line, symbolName, entry.filePath, entry.sessionId, entry.textHash);
         }
         prepareOrCache(conn, 'DELETE FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND id NOT IN (SELECT id FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)')
-            .run(symbolName, entry.filePath, entry.sessionId, symbolName, entry.filePath, entry.sessionId, FILE_SNAPSHOT_CAP);
+            .run(symbolName, entry.filePath, entry.sessionId, symbolName, entry.filePath, entry.sessionId, EDIT_SNAPSHOT_CAP);
     });
+}
+
+/**
+ * SQL: SELECT original_text, new_text, line FROM versions WHERE id = ?
+ */
+export function getVersionPatch(conn: DbConnection, id: number): { original_text: string; new_text: string | null; line: number | null } | null {
+    const row = prepareOrCache(conn, 'SELECT original_text, new_text, line FROM versions WHERE id = ?')
+        .get(id) as { original_text: string; new_text: string | null; line: number | null } | undefined;
+    return row ?? null;
 }
 
 /**

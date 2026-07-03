@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { randomBytes } from "crypto";
 import { getLangForFile, checkSyntaxErrors } from "../core/tree-sitter.js";
-import { getDb, getSessionId, findRepoRoot, snapshotFile, ensureFreshFromContent } from "../core/symbol-index.js";
+import { getDb, getSessionId, findRepoRoot, snapshotEdit, ensureFreshFromContent } from "../core/symbol-index.js";
 import { errorMessage, type ToolContext, type ToolServer } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -393,12 +393,22 @@ export function register(server: ToolServer, ctx: ToolContext): void {
 
             if (claims.length === 0) continue; // nothing to write for this file
 
-            // ── Single reconstruction pass over the original content.
+            // ── Single reconstruction pass over the original content. The
+            // same walk derives each claim's literal patch (exact replaced
+            // text, exact replacement as applied, original start line) — the
+            // unit the snapshot layer stores.
             claims.sort((a, b) => a.start - b.start || a.editIndex - b.editIndex);
+            const patches: Array<{ oldText: string; newText: string; line: number }> = [];
             let rebuilt = '';
             let pos = 0;
+            let originalLine = 1;
             for (const c of claims) {
-                rebuilt += content.slice(pos, c.start) + c.repl;
+                const gap = content.slice(pos, c.start);
+                const oldText = content.slice(c.start, c.end);
+                originalLine += gap.split('\n').length - 1;
+                patches.push({ oldText, newText: c.repl, line: originalLine });
+                originalLine += oldText.split('\n').length - 1;
+                rebuilt += gap + c.repl;
                 pos = c.end;
             }
             rebuilt += content.slice(pos);
@@ -417,11 +427,17 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     db = null;
                 }
             }
-            // Every write is preceded by a snapshot of the exact original
-            // bytes, keyed per session/file for the undo tool.
+            // Every write is preceded by per-edit patch snapshots, keyed per
+            // session/file: a future undo reverses the newest patch by
+            // content (which survives line drift), and a cached patch can be
+            // re-applied elsewhere without restating newText.
             if (db !== null && repoRoot !== null) {
                 try {
-                    snapshotFile(db, path.relative(repoRoot, absPath), raw, ctx.sessionId ?? getSessionId());
+                    const relPath = path.relative(repoRoot, absPath);
+                    const sessionId = ctx.sessionId ?? getSessionId();
+                    for (const p of patches) {
+                        snapshotEdit(db, relPath, p.oldText, p.newText, p.line, sessionId);
+                    }
                 } catch { /* snapshotting is a safety net; never fail the edit */ }
             }
 
