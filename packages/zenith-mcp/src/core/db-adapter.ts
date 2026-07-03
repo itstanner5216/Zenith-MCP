@@ -759,6 +759,41 @@ export function snapshotVersion(
 }
 
 /**
+ * File-level pre-edit snapshot (the edit tool's undo net), stored in the
+ * existing versions table keyed as symbol_name = `file://<filePath>` — the
+ * `://` cannot occur in a code symbol, so file snapshots never collide with
+ * symbol snapshots. When the dedup index (symbol_name, file_path, text_hash,
+ * session_id) already holds this exact content, the row's created_at is
+ * touched instead so undo ordering reflects recency. Retention is capped at
+ * FILE_SNAPSHOT_CAP per session/file scope: storing one past the cap deletes
+ * only the oldest rows, keeping the newest FILE_SNAPSHOT_CAP restorable.
+ */
+export const FILE_SNAPSHOT_CAP = 10;
+
+export function snapshotFileVersion(
+    conn: DbConnection,
+    entry: {
+        filePath: string;
+        text: string;
+        sessionId: string;
+        createdAt: number;
+        textHash: string;
+    }
+): void {
+    const symbolName = `file://${entry.filePath}`;
+    runTransaction(conn, () => {
+        const inserted = prepareOrCache(conn, 'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, NULL, ?)')
+            .run(symbolName, entry.filePath, entry.text, entry.sessionId, entry.createdAt, entry.textHash);
+        if (Number(inserted.changes) === 0) {
+            prepareOrCache(conn, 'UPDATE versions SET created_at = ? WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND text_hash = ?')
+                .run(entry.createdAt, symbolName, entry.filePath, entry.sessionId, entry.textHash);
+        }
+        prepareOrCache(conn, 'DELETE FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND id NOT IN (SELECT id FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)')
+            .run(symbolName, entry.filePath, entry.sessionId, symbolName, entry.filePath, entry.sessionId, FILE_SNAPSHOT_CAP);
+    });
+}
+
+/**
  * SQL: SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ? [AND file_path = ?] ORDER BY created_at DESC
  */
 export function getVersionHistory(

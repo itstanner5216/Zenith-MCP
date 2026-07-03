@@ -20,6 +20,7 @@ import {
     getCallersFiltered,
     getCalleesFiltered,
     snapshotVersion,
+    snapshotFileVersion,
     getVersionHistory as adapterGetVersionHistory,
     getVersionText as adapterGetVersionText,
     getVersionMeta,
@@ -480,6 +481,24 @@ export function snapshotSymbol(db: DbConnection, symbolName: string, filePath: s
         createdAt: Date.now(),
         line: line ?? null,
         textHash
+    });
+}
+
+/**
+ * File-level pre-edit snapshot: the whole-file counterpart of
+ * {@link snapshotSymbol}, written by the edit tool before every file write so
+ * a future undo can restore the exact pre-edit bytes. Keying and retention
+ * (10 most recent per session/file scope) live in the db-adapter's
+ * snapshotFileVersion.
+ */
+export function snapshotFile(db: DbConnection, relPath: string, originalText: string, sessionId: string): void {
+    const textHash = createHash('md5').update(originalText).digest('hex');
+    snapshotFileVersion(db, {
+        filePath: relPath,
+        text: originalText,
+        sessionId,
+        createdAt: Date.now(),
+        textHash,
     });
 }
 

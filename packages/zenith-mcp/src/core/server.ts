@@ -32,6 +32,7 @@ import { register as registerReadMediaFile } from '../tools/read_media_file.js';
 import { register as registerReadMultipleFiles } from '../tools/read_multiple_files.js';
 import { register as registerWriteFile } from '../tools/write_file.js';
 import { register as registerEditFile } from '../tools/edit_file.js';
+import { register as registerEdit } from '../tools/edit.js';
 import { register as registerDirectory } from '../tools/directory.js';
 import { register as registerSearchFiles } from '../tools/search_files.js';
 import { register as registerFilesystem } from '../tools/filesystem.js';
@@ -91,6 +92,7 @@ const TOOL_REGISTRY: Array<{
   { name: "read_multiple_files", register: registerReadMultipleFiles },
   { name: "write_file",          register: registerWriteFile },
   { name: "edit_file",           register: registerEditFile },
+  { name: "edit",                register: registerEdit },
   { name: "directory",           register: registerDirectory },
   { name: "search_files",        register: registerSearchFiles },
   { name: "file_manager",        register: registerFilesystem },
