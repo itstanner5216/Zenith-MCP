@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import { createReadStream } from "fs";
+import { createReadStream, accessSync } from "fs";
 import { constants as fsConstants } from "fs";
 import { spawn } from "child_process";
 import path from "path";
@@ -300,14 +300,73 @@ export async function bm25PreFilterFiles(rootPath: string, query: string, topK =
     return results.map(r => r.id);
 }
 
-export const RG_PATH = '/usr/bin/rg';
+const RG_BIN: string = process.platform === 'win32' ? 'rg.exe' : 'rg';
+
+const WELL_KNOWN_RG_PATHS: string[] = (() => {
+  const paths: string[] = [
+    '/usr/bin/rg',
+    '/usr/local/bin/rg',
+    '/opt/homebrew/bin/rg',
+    '/home/linuxbrew/.linuxbrew/bin/rg',
+  ];
+  try {
+    paths.push(path.join(os.homedir(), '.cargo', 'bin', 'rg'));
+  } catch { /* os.homedir() may throw */ }
+  return paths;
+})();
+
+let _rgPath: string | null = null;
+
+function candidateExecutable(dir: string): string | null {
+  const candidate = path.join(dir, RG_BIN);
+  try {
+    accessSync(candidate, fsConstants.X_OK);
+    return candidate;
+  } catch { return null; }
+}
+
+function resolveRgPath(): string {
+  if (_rgPath !== null) return _rgPath;
+
+  // 1. Scan PATH environment variable
+  const pathEnv: string = process.env.PATH ?? '';
+  if (pathEnv.length > 0) {
+    const dirs = pathEnv.split(path.delimiter);
+    for (const dir of dirs) {
+      if (dir.length === 0) continue;
+      const found = candidateExecutable(dir);
+      if (found !== null) {
+        _rgPath = found;
+        return found;
+      }
+    }
+  }
+
+  // 2. Fall back to well-known locations
+  for (const known of WELL_KNOWN_RG_PATHS) {
+    const found = candidateExecutable(path.dirname(known));
+    if (found !== null) {
+      _rgPath = found;
+      return found;
+    }
+  }
+
+  // 3. Final fallback: bare command name so spawn gives a clear ENOENT
+  _rgPath = RG_BIN;
+  return _rgPath;
+}
+
+/** Return the resolved ripgrep path without re-running resolution. */
+export function getRipgrepPath(): string {
+  return resolveRgPath();
+}
 
 /** Last ripgrep error message — populated when ripgrepSearch returns null. */
 export let lastRipgrepError: string | null = null;
 
 export async function ripgrepAvailable() {
     try {
-        await fs.access(RG_PATH, fsConstants.X_OK);
+        await fs.access(resolveRgPath(), fsConstants.X_OK);
         return true;
     } catch { return false; }
 }
@@ -357,7 +416,7 @@ export async function ripgrepSearch(rootPath: string, options: {
         let stderr = '';
         let killed = false;
         lastRipgrepError = null;
-        const proc = spawn(RG_PATH, rgArgs, { timeout: 30000 });
+        const proc = spawn(resolveRgPath(), rgArgs, { timeout: 30000 });
         let buffer = '';
         proc.stdout.on('data', (chunk) => {
             buffer += chunk.toString();
@@ -423,7 +482,7 @@ export async function ripgrepFindFiles(rootPath: string, options: {
     return new Promise<string[] | null>((resolveP) => {
         const results: string[] = [];
         let buffer = '';
-        const proc = spawn(RG_PATH, rgArgs, { timeout: 30000 });
+        const proc = spawn(resolveRgPath(), rgArgs, { timeout: 30000 });
         proc.stdout.on('data', (chunk) => {
             buffer += chunk.toString();
             const lines = buffer.split('\n');
@@ -490,7 +549,7 @@ export async function ripgrepCountMatches(
         let matchCount = 0;
         let fileCount = 0;
         let buffer = '';
-        const proc = spawn(RG_PATH, countArgs, { timeout: 30000 });
+        const proc = spawn(resolveRgPath(), countArgs, { timeout: 30000 });
 
         proc.stdout.on('data', (chunk: Buffer) => {
             buffer += chunk.toString();

@@ -31,7 +31,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import fs from "fs/promises";
 import { fileURLToPath } from 'url';
 import { createFilesystemContext } from '../core/lib.js';
-import { ripgrepAvailable } from '../core/shared.js';
+import { ripgrepAvailable, getRipgrepPath } from '../core/shared.js';
 import {
   registerEnabledTools,
   resolveInitialAllowedDirectories,
@@ -164,7 +164,7 @@ async function runStdio() {
   await server.connect(transport);
   console.error("Zenith-MCP running on stdio");
   ripgrepAvailable().then(ok =>
-    console.error(ok ? `Ripgrep available at /usr/bin/rg` : 'Ripgrep not found — using JS fallback for search')
+    console.error(ok ? `Ripgrep available at ${getRipgrepPath()}` : 'Ripgrep not found — using JS fallback for search')
   );
   if (allowedDirectories.length === 0) {
     console.error("Started without allowed directories - waiting for client to provide roots via MCP protocol");

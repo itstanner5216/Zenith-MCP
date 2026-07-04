@@ -81,6 +81,7 @@ describe('HTTP streamable initialize session cleanup', () => {
             env: {
                 ...process.env,
                 HOME: homeDir,
+                ZENITH_API_KEY: '',
                 ZENITH_MCP_API_KEY: API_KEY,
             },
             stdio: ['ignore', 'ignore', 'pipe'],

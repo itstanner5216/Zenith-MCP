@@ -14,6 +14,7 @@ import path from 'path';
 import os from 'os';
 
 import { compressForTool } from '../dist/core/compression.js';
+import { findRepoRoot, getDb } from '../dist/core/symbol-index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,6 +42,98 @@ function buildSourceLines(nLines) {
     return lines.slice(0, nLines).join('\n');
 }
 
+// A realistic, source-like TS module: interfaces, interdependent functions that
+// call each other and a class. Real tree-sitter defs + call edges give the
+// structured compressor genuine ranking signal to reach the 68–72% band.
+const FIXTURE_SOURCE = [
+    'export interface Config {',
+    '    name: string;',
+    '    retries: number;',
+    '    timeout: number;',
+    '    verbose: boolean;',
+    '}',
+    '',
+    'export interface Result {',
+    '    ok: boolean;',
+    '    value: number;',
+    '    message: string;',
+    '}',
+    '',
+    'const DEFAULT_RETRIES = 3;',
+    'const DEFAULT_TIMEOUT = 1000;',
+    '',
+    'export function clamp(value: number, min: number, max: number): number {',
+    '    if (value < min) {',
+    '        return min;',
+    '    }',
+    '    if (value > max) {',
+    '        return max;',
+    '    }',
+    '    return value;',
+    '}',
+    '',
+    'export function normalizeConfig(input: Partial<Config>): Config {',
+    '    const retries = clamp(input.retries ?? DEFAULT_RETRIES, 0, 10);',
+    '    const timeout = clamp(input.timeout ?? DEFAULT_TIMEOUT, 100, 60000);',
+    '    return {',
+    '        name: input.name ?? "default",',
+    '        retries,',
+    '        timeout,',
+    '        verbose: input.verbose ?? false,',
+    '    };',
+    '}',
+    '',
+    'export function computeScore(values: number[]): number {',
+    '    let total = 0;',
+    '    for (const value of values) {',
+    '        total += clamp(value, 0, 100);',
+    '    }',
+    '    if (values.length === 0) {',
+    '        return 0;',
+    '    }',
+    '    return total / values.length;',
+    '}',
+    '',
+    'export class Runner {',
+    '    private config: Config;',
+    '    private history: Result[];',
+    '',
+    '    constructor(input: Partial<Config>) {',
+    '        this.config = normalizeConfig(input);',
+    '        this.history = [];',
+    '    }',
+    '',
+    '    run(values: number[]): Result {',
+    '        const score = computeScore(values);',
+    '        const ok = score >= 50;',
+    '        const result: Result = {',
+    '            ok,',
+    '            value: score,',
+    '            message: ok ? "passed" : "failed",',
+    '        };',
+    '        this.history.push(result);',
+    '        return result;',
+    '    }',
+    '',
+    '    summary(): string {',
+    '        const passed = this.history.filter((r) => r.ok).length;',
+    '        const total = this.history.length;',
+    '        return `${passed}/${total} passed`;',
+    '    }',
+    '',
+    '    reset(): void {',
+    '        this.history = [];',
+    '    }',
+    '}',
+    '',
+].join('\n');
+
+// read_file places the `N. ` line-number prefix once before handing text to the
+// compression pipe; mirror that here so compressForTool sees prefixed source.
+function prefixLines(source) {
+    return source.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Group 1: keep-ratio floor — replaces the single DEFAULT_COMPRESSION_KEEP_RATIO
 // test ("defaults to 0.70")
@@ -58,27 +151,24 @@ describe('compressForTool keep-ratio floor', () => {
 
     // Replacement for: "defaults to 0.70"
     it('output length reflects ~70% keep-ratio floor: shorter than input but >= 70% of input', async () => {
-        // Build text that is definitely compressible but long enough to exercise the floor.
-        const lines = [];
-        for (let i = 1; i <= 60; i++) lines.push(`  // comment line ${i} — filler text padding`);
-        lines.unshift('function bigComment() {');
-        lines.push('}');
-        const rawText = lines.join('\n');
-        // Ensure text is a .js file so getLangForFile returns 'javascript'
-        const filePath = path.join(tmpDir, 'fixture.js');
-        await fs.writeFile(filePath, rawText);
+        // A realistic source module (real defs + call edges) gives the structured
+        // compressor genuine ranking signal so it deterministically compresses.
+        await fs.mkdir(path.join(tmpDir, '.git'), { recursive: true });
+        const filePath = path.join(tmpDir, 'fixture.ts');
+        await fs.writeFile(filePath, FIXTURE_SOURCE, 'utf8');
+        getDb(findRepoRoot(tmpDir));
+        const prefixed = prefixLines(FIXTURE_SOURCE);
 
-        const maxChars = rawText.length; // maxChars == len → compressForTool returns null (no-op)
-        // Use maxChars smaller than rawText.length to trigger compression
-        const tightMax = Math.floor(rawText.length * 0.55); // force compression path
-        const result = await compressForTool(filePath, rawText, tightMax);
+        // Use maxChars smaller than prefixed.length to trigger the compression path.
+        const tightMax = Math.floor(prefixed.length * 0.55);
+        const result = await compressForTool(filePath, prefixed, tightMax);
 
         // toon's 70% floor means the actual budget used is max(tightMax, floor(len*0.70))
-        // so result is non-null and its length is < rawText.length but the floor
-        // prevents it going below 70% of rawText.length.
+        // so result is non-null and its length is < prefixed.length but the floor
+        // prevents it going below ~68% of prefixed.length.
         expect(result).not.toBeNull();
-        expect(result.length).toBeLessThan(rawText.length);
-        expect(result.length).toBeGreaterThanOrEqual(Math.floor(rawText.length * 0.60));
+        expect(result.length).toBeLessThan(prefixed.length);
+        expect(result.length).toBeGreaterThanOrEqual(Math.floor(prefixed.length * 0.60));
     });
 });
 

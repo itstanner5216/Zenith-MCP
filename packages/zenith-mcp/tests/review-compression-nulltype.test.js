@@ -88,10 +88,92 @@ describe('compression null-type guard (review finding #8)', () => {
 
             const db = getDb(resolvedRoot);
 
-            // A compressible, source-like file with one indexed def whose
-            // `type` is set (the normal case — capture-tag-derived).
-            const lines = Array.from({ length: 200 }, (_, i) => `export const value${i} = ${i};`);
-            const rawText = lines.join('\n');
+            // A realistic, source-like file (interfaces + interdependent functions
+            // + a class). Real tree-sitter defs and call edges give the structured
+            // compressor the ranking signal it needs to drop low-value bodies; a
+            // file of repeated `const x = N;` has none and is left uncompressed.
+            const rawText = [
+                'export interface Config {',
+                '    name: string;',
+                '    retries: number;',
+                '    timeout: number;',
+                '    verbose: boolean;',
+                '}',
+                '',
+                'export interface Result {',
+                '    ok: boolean;',
+                '    value: number;',
+                '    message: string;',
+                '}',
+                '',
+                'const DEFAULT_RETRIES = 3;',
+                'const DEFAULT_TIMEOUT = 1000;',
+                '',
+                'export function clamp(value: number, min: number, max: number): number {',
+                '    if (value < min) {',
+                '        return min;',
+                '    }',
+                '    if (value > max) {',
+                '        return max;',
+                '    }',
+                '    return value;',
+                '}',
+                '',
+                'export function normalizeConfig(input: Partial<Config>): Config {',
+                '    const retries = clamp(input.retries ?? DEFAULT_RETRIES, 0, 10);',
+                '    const timeout = clamp(input.timeout ?? DEFAULT_TIMEOUT, 100, 60000);',
+                '    return {',
+                '        name: input.name ?? "default",',
+                '        retries,',
+                '        timeout,',
+                '        verbose: input.verbose ?? false,',
+                '    };',
+                '}',
+                '',
+                'export function computeScore(values: number[]): number {',
+                '    let total = 0;',
+                '    for (const value of values) {',
+                '        total += clamp(value, 0, 100);',
+                '    }',
+                '    if (values.length === 0) {',
+                '        return 0;',
+                '    }',
+                '    return total / values.length;',
+                '}',
+                '',
+                'export class Runner {',
+                '    private config: Config;',
+                '    private history: Result[];',
+                '',
+                '    constructor(input: Partial<Config>) {',
+                '        this.config = normalizeConfig(input);',
+                '        this.history = [];',
+                '    }',
+                '',
+                '    run(values: number[]): Result {',
+                '        const score = computeScore(values);',
+                '        const ok = score >= 50;',
+                '        const result: Result = {',
+                '            ok,',
+                '            value: score,',
+                '            message: ok ? "passed" : "failed",',
+                '        };',
+                '        this.history.push(result);',
+                '        return result;',
+                '    }',
+                '',
+                '    summary(): string {',
+                '        const passed = this.history.filter((r) => r.ok).length;',
+                '        const total = this.history.length;',
+                '        return `${passed}/${total} passed`;',
+                '    }',
+                '',
+                '    reset(): void {',
+                '        this.history = [];',
+                '    }',
+                '}',
+                '',
+            ].join('\n');
             const relPath = 'src/large.ts';
             const absPath = path.join(resolvedRoot, relPath);
             await fs.mkdir(path.dirname(absPath), { recursive: true });
@@ -99,29 +181,31 @@ describe('compression null-type guard (review finding #8)', () => {
 
             upsertFile(db, relPath, 'hash-normal', Date.now());
             insertSymbol(db, {
-                name: 'value0',
+                name: 'normalizeConfig',
                 kind: 'def',
-                type: 'lexical_declaration', // non-null, capture-tag-style
+                type: 'function_declaration', // non-null, capture-tag-style
                 filePath: relPath,
-                line: 1,
-                endLine: 1,
+                line: 27,
+                endLine: 36,
                 column: 0,
             });
 
             // Sanity: the def really is present with a non-null type.
             const facts = getFileFacts(db, relPath);
             expect(facts.defs).toHaveLength(1);
-            expect(facts.defs[0].type).toBe('lexical_declaration');
+            expect(facts.defs[0].type).toBe('function_declaration');
 
-            // maxChars below rawText.length forces the compression path, which
-            // runs the def-mapping. Must NOT throw and must produce output.
-            const maxChars = Math.floor(rawText.length * 0.5);
-            const result = await compressForTool(absPath, rawText, maxChars);
+            // read_file prefixes the source once before the pipe sees it. maxChars
+            // below the prefixed length forces the compression path (which runs the
+            // def-mapping). Must NOT throw and must produce output.
+            const prefixed = rawText.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n');
+            const maxChars = Math.floor(prefixed.length * 0.6);
+            const result = await compressForTool(absPath, prefixed, maxChars);
 
             expect(result).not.toBeNull();
             expect(typeof result).toBe('string');
             expect(result.length).toBeGreaterThan(0);
-            expect(result.length).toBeLessThan(rawText.length);
+            expect(result.length).toBeLessThan(prefixed.length);
         });
     });
 

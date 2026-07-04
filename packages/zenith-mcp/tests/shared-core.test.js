@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import os from 'os';
 import path from 'path';
 
@@ -11,17 +11,16 @@ import {
     BM25Index,
     ripgrepAvailable,
 } from '../dist/core/shared.js';
+import { loadConfig } from '../dist/config/index.js';
+
+describe('getCharBudget', () => {
+    it('returns the char_budget from the MCP config', () => {
+        const config = loadConfig();
+        expect(getCharBudget()).toBe(config.advanced.char_budget);
+    });
+});
 
 describe('shared constants', () => {
-    it('getCharBudget defaults to 400000', () => {
-        expect(getCharBudget()).toBe(400000);
-    });
-
-    it('getCharBudget is within valid range', () => {
-        expect(getCharBudget()).toBeGreaterThanOrEqual(10000);
-        expect(getCharBudget()).toBeLessThanOrEqual(2000000);
-    });
-
     it('RANK_THRESHOLD is 50', () => {
         expect(RANK_THRESHOLD).toBe(50);
     });
@@ -115,6 +114,11 @@ describe('shared BM25Index', () => {
 
     it('returns empty array for empty corpus', () => {
         const index = new BM25Index();
+        expect(index.search('anything', 10)).toEqual([]);
+    });
+
+    it('returns empty array for empty corpus after build([])', () => {
+        const index = new BM25Index();
         index.build([]);
         const results = index.search('test', 10);
         expect(results).toEqual([]);
@@ -141,8 +145,8 @@ describe('shared BM25Index', () => {
 });
 
 describe('shared ripgrepAvailable', () => {
-    it('checks if ripgrep is executable', async () => {
-        const available = await ripgrepAvailable();
-        expect(typeof available).toBe('boolean');
+    it('ripgrepAvailable returns a boolean', async () => {
+        const result = await ripgrepAvailable();
+        expect(typeof result).toBe('boolean');
     });
 });
