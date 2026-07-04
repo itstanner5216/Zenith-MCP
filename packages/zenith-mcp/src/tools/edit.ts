@@ -22,9 +22,9 @@ import { errorMessage, type ToolContext, type ToolServer } from "./types.js";
 // shift ledger to get wrong.
 //
 // Return contract (the strings below are load-bearing, verbatim):
-//   - parse ran and was clean:  "Edit applied sucessfully, no parsing errors detected."
-//   - parse ran and found breakage: "Edit applied sucessfully. A parsing error was detected at line N, <kind>."
-//   - no parse could run:       "Edit applied sucessfully."
+//   - parse ran and was clean:  "Edit applied successfully, no parsing errors detected."
+//   - parse ran and found breakage: "Edit applied successfully. A parsing error was detected at line N, <kind>."
+//   - no parse could run:       "Edit applied successfully."
 // "detected" is a claim about an observation that actually happened. It is
 // never emitted on a path where no parse ran.
 // ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         let anyUnparsed = false;
 
         for (const group of groups) {
-            const fileTag = multiFile ? `${group.givenPath}: ` : '';
+            const fileTag = multiFile ? `${path.basename(group.givenPath)}: ` : '';
 
             if (group.absPath === null) {
                 failures.push(`${fileTag}${group.validateError ?? 'Path not resolved.'}`);
@@ -254,7 +254,19 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                             // newContent is convention, not an extra blank line.
                             let text = normalizeEols(spec.newContent);
                             if (text.endsWith('\n')) text = text.slice(0, -1);
-                            repl = reindentToTarget(text, content.slice(start, end));
+                            const oldText = content.slice(start, end);
+                            repl = reindentToTarget(text, oldText);
+                            // A whitespace-only edit IS the change: when fit
+                            // forgiveness would map an indent fix (tab→space,
+                            // deepen, uniform re-indent) back onto the original
+                            // bytes, apply the text as given — never silently
+                            // neutralize it. Flush-left text keeps the fit: a
+                            // flush-left paste is the classic wrong-depth paste,
+                            // not a dedent-to-zero.
+                            if (repl === oldText && text !== oldText) {
+                                const firstNew = text.split('\n').find(l => l.trim() !== '');
+                                if (firstNew !== undefined && leadingWhitespace(firstNew) !== '') repl = text;
+                            }
                         }
                         const clash = overlapsClaim(start, end);
                         if (clash) {
@@ -280,11 +292,20 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 // never a pattern. Claim-aware at every tier: a candidate that
                 // overlaps an earlier edit is skipped, so repeated oldContent
                 // values progress through the file in edit order.
-                const oldNorm = normalizeEols(spec.oldContent ?? '');
-                const newNorm = normalizeEols(spec.newContent);
+                let oldNorm = normalizeEols(spec.oldContent ?? '');
+                let newNorm = normalizeEols(spec.newContent);
+                // One trailing newline is line-copy convention (the same rule
+                // the line-range branch applies): strip it from each side so a
+                // copied line never joins with — or blank-pads — its neighbor.
+                // A stripped-to-empty oldContent ("\n") is a blank-LINE needle,
+                // resolved by the whole-line tier — never by raw char search.
+                // A lone "\n" newContent survives (it means a blank line).
+                if (oldNorm.endsWith('\n')) oldNorm = oldNorm.slice(0, -1);
+                if (newNorm.endsWith('\n') && newNorm.length > 1) newNorm = newNorm.slice(0, -1);
                 let start = -1;
                 let end = -1;
                 let matchedWholeLines = false;
+                let tier4Map: Map<string, string> | null = null;
 
                 // Tier 1: exact. A match that starts at a line start and ends
                 // with only whitespace between it and the end of that line
@@ -292,7 +313,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 // outcome the trailing-whitespace-tolerant tier gives, so a
                 // single-line and a multi-line oldContent behave alike.
                 let from = 0;
-                while (true) {
+                while (oldNorm !== '') {
                     const idx = content.indexOf(oldNorm, from);
                     if (idx === -1) break;
                     let candidateEnd = idx + oldNorm.length;
@@ -383,11 +404,99 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     }
                 }
 
+                // Tier 4: indent-style-agnostic whole-line match (tabs↔spaces).
+                // Lines must agree on trimmed content; the block's indent
+                // structure must map consistently (same old indent → same file
+                // indent, distinct → distinct, deeper → longer). This is the
+                // loosest tier, so it applies only when exactly one candidate
+                // exists in the whole file — correctness beats leniency.
+                if (start === -1) {
+                    const hasBody = oldLines.some(l => l.trim() !== '');
+                    if (hasBody) {
+                        let only: { line: number; map: Map<string, string> } | null = null;
+                        let count = 0;
+                        for (let i = 0; i + blockLen <= lineCount && count < 2; i++) {
+                            const map = new Map<string, string>();
+                            let ok = true;
+                            for (let j = 0; j < blockLen; j++) {
+                                const o = oldLines[j] ?? '';
+                                const f = lines[i + j] ?? '';
+                                const body = o.trim();
+                                if (body !== f.trim()) { ok = false; break; }
+                                if (body === '') continue;
+                                const oi = leadingWhitespace(o);
+                                const fi = leadingWhitespace(f);
+                                const mapped = map.get(oi);
+                                if (mapped === undefined) map.set(oi, fi);
+                                else if (mapped !== fi) { ok = false; break; }
+                            }
+                            if (ok) {
+                                // Structural consistency: distinct old indents map to
+                                // distinct file indents, and depth order is preserved.
+                                const entries = [...map.entries()].sort((a, b) => a[0].length - b[0].length);
+                                for (let k = 1; k < entries.length; k++) {
+                                    const prev = entries[k - 1];
+                                    const cur = entries[k];
+                                    if (prev === undefined || cur === undefined) { ok = false; break; }
+                                    if (prev[0].length === cur[0].length ||
+                                        prev[1].length >= cur[1].length ||
+                                        prev[1] === cur[1]) { ok = false; break; }
+                                }
+                            }
+                            if (!ok) continue;
+                            const cStart = lineStartAt(i + 1);
+                            const cEnd = lineTextEndAt(i + blockLen);
+                            if (overlapsClaim(cStart, cEnd)) continue;
+                            count++;
+                            only = { line: i, map };
+                        }
+                        if (count === 1 && only !== null) {
+                            start = lineStartAt(only.line + 1);
+                            end = lineTextEndAt(only.line + blockLen);
+                            matchedWholeLines = true;
+                            tier4Map = only.map;
+                        }
+                    }
+                }
+
                 if (start === -1) {
                     failures.push(`${tag}${rangeNote}oldContent not found.`);
                     continue;
                 }
-                const repl = matchedWholeLines ? reindentToTarget(newNorm, content.slice(start, end)) : newNorm;
+                const oldText = content.slice(start, end);
+                let repl: string;
+                if (tier4Map !== null) {
+                    // The match crossed an indent-style boundary; re-indent the
+                    // replacement through the same old→file indent map so it
+                    // lands in the FILE's style (tabs stay tabs). Unmapped
+                    // deeper levels keep their extra depth verbatim after the
+                    // longest mapped prefix.
+                    const map = tier4Map;
+                    repl = newNorm.split('\n').map(l => {
+                        if (l.trim() === '') return l;
+                        const wi = leadingWhitespace(l);
+                        const direct = map.get(wi);
+                        if (direct !== undefined) return direct + l.slice(wi.length);
+                        let bestKey: string | null = null;
+                        for (const k of map.keys()) {
+                            if (wi.startsWith(k) && (bestKey === null || k.length > bestKey.length)) bestKey = k;
+                        }
+                        if (bestKey !== null) {
+                            const base = map.get(bestKey) ?? '';
+                            return base + wi.slice(bestKey.length) + l.slice(wi.length);
+                        }
+                        return l;
+                    }).join('\n');
+                } else {
+                    repl = matchedWholeLines ? reindentToTarget(newNorm, oldText) : newNorm;
+                    // Same whitespace-only-intent rule as the line-range branch:
+                    // fit forgiveness must never round-trip a deliberate indent
+                    // fix back onto the original bytes.
+                    if (repl === oldText && newNorm !== oldText) {
+                        const firstNew = newNorm.split('\n').find(l => l.trim() !== '');
+                        if (firstNew !== undefined && leadingWhitespace(firstNew) !== '') repl = newNorm;
+                    }
+                }
                 claims.push({ start, end, repl, editIndex: index });
             }
 
@@ -496,11 +605,11 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         const out: string[] = [...failures];
         if (anyWrote) {
             if (firstParseError !== null) {
-                out.push(`Edit applied sucessfully. A parsing error was detected at line ${firstParseError.line}, ${firstParseError.kind}.`);
+                out.push(`Edit applied successfully. A parsing error was detected at line ${firstParseError.line}, ${firstParseError.kind}.`);
             } else if (anyUnparsed) {
-                out.push('Edit applied sucessfully.');
+                out.push('Edit applied successfully.');
             } else {
-                out.push('Edit applied sucessfully, no parsing errors detected.');
+                out.push('Edit applied successfully, no parsing errors detected.');
             }
         }
         return { content: [{ type: 'text' as const, text: out.join('\n') }] };

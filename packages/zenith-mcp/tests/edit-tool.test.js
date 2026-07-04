@@ -22,9 +22,9 @@ import { execFileSync } from 'child_process';
 //     missing/unwritable files and genuinely unlocatable targets
 // ---------------------------------------------------------------------------
 
-const CLEAN = 'Edit applied sucessfully, no parsing errors detected.';
-const BARE = 'Edit applied sucessfully.';
-const STATE2_RE = /^Edit applied sucessfully\. A parsing error was detected at line \d+, .+\.$/;
+const CLEAN = 'Edit applied successfully, no parsing errors detected.';
+const BARE = 'Edit applied successfully.';
+const STATE2_RE = /^Edit applied successfully\. A parsing error was detected at line \d+, .+\.$/;
 
 function mkTmpGitRepo() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-tool-test-'));
@@ -385,6 +385,123 @@ describe('content matching forgiveness', () => {
 // ---------------------------------------------------------------------------
 // Character safety — content is never a pattern
 // ---------------------------------------------------------------------------
+
+describe('whitespace-intent edits — fit forgiveness must never neutralize a deliberate indent fix', () => {
+    it('tab→spaces indent fix via line-range applies, not silently no-ops', async () => {
+        const p = mkFile('a.txt', '\tfoo()\n');
+        const text = await run(p, [{ startLine: 1, endLine: 1, newContent: '    foo()' }]);
+        expect(text).toBe(BARE);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('    foo()\n');
+    });
+
+    it('deepening an indent via line-range applies (the Python indent-fix case)', async () => {
+        const p = mkFile('a.txt', 'if (x)\n    foo()\n');
+        await run(p, [{ startLine: 2, endLine: 2, newContent: '        foo()' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('if (x)\n        foo()\n');
+    });
+
+    it('a multi-line pure re-indent via line-range applies', async () => {
+        const p = mkFile('a.txt', 'def f():\n  a()\n  b()\n');
+        await run(p, [{ startLine: 2, endLine: 3, newContent: '    a()\n    b()' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('def f():\n    a()\n    b()\n');
+    });
+
+    it('an indent fix via content mode applies', async () => {
+        const p = mkFile('a.txt', '\tfoo()\nbar\n');
+        await run(p, [{ oldContent: '\tfoo()', newContent: '    foo()' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('    foo()\nbar\n');
+    });
+
+    it('flush-left newContent still gets fit forgiveness (wrong-depth paste, not a dedent)', async () => {
+        const p = mkFile('a.txt', 'top\n        old();\nbottom\n');
+        await run(p, [{ startLine: 2, endLine: 2, newContent: 'new1();\nnew2();' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('top\n        new1();\n        new2();\nbottom\n');
+    });
+});
+
+describe('trailing-newline convention — content mode mirrors the line-range rule', () => {
+    it('oldContent with one trailing newline never joins the next line', async () => {
+        const p = mkFile('a.txt', 'a\nfoo();\nbar\n');
+        await run(p, [{ oldContent: 'foo();\n', newContent: 'kept();' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nkept();\nbar\n');
+    });
+
+    it('newContent with one trailing newline never inserts a stray blank line', async () => {
+        const p = mkFile('a.txt', 'a\nfoo();\nbar\n');
+        await run(p, [{ oldContent: 'foo();', newContent: 'kept();\n' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nkept();\nbar\n');
+    });
+
+    it('CRLF file: trailing-CRLF newContent stays convention, endings preserved', async () => {
+        const p = mkFile('a.txt', 'a\r\nfoo();\r\nbar\r\n');
+        await run(p, [{ oldContent: 'foo();', newContent: 'kept();\r\n' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\r\nkept();\r\nbar\r\n');
+    });
+
+    it('whole-file oldContent including trailing newline preserves the final newline', async () => {
+        const p = mkFile('a.txt', 'only line\n');
+        await run(p, [{ oldContent: 'only line\n', newContent: 'replaced' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('replaced\n');
+    });
+
+    it('a lone "\\n" oldContent still means a blank line, not a stripped copy', async () => {
+        const p = mkFile('a.txt', 'a\n\nb\n');
+        await run(p, [{ oldContent: '\n', newContent: 'mid' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nmid\nb\n');
+    });
+});
+
+describe('tab↔space style boundary (tier 4) — unique matches only', () => {
+    it('space-indented multi-line oldContent matches a tab-indented block and lands in tabs', async () => {
+        const p = mkFile('a.txt', 'top\n\tif (x) {\n\t\twork();\n\t}\nbottom\n');
+        const text = await run(p, [{
+            oldContent: '    if (x) {\n        work();\n    }',
+            newContent: '    if (y) {\n        moreWork();\n    }',
+        }]);
+        expect(text).toBe(BARE);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('top\n\tif (y) {\n\t\tmoreWork();\n\t}\nbottom\n');
+    });
+
+    it('tab-indented oldContent matches a space-indented block and lands in spaces', async () => {
+        const p = mkFile('a.txt', 'top\n    if (x) {\n        work();\n    }\nbottom\n');
+        await run(p, [{
+            oldContent: '\tif (x) {\n\t\twork();\n\t}',
+            newContent: '\tif (y) {\n\t\tmoreWork();\n\t}',
+        }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('top\n    if (y) {\n        moreWork();\n    }\nbottom\n');
+    });
+
+    it('two style-agnostic candidates are ambiguous — not-found, file untouched', async () => {
+        // Two identical tab-indented multi-level blocks; a space-indented
+        // oldContent could map onto either — tier 4 must refuse both.
+        const original = '\tif (x) {\n\t\twork();\n\t}\nmid\n\tif (x) {\n\t\twork();\n\t}\n';
+        const p = mkFile('a.txt', original);
+        const text = await run(p, [{
+            oldContent: '    if (x) {\n        work();\n    }',
+            newContent: '    if (y) {\n        moreWork();\n    }',
+        }]);
+        expect(text).toBe('oldContent not found.');
+        expect(fs.readFileSync(p, 'utf-8')).toBe(original);
+    });
+
+    it('a block whose relative depth disagrees is refused across the style boundary', async () => {
+        const original = '\ta()\n\tb()\n'; // same depth in file
+        const p = mkFile('a.txt', original);
+        // oldContent claims b() is deeper than a() — structure mismatch → refuse
+        const text = await run(p, [{ oldContent: '    a()\n        b()', newContent: 'x()' }]);
+        expect(text).toBe('oldContent not found.');
+        expect(fs.readFileSync(p, 'utf-8')).toBe(original);
+    });
+
+    it('newContent lines deeper than any oldContent level keep their extra depth after the mapped base', async () => {
+        const p = mkFile('a.txt', '\tstart\n\tend\n');
+        await run(p, [{
+            oldContent: '    start\n    end',
+            newContent: '    start\n        inner\n    end',
+        }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('\tstart\n\t    inner\n\tend\n');
+    });
+});
 
 describe('character safety', () => {
     const CASES = [
@@ -825,7 +942,7 @@ describe('multi-file', () => {
             { path: b, startLine: 1, endLine: 1, newContent: 'x' },
             { path: c, startLine: 1, endLine: 1, newContent: 'CCC' },
         ]);
-        expect(text).toBe(`${b}: File not found.\n${BARE}`);
+        expect(text).toBe(`missing.txt: File not found.\n${BARE}`);
         expect(fs.readFileSync(a, 'utf-8')).toBe('AAA\n');
         expect(fs.readFileSync(c, 'utf-8')).toBe('CCC\n');
     });
@@ -838,7 +955,7 @@ describe('multi-file', () => {
             { startLine: 1, endLine: 1, newContent: 'AAA' },
             { path: b, oldContent: 'zzz', newContent: 'x' },
         ]);
-        expect(text).toBe(`${b}: #2: oldContent not found.\n${BARE}`);
+        expect(text).toBe(`b.txt: #2: oldContent not found.\n${BARE}`);
         expect(fs.readFileSync(b, 'utf-8')).toBe('bbb\n');
         expect(fs.statSync(b).mtimeMs).toBe(before);
     });
