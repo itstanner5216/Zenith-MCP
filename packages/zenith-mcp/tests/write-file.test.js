@@ -161,8 +161,8 @@ describe('write_file findResumeOffset (internal logic via append)', () => {
         const filePath = path.join(repoDir, 'dir-append-target');
         fs.mkdirSync(filePath);
 
-        // Append reads the existing file first (for overlap dedup); reading a directory
-        // fails with EISDIR on that read path, which surfaces the code in the message.
+        // Append reads the existing file first (for overlap dedup); reading
+        // a directory fails with EISDIR on that read path.
         await expect(handler({ path: filePath, content: 'appended data', append: true }))
             .rejects.toThrow(/Cannot read existing file for append: EISDIR/);
     });
