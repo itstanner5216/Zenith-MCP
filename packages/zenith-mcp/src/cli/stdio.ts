@@ -12,8 +12,10 @@ loadDotEnvFiles(import.meta.url);
 // ---------------------------------------------------------------------------
 // cli/stdio.ts — stdio MCP entrypoint
 //
-// SDK ownership: this entrypoint is on @modelcontextprotocol/server@2.0.0-alpha.2
-// for v2-specific compatibility/evaluation needs. This does not imply that
+// SDK ownership: this entrypoint is on @modelcontextprotocol/server@2.0.0-alpha.3
+// for v2-specific compatibility/evaluation needs. As of alpha.3 the stdio
+// transport moved to the `@modelcontextprotocol/server/stdio` subpath export;
+// `McpServer` remains on the package's main entry. This does not imply that
 // regular v2 tool dispatch avoids the parallel-dispatch race seen in v1;
 // keep that limitation in mind when reasoning about concurrent requests.
 //
@@ -24,10 +26,8 @@ loadDotEnvFiles(import.meta.url);
 // ---------------------------------------------------------------------------
 
 import { createRequire } from 'module';
-import {
-  McpServer,
-  StdioServerTransport,
-} from "@modelcontextprotocol/server";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import fs from "fs/promises";
 import { fileURLToPath } from 'url';
 import { createFilesystemContext } from '../core/lib.js';
