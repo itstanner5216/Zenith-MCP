@@ -33,7 +33,7 @@ jobs:
           cache-path: ~/project/node_modules
           override-ci-command: npm install
       - run:
-          command: npm run build
+          command: pnpm build
       - run:
           name: Create the ~/artifacts directory if it doesn't exist
           command: mkdir -p ~/artifacts
