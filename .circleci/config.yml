@@ -21,7 +21,7 @@ jobs:
           override-ci-command: pnpm install --frozen-lockfile
       - run:
           name: Run tests
-          command: npm test --passWithNoTests
+          command: pnpm test
   build-node:
     # Build node project
     executor:
