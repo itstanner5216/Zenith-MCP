@@ -63,9 +63,7 @@ jobs:
       - run:
           name: Update deployment status to running
           command: circleci run release update deploy --status=RUNNING
-      - run:
-          name: found github actions config
-          command: ':'
+      # (removed auto-generated no-op step)
       - run:
           name: Update deployment status to success
           command: circleci run release update deploy --status=SUCCESS
