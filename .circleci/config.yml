@@ -20,8 +20,10 @@ jobs:
           cache-path: ~/project/node_modules
           override-ci-command: pnpm install --frozen-lockfile
       - run:
-          name: Run tests
-          command: pnpm test
+          name: Build & run tests (with coverage)
+          command: |
+            pnpm build
+            pnpm --filter zenith-mcp run test:coverage
   build-node:
     # Build node project
     executor:
