@@ -22,7 +22,9 @@ jobs:
           command: npm test --passWithNoTests
   build-node:
     # Build node project
-    executor: node/default
+    executor:
+      name: node/default
+      tag: "26.3.0"
     steps:
       - checkout
       - node/install-packages:
