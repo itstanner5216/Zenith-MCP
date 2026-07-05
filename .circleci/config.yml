@@ -9,9 +9,14 @@ jobs:
     executor: node/default
     steps:
       - checkout
+      - run:
+          name: Enable pnpm (Corepack)
+          command: |
+            corepack enable
+            corepack prepare pnpm@11.9.0 --activate
       - node/install-packages:
           cache-path: ~/project/node_modules
-          override-ci-command: npm install
+          override-ci-command: pnpm install --frozen-lockfile
       - run:
           name: Run tests
           command: npm test --passWithNoTests
