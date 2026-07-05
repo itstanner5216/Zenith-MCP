@@ -29,9 +29,14 @@ jobs:
       tag: "26.3.0"
     steps:
       - checkout
+      - run:
+          name: Enable pnpm (Corepack)
+          command: |
+            corepack enable
+            corepack prepare pnpm@11.9.0 --activate
       - node/install-packages:
           cache-path: ~/project/node_modules
-          override-ci-command: npm install
+          override-ci-command: pnpm install --frozen-lockfile
       - run:
           command: pnpm build
       - run:
