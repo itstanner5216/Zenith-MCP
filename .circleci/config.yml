@@ -6,7 +6,9 @@ orbs:
 jobs:
   test-node:
     # Install node dependencies and run tests
-    executor: node/default
+    executor:
+      name: node/default
+      tag: "26.3.0"
     steps:
       - checkout
       - run:
