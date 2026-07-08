@@ -667,7 +667,8 @@ export function getFileBlockEdges(
     // Build name → index lookup
     const nameToIndex = new Map<string, number>();
     for (let i = 0; i < blockNames.length; i++) {
-        nameToIndex.set(blockNames[i]!, i);
+        const name = blockNames[i];
+        if (name !== undefined) nameToIndex.set(name, i);
     }
 
     // Query all edges where the caller is a definition in this file
@@ -826,7 +827,7 @@ export function getVersionPatch(conn: DbConnection, id: number): { original_text
 }
 
 /**
- * SQL: SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ? [AND file_path = ?] ORDER BY created_at DESC
+ * SQL: SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ? [AND file_path = ?] ORDER BY created_at DESC, id DESC
  */
 export function getVersionHistory(
     conn: DbConnection,
@@ -840,7 +841,10 @@ export function getVersionHistory(
         sql += ' AND file_path = ?';
         params.push(filePath);
     }
-    sql += ' ORDER BY created_at DESC';
+    // id DESC tie-breaks rows sharing a created_at millisecond (batched edit
+    // snapshots land together), matching the retention query's ordering so
+    // "newest" is deterministic for undo/reuse.
+    sql += ' ORDER BY created_at DESC, id DESC';
     return handle(conn)
         .prepare(sql)
         .all(...params) as { id: number; symbol_name: string; file_path: string | null; created_at: number; text_hash: string | null }[];
@@ -865,10 +869,15 @@ export function getVersionMeta(conn: DbConnection, id: number): { original_text:
 }
 
 /**
- * SQL: DELETE FROM versions WHERE created_at < ?
+ * SQL: DELETE FROM versions WHERE created_at < ? AND symbol_name NOT LIKE 'file://%'
+ *
+ * Edit-patch rows (symbol_name 'file://<relPath>') are excluded: their
+ * retention is the EDIT_SNAPSHOT_CAP newest per session/file, enforced in
+ * snapshotEditVersion — the refactor TTL must not silently erode undo
+ * history beneath that cap.
  */
 export function pruneOldVersions(conn: DbConnection, beforeTimestamp: number): void {
-    prepareOrCache(conn, 'DELETE FROM versions WHERE created_at < ?')
+    prepareOrCache(conn, "DELETE FROM versions WHERE created_at < ? AND symbol_name NOT LIKE 'file://%'")
         .run(beforeTimestamp);
 }
 

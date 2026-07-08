@@ -56,6 +56,7 @@ function tmpLitter(dir) {
 
 const toolMod = await import('../dist/tools/edit.js');
 const symbolIndex = await import('../dist/core/symbol-index.js');
+const dbAdapter = await import('../dist/core/db-adapter.js');
 
 function mkHandler(repoDir) {
     const { server, calls } = captureHandler();
@@ -648,6 +649,106 @@ describe('filesystem', () => {
 });
 
 // ---------------------------------------------------------------------------
+// PR-review fixes — verified findings, each locked by a regression proof
+// ---------------------------------------------------------------------------
+
+describe('zero-length claims occupy their point (review #27)', () => {
+    it('a blank-line content edit cannot slip inside an existing range claim', async () => {
+        // Range claims [line3..line4] including the blank line; the blank-line
+        // needle must NOT match at the same start and resurrect deleted text.
+        const p = mkFile('a.txt', 'a\nb\n\nc\nd\n');
+        const text = await run(p, [
+            { startLine: 3, endLine: 4, newContent: 'X' },
+            { oldContent: '\n', newContent: 'INSERTED' },
+        ]);
+        expect(text).toBe('#2: oldContent not found.\nEdit applied successfully.');
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nb\nX\nd\n');
+    });
+
+    it('two blank-line edits progress to distinct blank lines', async () => {
+        const p = mkFile('a.txt', 'a\n\nb\n\nc\n');
+        await run(p, [
+            { oldContent: '\n', newContent: 'one' },
+            { oldContent: '\n', newContent: 'two' },
+        ]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\none\nb\ntwo\nc\n');
+    });
+
+    it('a second blank-line edit with no blank left fails alone', async () => {
+        const p = mkFile('a.txt', 'a\n\nb\n');
+        const text = await run(p, [
+            { oldContent: '\n', newContent: 'one' },
+            { oldContent: '\n', newContent: 'two' },
+        ]);
+        expect(text).toBe('#2: oldContent not found.\nEdit applied successfully.');
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\none\nb\n');
+    });
+});
+
+describe('synthetic trailing line is not editable (review #17/#18)', () => {
+    it('an overshooting endLine cannot consume the trailing newline', async () => {
+        const p = mkFile('a.txt', 'a\nb\n');
+        await run(p, [{ startLine: 1, endLine: 99, newContent: 'X' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('X\n');
+    });
+
+    it('startLine on the synthetic line is out of bounds', async () => {
+        const p = mkFile('a.txt', 'a\nb\n');
+        const text = await run(p, [{ startLine: 3, endLine: 3, newContent: 'X' }]);
+        expect(text).toBe('Line range 3-3 out of bounds (2 lines).');
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nb\n');
+    });
+
+    it('the out-of-bounds message reports the real line count', async () => {
+        const p = mkFile('a.txt', 'a\nb\n'); // 2 real lines, split gives 3
+        const text = await run(p, [{ startLine: 50, endLine: 60, newContent: 'X' }]);
+        expect(text).toBe('Line range 50-60 out of bounds (2 lines).');
+    });
+
+    it('the last line of a file without a trailing newline stays editable', async () => {
+        const p = mkFile('a.txt', 'a\nb');
+        await run(p, [{ startLine: 2, endLine: 2, newContent: 'B' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nB');
+    });
+});
+
+describe('binary / non-UTF-8 refusal (review #9)', () => {
+    it('refuses a file with NUL bytes, leaving it untouched', async () => {
+        const p = path.join(repoDir, 'bin.dat');
+        const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0a, 0xff, 0xfe]);
+        fs.writeFileSync(p, bytes);
+        const text = await run(p, [{ startLine: 1, endLine: 1, newContent: 'x' }]);
+        expect(text).toBe('Not a UTF-8 text file.');
+        expect(fs.readFileSync(p).equals(bytes)).toBe(true);
+    });
+
+    it('refuses invalid UTF-8 without NUL bytes, leaving it untouched', async () => {
+        const p = path.join(repoDir, 'bad.txt');
+        const bytes = Buffer.from([0x61, 0x0a, 0xc3, 0x28, 0x0a]); // 0xC3 0x28 is malformed
+        fs.writeFileSync(p, bytes);
+        const text = await run(p, [{ startLine: 1, endLine: 1, newContent: 'x' }]);
+        expect(text).toBe('Not a UTF-8 text file.');
+        expect(fs.readFileSync(p).equals(bytes)).toBe(true);
+    });
+
+    it('a file legitimately containing U+FFFD is still editable', async () => {
+        const p = mkFile('a.txt', 'a\n\uFFFD\nb\n');
+        await run(p, [{ startLine: 3, endLine: 3, newContent: 'B' }]);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\n\uFFFD\nB\n');
+    });
+});
+
+describe('setgid/setuid bits survive the write (review #20/#29)', () => {
+    it('preserves mode 2755 through chown→chmod→rename', async () => {
+        const p = mkFile('s.sh', 'echo hi\n');
+        fs.chmodSync(p, 0o2755);
+        await run(p, [{ startLine: 1, endLine: 1, newContent: 'echo yo' }]);
+        expect((fs.statSync(p).mode & 0o7777).toString(8)).toBe('2755');
+        expect(fs.readFileSync(p, 'utf-8')).toBe('echo yo\n');
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Injected write failure — cleanup still happens
 // ---------------------------------------------------------------------------
 
@@ -681,6 +782,12 @@ describe('injected failure between temp-write and rename', () => {
         expect(result.content[0].text).toBe('Write failed (EIO).');
         expect(fs.readFileSync(p, 'utf-8')).toBe('a\nb\n');
         expect(tmpLitter(repoDir)).toEqual([]);
+        // Review #8/#19/#31: snapshots are recorded only after a confirmed
+        // rename — a failed write must leave zero phantom undo history.
+        const repoRoot = symbolIndex.findRepoRoot(p);
+        const db = symbolIndex.getDb(repoRoot);
+        const rel = path.relative(repoRoot, p);
+        expect(symbolIndex.getVersionHistory(db, `file://${rel}`, 'test-session', rel)).toEqual([]);
     });
 });
 
@@ -698,6 +805,38 @@ describe('snapshots', () => {
             rows: symbolIndex.getVersionHistory(db, `file://${rel}`, 'test-session', rel),
         };
     }
+
+    it('same-millisecond batch snapshots order deterministically, newest first (review #28)', async () => {
+        // A batched call lands multiple snapshots in the same created_at
+        // millisecond; id DESC must tie-break so "newest" is stable for undo.
+        const p = mkFile('a.txt', 'a\nb\nc\nd\ne\n');
+        await run(p, [
+            { startLine: 1, endLine: 1, newContent: 'A' },
+            { startLine: 3, endLine: 3, newContent: 'C' },
+            { startLine: 5, endLine: 5, newContent: 'E' },
+        ]);
+        const { rows } = historyFor(p);
+        expect(rows.length).toBe(3);
+        for (let i = 1; i < rows.length; i++) {
+            expect(rows[i - 1].created_at).toBeGreaterThanOrEqual(rows[i].created_at);
+            if (rows[i - 1].created_at === rows[i].created_at) {
+                expect(rows[i - 1].id).toBeGreaterThan(rows[i].id);
+            }
+        }
+    });
+
+    it('the refactor TTL prune never deletes edit-patch rows (review #10)', async () => {
+        const p = mkFile('a.txt', 'a\nb\n');
+        await run(p, [{ startLine: 1, endLine: 1, newContent: 'A' }]);
+        const { db, rows } = historyFor(p);
+        expect(rows.length).toBe(1);
+        // Prune everything older than the far future: symbol versions would
+        // all die, file:// edit patches must survive (their retention is the
+        // per-file cap, not the refactor TTL).
+        dbAdapter.pruneOldVersions(db, Date.now() + 86_400_000);
+        const { rows: after } = historyFor(p);
+        expect(after.length).toBe(1);
+    });
 
     it('stores oldText, applied newText, and the original start line for a line edit', async () => {
         const p = mkFile('a.txt', 'a\nb\nc\n');

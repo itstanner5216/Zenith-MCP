@@ -175,9 +175,22 @@ export function register(server: ToolServer, ctx: ToolContext): void {
 
             let raw: string;
             try {
-                raw = await fs.readFile(absPath, 'utf-8');
-            } catch {
-                failures.push(`${fileTag}File not readable.`);
+                // A mis-decoded read would silently persist U+FFFD replacement
+                // characters back to disk — corruption, not an edit. Binary and
+                // non-UTF-8 files are refused outright: NUL bytes catch UTF-16
+                // and binary formats whose bytes happen to be valid UTF-8;
+                // fatal decoding catches everything else. ignoreBOM keeps the
+                // BOM in the decoded string so the BOM bookkeeping below can
+                // preserve it (TextDecoder strips it by default; readFile with
+                // a utf-8 encoding does not).
+                const buf = await fs.readFile(absPath);
+                if (buf.includes(0)) {
+                    failures.push(`${fileTag}Not a UTF-8 text file.`);
+                    continue;
+                }
+                raw = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
+            } catch (error) {
+                failures.push(`${fileTag}${error instanceof TypeError ? 'Not a UTF-8 text file.' : 'File not readable.'}`);
                 continue;
             }
 
@@ -199,6 +212,12 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             // reconstruction pass at the end.
             const lines = content.split('\n');
             const lineCount = lines.length;
+            // A file ending in a newline splits into a synthetic final empty
+            // string that is NOT an editable line. All user-facing line math
+            // (bounds, clamps, whole-line match scans, failure messages) uses
+            // the real line count, so a clamped range can never consume the
+            // file's trailing newline or target the phantom line.
+            const maxLine = content.endsWith('\n') ? lineCount - 1 : lineCount;
             const lineStarts: number[] = new Array(lineCount);
             {
                 let offset = 0;
@@ -215,7 +234,16 @@ export function register(server: ToolServer, ctx: ToolContext): void {
 
             const claims: Claim[] = [];
             const overlapsClaim = (start: number, end: number): Claim | undefined =>
-                claims.find(c => start < c.end && c.start < end);
+                claims.find(c => {
+                    if (start < c.end && c.start < end) return true; // proper overlap
+                    // Zero-length spans (blank-line replace, empty-file edit)
+                    // still occupy their point: two claims may not share it,
+                    // and a point at the start of — or inside — a non-empty
+                    // claim was already consumed by that claim.
+                    if (start === end) return c.start === c.end ? c.start === start : c.start <= start && start < c.end;
+                    if (c.start === c.end) return start <= c.start && c.start < end;
+                    return false;
+                });
 
             for (const { spec, index } of group.edits) {
                 const tag = `${fileTag}${multiEdit ? `#${index + 1}: ` : ''}`;
@@ -228,8 +256,8 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     // Swapped or off-the-front ranges are obvious intent — take them.
                     const s = Math.max(1, Math.min(spec.startLine, spec.endLine));
                     const eRaw = Math.max(spec.startLine, spec.endLine);
-                    if (s <= lineCount) {
-                        const e = Math.min(Math.max(eRaw, s), lineCount);
+                    if (s <= maxLine) {
+                        const e = Math.min(Math.max(eRaw, s), maxLine);
                         let start: number;
                         let end: number;
                         let repl: string;
@@ -277,10 +305,10 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                         continue;
                     }
                     if (!hasOld) {
-                        failures.push(`${tag}Line range ${spec.startLine}-${spec.endLine} out of bounds (${lineCount} lines).`);
+                        failures.push(`${tag}Line range ${spec.startLine}-${spec.endLine} out of bounds (${maxLine} lines).`);
                         continue;
                     }
-                    rangeNote = `Line range ${spec.startLine}-${spec.endLine} out of bounds (${lineCount} lines); `;
+                    rangeNote = `Line range ${spec.startLine}-${spec.endLine} out of bounds (${maxLine} lines); `;
                 }
 
                 if (!hasOld) {
@@ -339,7 +367,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 // Tier 2: whole-line match tolerating trailing-whitespace drift.
                 if (start === -1) {
                     const oldTrimmed = oldLines.map(l => l.trimEnd());
-                    for (let i = 0; i + blockLen <= lineCount; i++) {
+                    for (let i = 0; i + blockLen <= maxLine; i++) {
                         let matches = true;
                         for (let j = 0; j < blockLen; j++) {
                             if ((lines[i + j] ?? '').trimEnd() !== (oldTrimmed[j] ?? '')) {
@@ -368,7 +396,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     if (anchorIdx !== -1) {
                         const oldBase = leadingWhitespace(oldLines[anchorIdx] ?? '');
                         const candidates: Array<{ line: number; delta: number }> = [];
-                        for (let i = 0; i + blockLen <= lineCount; i++) {
+                        for (let i = 0; i + blockLen <= maxLine; i++) {
                             const anchorLine = lines[i + anchorIdx] ?? '';
                             if (anchorLine.trim() === '') continue;
                             const fileBase = leadingWhitespace(anchorLine);
@@ -415,7 +443,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     if (hasBody) {
                         let only: { line: number; map: Map<string, string> } | null = null;
                         let count = 0;
-                        for (let i = 0; i + blockLen <= lineCount && count < 2; i++) {
+                        for (let i = 0; i + blockLen <= maxLine && count < 2; i++) {
                             const map = new Map<string, string>();
                             let ok = true;
                             for (let j = 0; j < blockLen; j++) {
@@ -523,8 +551,8 @@ export function register(server: ToolServer, ctx: ToolContext): void {
             rebuilt += content.slice(pos);
             const finalText = (hadBom ? '\uFEFF' : '') + (eol === '\n' ? rebuilt : rebuilt.split('\n').join(eol));
 
-            // ── Snapshot + index plumbing (resolved once, used before and
-            // after the write). Both are best-effort safety nets: they must
+            // ── Snapshot + index plumbing (resolved once, used after a
+            // confirmed write). Both are best-effort safety nets: they must
             // never fail an edit.
             const repoRoot = findRepoRoot(absPath);
             let db: ReturnType<typeof getDb> | null = null;
@@ -536,30 +564,19 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                     db = null;
                 }
             }
-            // Every write is preceded by per-edit patch snapshots, keyed per
-            // session/file: a future undo reverses the newest patch by
-            // content (which survives line drift), and a cached patch can be
-            // re-applied elsewhere without restating newText.
-            if (db !== null && repoRoot !== null) {
-                try {
-                    const relPath = path.relative(repoRoot, absPath);
-                    const sessionId = ctx.sessionId ?? getSessionId();
-                    for (const p of patches) {
-                        snapshotEdit(db, relPath, p.oldText, p.newText, p.line, sessionId);
-                    }
-                } catch { /* snapshotting is a safety net; never fail the edit */ }
-            }
 
-            // ── Atomic write: temp → chmod (exact original mode; chmod is not
-            // umask-masked, writeFile's mode option is) → best-effort chown →
-            // rename. The temp file is removed on every failure path.
+            // ── Atomic write: temp → best-effort chown → chmod (exact original
+            // mode; chmod is not umask-masked, writeFile's mode option is;
+            // chown runs FIRST because chown(2) clears setuid/setgid, so
+            // chmod-after restores them) → rename. The temp file is removed
+            // on every failure path.
             const tempPath = `${absPath}.${randomBytes(8).toString('hex')}.tmp`;
             try {
                 await fs.writeFile(tempPath, finalText, 'utf-8');
-                await fs.chmod(tempPath, fileMode);
                 try {
                     await fs.chown(tempPath, fileUid, fileGid);
                 } catch { /* ownership is best-effort — never fail an edit over chown */ }
+                await fs.chmod(tempPath, fileMode);
                 await fs.rename(tempPath, absPath);
             } catch (error) {
                 try { await fs.unlink(tempPath); } catch { /* already gone */ }
@@ -570,6 +587,22 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 continue;
             }
             anyWrote = true;
+
+            // ── Per-edit patch snapshots, recorded only for edits that truly
+            // landed on disk (the rename above succeeded) so a failed write
+            // can never leave phantom undo history. Keyed per session/file: a
+            // future undo reverses the newest patch by content (which survives
+            // line drift), and a cached patch can be re-applied elsewhere
+            // without restating newText.
+            if (db !== null && repoRoot !== null) {
+                try {
+                    const relPath = path.relative(repoRoot, absPath);
+                    const sessionId = ctx.sessionId ?? getSessionId();
+                    for (const p of patches) {
+                        snapshotEdit(db, relPath, p.oldText, p.newText, p.line, sessionId);
+                    }
+                } catch { /* snapshotting is a safety net; never fail the edit */ }
+            }
 
             if (db !== null && repoRoot !== null) {
                 try {
