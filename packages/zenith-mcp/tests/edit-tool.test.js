@@ -1128,3 +1128,89 @@ describe('multi-file', () => {
         expect(text.includes('\n')).toBe(false);
     });
 });
+
+// ---------------------------------------------------------------------------
+// Sandbox — enforcement is OPT-IN via the config flag (AGENTS.md Rule 7),
+// proven against the REAL FilesystemContext, not the permissive mock ctx.
+// registerEnabledTools wires `sandbox` from config through setSandboxEnabled
+// before any tool registers; these tests exercise that exact ctx surface.
+// ---------------------------------------------------------------------------
+
+describe('sandbox (real FilesystemContext)', () => {
+    let lib;
+    let outsideDir;
+
+    beforeEach(async () => {
+        lib = await import('../dist/core/lib.js');
+        outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-outside-'));
+    });
+
+    afterEach(() => {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    function realCtx(sandboxOn) {
+        const ctx = lib.createFilesystemContext([repoDir]);
+        ctx.setSandboxEnabled(sandboxOn);
+        ctx.sessionId = 'test-session';
+        return ctx;
+    }
+
+    async function runWith(ctx, p, edits) {
+        const { server, calls } = captureHandler();
+        toolMod.register(server, ctx);
+        const res = await calls[0].handler({ path: p, edits });
+        return res.content[0].text;
+    }
+
+    it('sandbox OFF (default): edits outside the allowlist are NOT blocked', async () => {
+        const p = path.join(outsideDir, 'out.txt');
+        fs.writeFileSync(p, 'a\nb\n');
+        const text = await runWith(realCtx(false), p,
+            [{ startLine: 1, endLine: 1, newContent: 'X' }]);
+        expect(text).toBe(BARE);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('X\nb\n');
+    });
+
+    it('sandbox ON: an edit outside the allowlist is denied and the file untouched', async () => {
+        const p = path.join(outsideDir, 'out.txt');
+        fs.writeFileSync(p, 'a\nb\n');
+        const text = await runWith(realCtx(true), p,
+            [{ startLine: 1, endLine: 1, newContent: 'X' }]);
+        expect(text).toMatch(/^Access denied: /);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('a\nb\n');
+    });
+
+    it('sandbox ON: an edit inside the allowlist still applies', async () => {
+        const p = mkFile('in.txt', 'a\nb\n');
+        const text = await runWith(realCtx(true), p,
+            [{ startLine: 1, endLine: 1, newContent: 'X' }]);
+        expect(text).toBe(BARE);
+        expect(fs.readFileSync(p, 'utf-8')).toBe('X\nb\n');
+    });
+
+    it('sandbox ON: a symlink inside the allowlist cannot escape to a target outside', async () => {
+        const target = path.join(outsideDir, 'secret.txt');
+        fs.writeFileSync(target, 'a\nb\n');
+        const link = path.join(repoDir, 'link.txt');
+        fs.symlinkSync(target, link);
+        const text = await runWith(realCtx(true), link,
+            [{ startLine: 1, endLine: 1, newContent: 'X' }]);
+        expect(text).toMatch(/^Access denied: /);
+        expect(fs.readFileSync(target, 'utf-8')).toBe('a\nb\n');
+    });
+
+    it('sandbox ON: a per-edit path escape fails alone while in-sandbox edits apply', async () => {
+        const inFile = mkFile('in.txt', 'a\nb\n');
+        const outFile = path.join(outsideDir, 'out.txt');
+        fs.writeFileSync(outFile, 'a\nb\n');
+        const text = await runWith(realCtx(true), inFile, [
+            { startLine: 1, endLine: 1, newContent: 'IN' },
+            { path: outFile, startLine: 1, endLine: 1, newContent: 'OUT' },
+        ]);
+        expect(text).toMatch(/^out\.txt: Access denied: /);
+        expect(text.endsWith(BARE)).toBe(true);
+        expect(fs.readFileSync(inFile, 'utf-8')).toBe('IN\nb\n');
+        expect(fs.readFileSync(outFile, 'utf-8')).toBe('a\nb\n');
+    });
+});
