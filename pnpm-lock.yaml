@@ -34,8 +34,8 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(patch_hash=57dd918466fcefee5d46ed4647167b2aedbf1bf2976d23477961ae533006f1d7)(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/server':
-        specifier: 2.0.0-alpha.3
-        version: 2.0.0-alpha.3
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       '@repomix/tree-sitter-wasms':
         specifier: ^0.1.17
         version: 0.1.17
@@ -195,8 +195,8 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
-  '@modelcontextprotocol/server@2.0.0-alpha.3':
-    resolution: {integrity: sha512-PYdVDA6x3joCy/rw1mGdMSvqisPKlmt5QN/ILcT8R7efgvmhij14L87lJrWAm4pszaThzwpV49BmBBTZWtlY3A==}
+  '@modelcontextprotocol/server@2.0.0-beta.2':
+    resolution: {integrity: sha512-XK+sgFntT5ZzeqtTGpT9uti+Sqmq7YJZdx/N76eLJv9UA9vKvP04Qh9Hc45LCeIHGfTKRwDG6eh4C1Hs4omyIg==}
     engines: {node: '>=20'}
 
   '@napi-rs/wasm-runtime@1.1.6':
@@ -1406,7 +1406,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@modelcontextprotocol/server@2.0.0-alpha.3':
+  '@modelcontextprotocol/server@2.0.0-beta.2':
     dependencies:
       zod: 4.4.3
 
