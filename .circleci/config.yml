@@ -1,11 +1,25 @@
-# This config was automatically generated from your source code
+# CircleCI configuration for Zenith-MCP.
+#
+# This pipeline is deliberately NOT a duplicate of the GitHub Actions CI
+# (.github/workflows/ci.yml). GitHub Actions remains the primary build/test
+# gate for pull requests. CircleCI runs only on the `main` branch (post-merge)
+# and on version tags, where it layers on the extra value CircleCI provides:
+#   - Test Insights   (via `store_test_results` + JUnit output)
+#   - Build artifacts (stored per-package in the CircleCI UI)
+#   - Deploy Markers  (the `deploy` job below; enable once you wire up a real
+#                      deploy command)
+#
+# To broaden or narrow when this runs, adjust the `filters` on the workflow
+# jobs at the bottom of this file.
+#
 # Stacks detected: cicd:github-actions:.github/workflows,deps:node:.
 version: 2.1
 orbs:
   node: circleci/node@5
 jobs:
   test-node:
-    # Install node dependencies and run tests
+    # Build, then run the test suite with coverage and JUnit output so CircleCI
+    # can surface Test Insights (flaky-test detection, timing trends).
     executor:
       name: node/default
       tag: "26.3.0"
@@ -20,12 +34,22 @@ jobs:
           cache-path: ~/project/node_modules
           override-ci-command: pnpm install --frozen-lockfile
       - run:
-          name: Build & run tests (with coverage)
+          # Tests import from packages/zenith-mcp/dist, so build must run first.
+          name: Build & run tests (coverage + JUnit for Test Insights)
           command: |
             pnpm build
-            pnpm --filter zenith-mcp run test:coverage
+            pnpm --dir packages/zenith-mcp exec vitest run \
+              --coverage \
+              --reporter=default \
+              --reporter=junit \
+              --outputFile.junit=./test-results/junit.xml
+      - store_test_results:
+          path: packages/zenith-mcp/test-results
+      - store_artifacts:
+          path: packages/zenith-mcp/coverage
+          destination: coverage
   build-node:
-    # Build node project
+    # Build the workspace and store each package's dist output as an artifact.
     executor:
       name: node/default
       tag: "26.3.0"
@@ -40,22 +64,28 @@ jobs:
           cache-path: ~/project/node_modules
           override-ci-command: pnpm install --frozen-lockfile
       - run:
+          name: Build
           command: pnpm build
       - run:
-          name: Create the ~/artifacts directory if it doesn't exist
-          command: mkdir -p ~/artifacts
-      # Copy output to artifacts dir
-      - run:
-          name: Copy artifacts
+          # Copy each package's dist into its own subdirectory so the shared
+          # `dist` basename does not collide. No error suppression: a missing
+          # dist means the build failed and the job should fail loudly.
+          name: Collect build artifacts
           command: |
-            cp -R packages/zenith-mcp/dist packages/zenith-toon/dist ~/artifacts
+            mkdir -p ~/artifacts/zenith-mcp ~/artifacts/zenith-toon
+            cp -R packages/zenith-mcp/dist ~/artifacts/zenith-mcp/
+            cp -R packages/zenith-toon/dist ~/artifacts/zenith-toon/
       - store_artifacts:
           path: ~/artifacts
           destination: node-build
   deploy:
-    # This is an example deploy job, not actually used by the workflow
+    # Example deploy job that emits CircleCI Deploy Markers. It is NOT wired
+    # into the workflow yet — enable it below once the deploy command is real.
     docker:
-      - image: circleci/circleci-cli:latest
+      # Pinned (not `:latest`) for reproducibility; bump intentionally.
+      - image: circleci/circleci-cli:0.1.38646-alpine
+    steps:
+      - checkout
       - run:
           name: Plan deployment
           command: |
@@ -70,7 +100,6 @@ jobs:
       - run:
           name: Update deployment status to running
           command: circleci run release update deploy --status=RUNNING
-      # (removed auto-generated no-op step)
       - run:
           name: Update deployment status to success
           command: circleci run release update deploy --status=SUCCESS
@@ -82,10 +111,27 @@ jobs:
 workflows:
   build-and-test:
     jobs:
-      - test-node
+      # Runs on `main` and version tags only, so this pipeline complements the
+      # GitHub Actions PR gate instead of re-running it on every pull request.
+      - test-node:
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              only: main
       - build-node:
           requires:
             - test-node
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              only: main
     # - deploy:
     #     requires:
     #       - build-node
+    #     filters:
+    #       tags:
+    #         only: /^v.*/
+    #       branches:
+    #         only: main
