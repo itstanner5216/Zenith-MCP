@@ -486,8 +486,7 @@ export function snapshotSymbol(db: DbConnection, symbolName: string, filePath: s
 }
 
 /**
- * Per-edit patch snapshot: the edit-tool counterpart of
- * {@link snapshotSymbol}, written before every file write — one row per
+ * {@link snapshotSymbol}, recorded only after a confirmed write (rename succeeded) — one row per
  * applied edit holding the literal patch (exact replaced text, exact
  * replacement as applied, original start line). A future undo tool reverses
  * the newest patch by content, which survives line drift; the stored
