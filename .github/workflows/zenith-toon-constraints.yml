@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.0
 
       - name: Install pnpm
         # Version auto-detected from the packageManager field in root package.json
