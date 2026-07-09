@@ -60,7 +60,7 @@
     "@types/express": "^5.0.6",
     "@types/js-yaml": "^4.0.9",
     "@types/minimatch": "^6.0.0",
-    "@types/node": "^25.9.1",
+    "@types/node": "^26.1.0",
     "@vitest/coverage-v8": "^4.1.8",
     "shx": "^0.4.0",
     "tree-sitter-cli": "^0.26.10",
