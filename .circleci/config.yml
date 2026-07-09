@@ -1,16 +1,15 @@
 # CircleCI configuration for Zenith-MCP.
 #
-# This pipeline is deliberately NOT a duplicate of the GitHub Actions CI
-# (.github/workflows/ci.yml). GitHub Actions remains the primary build/test
-# gate for pull requests. CircleCI runs only on the `main` branch (post-merge)
-# and on version tags, where it layers on the extra value CircleCI provides:
+# This pipeline runs alongside the GitHub Actions CI (.github/workflows/ci.yml).
+# The test/build jobs run on every branch and pull request (so you get CircleCI
+# Test Insights + stored artifacts on PRs), which does duplicate the GitHub
+# Actions PR gate — that overlap is accepted intentionally. The `deploy` job is
+# gated to version tags only, so publishing never happens on a PR.
+#
+# CircleCI-specific value this adds on top of GitHub Actions:
 #   - Test Insights   (via `store_test_results` + JUnit output)
 #   - Build artifacts (stored per-package in the CircleCI UI)
-#   - Deploy Markers  (the `deploy` job below; enable once you wire up a real
-#                      deploy command)
-#
-# To broaden or narrow when this runs, adjust the `filters` on the workflow
-# jobs at the bottom of this file.
+#   - Deploy Markers  (the `deploy` job below, run on `v*` tags)
 #
 # Stacks detected: cicd:github-actions:.github/workflows,deps:node:.
 version: 2.1
@@ -79,27 +78,49 @@ jobs:
           path: ~/artifacts
           destination: node-build
   deploy:
-    # Example deploy job that emits CircleCI Deploy Markers. It is NOT wired
-    # into the workflow yet — enable it below once the deploy command is real.
-    docker:
-      # Pinned (not `:latest`) for reproducibility; bump intentionally.
-      - image: circleci/circleci-cli:0.1.38646-alpine
+    # Publishes the workspace packages (zenith-toon, zenith-mcp) to npm and
+    # wraps the publish in CircleCI Deploy Markers so the release shows up in
+    # the CircleCI UI. Runs on version tags (v*) only — never on a PR.
+    #
+    # Requires an NPM_TOKEN environment variable configured in the CircleCI
+    # project settings (Project Settings > Environment Variables) with publish
+    # rights to the zenith-mcp and zenith-toon packages.
+    executor:
+      name: node/default
+      tag: "26.3.0"
     steps:
       - checkout
+      - run:
+          name: Enable pnpm (Corepack)
+          command: |
+            corepack enable
+            corepack prepare pnpm@11.9.0 --activate
+      - node/install-packages:
+          cache-path: ~/project/node_modules
+          override-ci-command: pnpm install --frozen-lockfile
+      - run:
+          name: Build
+          command: pnpm build
+      - run:
+          name: Install CircleCI CLI (for Deploy Markers)
+          command: curl -fLSs https://raw.githubusercontent.com/CircleCI-Public/circleci-cli/main/install.sh | sudo bash
       - run:
           name: Plan deployment
           command: |
             circleci run release plan deploy \
-              --environment-name="default" \
+              --environment-name="production" \
               --component-name="${CIRCLE_PROJECT_REPONAME}" \
-              --target-version="1.0.${CIRCLE_BUILD_NUM}-${CIRCLE_SHA1:0:7}"
-      # Replace this with steps to deploy to users
-      - run:
-          name: deploy
-          command: '#e.g. ./deploy.sh'
+              --target-version="${CIRCLE_TAG:-1.0.${CIRCLE_BUILD_NUM}-${CIRCLE_SHA1:0:7}}"
       - run:
           name: Update deployment status to running
           command: circleci run release update deploy --status=RUNNING
+      - run:
+          # Publish every non-private workspace package to npm. --no-git-checks
+          # skips pnpm's clean-working-tree requirement (CI checkout is detached).
+          name: Publish packages to npm
+          command: |
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+            pnpm -r publish --access public --no-git-checks
       - run:
           name: Update deployment status to success
           command: circleci run release update deploy --status=SUCCESS
@@ -111,27 +132,23 @@ jobs:
 workflows:
   build-and-test:
     jobs:
-      # Runs on `main` and version tags only, so this pipeline complements the
-      # GitHub Actions PR gate instead of re-running it on every pull request.
+      # Runs on every branch/PR and on version tags.
       - test-node:
           filters:
             tags:
               only: /^v.*/
-            branches:
-              only: main
       - build-node:
           requires:
             - test-node
           filters:
             tags:
               only: /^v.*/
+      # Deploys on version tags only (v1.2.3, ...). Never runs on a PR.
+      - deploy:
+          requires:
+            - build-node
+          filters:
+            tags:
+              only: /^v.*/
             branches:
-              only: main
-    # - deploy:
-    #     requires:
-    #       - build-node
-    #     filters:
-    #       tags:
-    #         only: /^v.*/
-    #       branches:
-    #         only: main
+              ignore: /.*/
