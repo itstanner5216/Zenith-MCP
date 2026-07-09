@@ -20,6 +20,8 @@ import {
     getCallersFiltered,
     getCalleesFiltered,
     snapshotVersion,
+    snapshotEditVersion,
+    getVersionPatch as adapterGetVersionPatch,
     getVersionHistory as adapterGetVersionHistory,
     getVersionText as adapterGetVersionText,
     getVersionMeta,
@@ -481,6 +483,35 @@ export function snapshotSymbol(db: DbConnection, symbolName: string, filePath: s
         line: line ?? null,
         textHash
     });
+}
+
+/**
+ * {@link snapshotSymbol}, recorded only after a confirmed write (rename succeeded) — one row per
+ * applied edit holding the literal patch (exact replaced text, exact
+ * replacement as applied, original start line). A future undo tool reverses
+ * the newest patch by content, which survives line drift; the stored
+ * oldText→newText pair is also re-appliable elsewhere without restating
+ * newText. Keying and retention (10 most recent per session/file scope)
+ * live in the db-adapter's snapshotEditVersion. Texts are stored in the
+ * LF-normalized frame the edit tool matches in.
+ */
+export function snapshotEdit(db: DbConnection, relPath: string, oldText: string, newText: string, line: number, sessionId: string): void {
+    // Length-prefixed framing so (old, new) pairs hash unambiguously - a bare
+    // separator would let ("a|", "b") and ("a", "|b") collide.
+    const textHash = createHash('md5').update(`${oldText.length}:`).update(oldText).update(newText).digest('hex');
+    snapshotEditVersion(db, {
+        filePath: relPath,
+        oldText,
+        newText,
+        line,
+        sessionId,
+        createdAt: Date.now(),
+        textHash,
+    });
+}
+
+export function getVersionPatch(db: DbConnection, versionId: number): ReturnType<typeof adapterGetVersionPatch> {
+    return adapterGetVersionPatch(db, versionId);
 }
 
 export function getVersionHistory(db: DbConnection, symbolName: string, sessionId: string, filePath?: string): ReturnType<typeof adapterGetVersionHistory> {

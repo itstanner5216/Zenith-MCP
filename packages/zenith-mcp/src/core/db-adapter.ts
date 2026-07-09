@@ -164,6 +164,18 @@ export function initSymbolSchema(conn: DbConnection): void {
     }
 
     try {
+        db.exec('ALTER TABLE versions ADD COLUMN new_text TEXT');
+    } catch (error: any) {
+        // Only tolerate "column already exists" errors
+        const msg = error?.message || String(error);
+        if (!msg.includes('duplicate column') && !msg.includes('already exists')) {
+            console.error('Unexpected error adding column "new_text" to versions table:', msg);
+            console.error('SQL: ALTER TABLE versions ADD COLUMN new_text TEXT');
+            throw error;
+        }
+    }
+
+    try {
         db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_dedup ON versions(symbol_name, file_path, text_hash, session_id)');
     } catch (error: any) {
         // Only tolerate "index already exists" or constraint violation errors
@@ -655,7 +667,8 @@ export function getFileBlockEdges(
     // Build name → index lookup
     const nameToIndex = new Map<string, number>();
     for (let i = 0; i < blockNames.length; i++) {
-        nameToIndex.set(blockNames[i]!, i);
+        const name = blockNames[i];
+        if (name !== undefined) nameToIndex.set(name, i);
     }
 
     // Query all edges where the caller is a definition in this file
@@ -759,7 +772,62 @@ export function snapshotVersion(
 }
 
 /**
- * SQL: SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ? [AND file_path = ?] ORDER BY created_at DESC
+ * Per-edit patch snapshot (the edit tool's undo/reuse net), stored in the
+ * existing versions table keyed as symbol_name = `file://<filePath>` — the
+ * `://` cannot occur in a code symbol, so patch rows never collide with
+ * symbol snapshots. Each row is the literal patch one edit applied:
+ * original_text = the exact replaced text, new_text = the exact replacement
+ * as applied (post re-indent), line = the 1-based start line in the
+ * original file. Storing the patch instead of a whole-file copy keeps it
+ * mappable after later edits shift line numbers, shows precisely what
+ * changed, and makes the cached oldText→newText pair re-appliable anywhere
+ * in the repo without restating newText.
+ *
+ * text_hash fingerprints BOTH sides of the patch, so the dedup index
+ * (symbol_name, file_path, text_hash, session_id) collapses only identical
+ * patches — the surviving row's created_at/line are refreshed so ordering
+ * reflects recency. Retention is capped at EDIT_SNAPSHOT_CAP per
+ * session/file scope: storing one past the cap deletes only the oldest
+ * rows, keeping the newest EDIT_SNAPSHOT_CAP restorable.
+ */
+export const EDIT_SNAPSHOT_CAP = 10;
+
+export function snapshotEditVersion(
+    conn: DbConnection,
+    entry: {
+        filePath: string;
+        oldText: string;
+        newText: string;
+        line: number;
+        sessionId: string;
+        createdAt: number;
+        textHash: string;
+    }
+): void {
+    const symbolName = `file://${entry.filePath}`;
+    runTransaction(conn, () => {
+        const inserted = prepareOrCache(conn, 'INSERT OR IGNORE INTO versions (symbol_name, file_path, original_text, new_text, session_id, created_at, line, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(symbolName, entry.filePath, entry.oldText, entry.newText, entry.sessionId, entry.createdAt, entry.line, entry.textHash);
+        if (Number(inserted.changes) === 0) {
+            prepareOrCache(conn, 'UPDATE versions SET created_at = ?, line = ? WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND text_hash = ?')
+                .run(entry.createdAt, entry.line, symbolName, entry.filePath, entry.sessionId, entry.textHash);
+        }
+        prepareOrCache(conn, 'DELETE FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? AND id NOT IN (SELECT id FROM versions WHERE symbol_name = ? AND file_path = ? AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)')
+            .run(symbolName, entry.filePath, entry.sessionId, symbolName, entry.filePath, entry.sessionId, EDIT_SNAPSHOT_CAP);
+    });
+}
+
+/**
+ * SQL: SELECT original_text, new_text, line FROM versions WHERE id = ?
+ */
+export function getVersionPatch(conn: DbConnection, id: number): { original_text: string; new_text: string | null; line: number | null } | null {
+    const row = prepareOrCache(conn, 'SELECT original_text, new_text, line FROM versions WHERE id = ?')
+        .get(id) as { original_text: string; new_text: string | null; line: number | null } | undefined;
+    return row ?? null;
+}
+
+/**
+ * SQL: SELECT id, symbol_name, file_path, created_at, text_hash FROM versions WHERE symbol_name = ? AND session_id = ? [AND file_path = ?] ORDER BY created_at DESC, id DESC
  */
 export function getVersionHistory(
     conn: DbConnection,
@@ -773,7 +841,10 @@ export function getVersionHistory(
         sql += ' AND file_path = ?';
         params.push(filePath);
     }
-    sql += ' ORDER BY created_at DESC';
+    // id DESC tie-breaks rows sharing a created_at millisecond (batched edit
+    // snapshots land together), matching the retention query's ordering so
+    // "newest" is deterministic for undo/reuse.
+    sql += ' ORDER BY created_at DESC, id DESC';
     return handle(conn)
         .prepare(sql)
         .all(...params) as { id: number; symbol_name: string; file_path: string | null; created_at: number; text_hash: string | null }[];
@@ -798,10 +869,15 @@ export function getVersionMeta(conn: DbConnection, id: number): { original_text:
 }
 
 /**
- * SQL: DELETE FROM versions WHERE created_at < ?
+ * SQL: DELETE FROM versions WHERE created_at < ? AND symbol_name NOT LIKE 'file://%'
+ *
+ * Edit-patch rows (symbol_name 'file://<relPath>') are excluded: their
+ * retention is the EDIT_SNAPSHOT_CAP newest per session/file, enforced in
+ * snapshotEditVersion — the refactor TTL must not silently erode undo
+ * history beneath that cap.
  */
 export function pruneOldVersions(conn: DbConnection, beforeTimestamp: number): void {
-    prepareOrCache(conn, 'DELETE FROM versions WHERE created_at < ?')
+    prepareOrCache(conn, "DELETE FROM versions WHERE created_at < ? AND symbol_name NOT LIKE 'file://%'")
         .run(beforeTimestamp);
 }
 

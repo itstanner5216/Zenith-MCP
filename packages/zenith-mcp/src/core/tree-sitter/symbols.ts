@@ -700,14 +700,17 @@ export async function getFileSymbolSummary(filePath: string): Promise<string | n
 
 /**
  * Parse source code and check for syntax errors.
- * Returns an array of { line, column } for each ERROR node found.
+ * Returns an array of { line, column, kind } for each ERROR/MISSING node
+ * found, where `kind` is the name tree-sitter gives the breakage: `ERROR`
+ * for error nodes, `MISSING <type>` (anonymous token types quoted) for
+ * missing nodes.
  * Returns null if the language is not supported.
  * Returns empty array if no errors detected.
  *
  * @param source   - the source code to check
  * @param langName - tree-sitter language name
  */
-export async function checkSyntaxErrors(source: string, langName: string): Promise<Array<{ line: number; column: number }> | null> {
+export async function checkSyntaxErrors(source: string, langName: string): Promise<Array<{ line: number; column: number; kind: string }> | null> {
     const language = await loadLanguage(langName);
     if (!language) return null;
 
@@ -722,7 +725,7 @@ export async function checkSyntaxErrors(source: string, langName: string): Promi
             return [];
         }
 
-        const errors: Array<{ line: number; column: number }> = [];
+        const errors: Array<{ line: number; column: number; kind: string }> = [];
         const MAX_ERRORS = 10;
 
         function walk(node: Node): void {
@@ -731,6 +734,9 @@ export async function checkSyntaxErrors(source: string, langName: string): Promi
                 errors.push({
                     line: node.startPosition.row + 1,
                     column: node.startPosition.column,
+                    kind: node.isMissing
+                        ? `MISSING ${node.isNamed ? node.type : `"${node.type}"`}`
+                        : 'ERROR',
                 });
             }
             for (let i = 0; i < node.childCount; i++) {
