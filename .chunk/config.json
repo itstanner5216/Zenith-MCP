@@ -1,0 +1,19 @@
+{
+  "commands": [
+    {
+      "name": "install",
+      "run": "pnpm install --frozen-lockfile"
+    },
+    {
+      "name": "test",
+      "run": "pnpm test",
+      "role": "gate",
+      "timeout": 300,
+      "limit": 3
+    }
+  ],
+  "vcs": {
+    "org": "itstanner5216",
+    "repo": "Zenith-MCP"
+  }
+}

@@ -1,6 +1,6 @@
 // db-adapter-v1-tables.test.js
 //
-// Tests for all new db-adapter functions added in this PR (v0 → v1 schema
+// Tests for all new db-adapter functions added in this PR (v0 → v3 schema
 // migration, symbol extended columns, symbol_structures, anchors, imports,
 // injections, local_scopes, edge resolution, getFileFacts, getSchemaVersion).
 //
@@ -23,6 +23,8 @@ import {
     insertAnchor,
     getAnchorsForFile,
     insertImport,
+    insertImportBinding,
+    getImportBindingsForFile,
     getImportsForFile,
     getFilesImporting,
     insertInjection,
@@ -68,9 +70,9 @@ function addSymbol(db, opts = {}) {
 // ---------------------------------------------------------------------------
 
 describe('getSchemaVersion', () => {
-    it('returns 1 after initSymbolSchema (v0 → v1 migration applied)', () => {
+    it('returns 3 after initSymbolSchema (v0 → v3 migrations applied)', () => {
         const db = makeDb();
-        expect(getSchemaVersion(db)).toBe(1);
+        expect(getSchemaVersion(db)).toBe(3);
         closeDb(db);
     });
 
@@ -80,9 +82,9 @@ describe('getSchemaVersion', () => {
         // baseline) rather than throwing.
         const freshDb = openMemoryDb();
         expect(getSchemaVersion(freshDb)).toBe(0);
-        // After running the migration on the same connection it must report 1.
+        // After running the migration on the same connection it must report 3.
         initSymbolSchema(freshDb);
-        expect(getSchemaVersion(freshDb)).toBe(1);
+        expect(getSchemaVersion(freshDb)).toBe(3);
         closeDb(freshDb);
     });
 });
@@ -263,7 +265,7 @@ describe('insertImport + getImportsForFile + getFilesImporting', () => {
     afterEach(() => closeDb(db));
 
     it('inserts imports and retrieves them ordered by line', () => {
-        insertImport(db, { filePath: 'src/mod.ts', module: 'path', importedNamesJson: JSON.stringify(['join', 'resolve']), line: 2 });
+        insertImport(db, { filePath: 'src/mod.ts', module: 'path', importedNamesJson: JSON.stringify(['join', 'resolve']), line: 2, startLine: 2, endLine: 4 });
         insertImport(db, { filePath: 'src/mod.ts', module: 'fs', importedNamesJson: JSON.stringify(['readFileSync']), line: 1 });
 
         const imports = getImportsForFile(db, 'src/mod.ts');
@@ -273,6 +275,8 @@ describe('insertImport + getImportsForFile + getFilesImporting', () => {
         expect(imports[0].importedNames).toEqual(['readFileSync']);
         expect(imports[1].module).toBe('path');
         expect(imports[1].importedNames).toEqual(['join', 'resolve']);
+        expect(imports[1].startLine).toBe(2);
+        expect(imports[1].endLine).toBe(4);
     });
 
     it('returns empty array when file has no imports', () => {
@@ -299,6 +303,60 @@ describe('insertImport + getImportsForFile + getFilesImporting', () => {
         const imports = getImportsForFile(db, 'src/mod.ts');
         expect(imports).toHaveLength(1);
         expect(imports[0].importedNames).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Import bindings (insertImportBinding, getImportBindingsForFile)
+// ---------------------------------------------------------------------------
+
+describe('insertImportBinding + getImportBindingsForFile', () => {
+    let db;
+    beforeEach(() => { db = makeDb(); addFile(db, 'src/mod.ts'); });
+    afterEach(() => closeDb(db));
+
+    it('inserts binding-level imports and retrieves them ordered by line/column', () => {
+        insertImportBinding(db, {
+            filePath: 'src/mod.ts',
+            source: './x',
+            localName: 'later',
+            importedName: 'later',
+            importKind: 'named',
+            isTypeOnly: false,
+            line: 2,
+            column: 10,
+        });
+        insertImportBinding(db, {
+            filePath: 'src/mod.ts',
+            source: './x',
+            localName: 'Foo',
+            importedName: 'default',
+            importKind: 'default',
+            isTypeOnly: true,
+            line: 1,
+            column: 7,
+        });
+
+        expect(getImportBindingsForFile(db, 'src/mod.ts')).toEqual([
+            {
+                source: './x',
+                localName: 'Foo',
+                importedName: 'default',
+                importKind: 'default',
+                isTypeOnly: true,
+                line: 1,
+                column: 7,
+            },
+            {
+                source: './x',
+                localName: 'later',
+                importedName: 'later',
+                importKind: 'named',
+                isTypeOnly: false,
+                line: 2,
+                column: 10,
+            },
+        ]);
     });
 });
 
@@ -542,11 +600,12 @@ describe('getFileFacts', () => {
         expect(edge.callee_name).toBeUndefined();
     });
 
-    it('includes anchors and imports and injections', () => {
+    it('includes anchors and imports, import bindings, and injections', () => {
         addFile(db, 'src/full.ts');
         const defId = addSymbol(db, { name: 'richFunc', kind: 'def', filePath: 'src/full.ts', line: 5, endLine: 15 });
         insertAnchor(db, { symbolId: defId, kind: 'return', line: 14, text: '  return x;' });
         insertImport(db, { filePath: 'src/full.ts', module: 'lodash', importedNamesJson: '["merge"]', line: 1 });
+        insertImportBinding(db, { filePath: 'src/full.ts', source: 'lodash', localName: 'merge', importedName: 'merge', importKind: 'named', isTypeOnly: false, line: 1, column: 9 });
         insertInjection(db, { filePath: 'src/full.ts', hostLang: 'typescript', injectedLang: 'sql', startLine: 8, endLine: 10, startByte: 100, endByte: 200 });
 
         const facts = getFileFacts(db, 'src/full.ts');
@@ -556,6 +615,8 @@ describe('getFileFacts', () => {
         expect(facts.anchors[0].kind).toBe('return');
         expect(facts.imports).toHaveLength(1);
         expect(facts.imports[0].module).toBe('lodash');
+        expect(facts.importBindings).toHaveLength(1);
+        expect(facts.importBindings[0].localName).toBe('merge');
         expect(facts.injections).toHaveLength(1);
         expect(facts.injections[0].injected_lang).toBe('sql');
     });
@@ -582,21 +643,21 @@ describe('getFileFacts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// initSymbolSchema idempotency (v1 migration can run twice safely)
+// initSymbolSchema idempotency (v3 migration can run twice safely)
 // ---------------------------------------------------------------------------
 
-describe('initSymbolSchema v1 migration idempotency', () => {
+describe('initSymbolSchema v3 migration idempotency', () => {
     it('calling initSymbolSchema twice does not throw', () => {
         const db = openMemoryDb();
         expect(() => {
             initSymbolSchema(db);
             initSymbolSchema(db);
         }).not.toThrow();
-        expect(getSchemaVersion(db)).toBe(1);
+        expect(getSchemaVersion(db)).toBe(3);
         closeDb(db);
     });
 
-    it('v1 tables exist after migration (symbol_structures, anchors, imports, injections, local_scopes)', () => {
+    it('v1/v2/v3 tables exist after migration (symbol_structures, anchors, imports, import_bindings, injections, local_scopes)', () => {
         const db = makeDb();
         // Verify tables exist by inserting a file + symbol and writing to each new table
         addFile(db, 'probe.ts');
@@ -605,6 +666,7 @@ describe('initSymbolSchema v1 migration idempotency', () => {
         expect(() => insertSymbolStructure(db, { symbolId: id, paramsJson: '[]', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null })).not.toThrow();
         expect(() => insertAnchor(db, { symbolId: id, kind: 'return', line: 1, text: 'return x;' })).not.toThrow();
         expect(() => insertImport(db, { filePath: 'probe.ts', module: 'x', importedNamesJson: '[]', line: 1 })).not.toThrow();
+        expect(() => insertImportBinding(db, { filePath: 'probe.ts', source: 'x', localName: 'x', importedName: 'default', importKind: 'default', isTypeOnly: false, line: 1, column: 7 })).not.toThrow();
         expect(() => insertInjection(db, { filePath: 'probe.ts', hostLang: 'js', injectedLang: 'sql', startLine: 1, endLine: 2, startByte: 0, endByte: 10 })).not.toThrow();
         expect(() => insertLocalScope(db, { symbolId: id, scopeKind: 'block', startLine: 1, endLine: 2, parametersJson: '[]', localsJson: '[]' })).not.toThrow();
         closeDb(db);

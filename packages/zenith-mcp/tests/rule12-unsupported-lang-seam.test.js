@@ -44,6 +44,7 @@ function unsupportedFacts(relPath) {
         referenceEdges: [],
         anchors: [],
         imports: [],
+        importBindings: [],
         injections: [],
         scopes: [],
     };

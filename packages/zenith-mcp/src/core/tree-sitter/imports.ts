@@ -9,8 +9,10 @@ import type { SymbolInfo } from './symbols.js';
 
 export interface ImportEdge {
     module: string;
-    importedNames: string[];  // empty = wildcard/side-effect import
+    importedNames: string[];  // best-effort binding/import names; empty = side-effect/wildcard or unavailable
     line: number;
+    startLine: number;
+    endLine: number;
 }
 
 /**
@@ -71,16 +73,17 @@ export function extractImportsFromSymbols(symbols: SymbolInfo[]): ImportEdge[] {
         if (ref.type === 'module') {
             // A 'module' ref opens a new statement edge; all following 'import'
             // refs (until the next 'module' ref) are this statement's names.
-            current = { module: ref.name, importedNames: [], line: ref.line };
+            current = { module: ref.name, importedNames: [], line: ref.line, startLine: ref.line, endLine: ref.endLine };
             imports.push(current);
         } else if (current !== null) {
             // Named binding belonging to the open statement (its source ref
             // appeared earlier). This is the multi-line case: attach the name
             // to the current edge rather than spawning a misattributed module.
             current.importedNames.push(ref.name);
+            current.endLine = Math.max(current.endLine, ref.endLine);
         } else {
             // Bare import with no preceding source ref: the name is the module.
-            imports.push({ module: ref.name, importedNames: [ref.name], line: ref.line });
+            imports.push({ module: ref.name, importedNames: [ref.name], line: ref.line, startLine: ref.line, endLine: ref.endLine });
         }
     }
 

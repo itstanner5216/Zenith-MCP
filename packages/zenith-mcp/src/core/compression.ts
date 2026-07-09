@@ -44,7 +44,7 @@ export async function compressForTool(
     const relPath = repoRoot ? path.relative(repoRoot, validPath) : path.basename(validPath);
 
     // Empty-facts default. TOON tolerates this and falls back to its text path.
-    let dbFacts: FileFacts = { defs: [], references: [], edges: [], referenceEdges: [], anchors: [], imports: [], injections: [], scopes: [] };
+    let dbFacts: FileFacts = { defs: [], references: [], edges: [], referenceEdges: [], anchors: [], imports: [], importBindings: [], injections: [], scopes: [] };
 
     if (repoRoot) {
         try {
@@ -100,7 +100,17 @@ export async function compressForTool(
                 symbolName: a.symbol_name, kind: a.kind, line: a.line, text: a.text,
             })),
             imports: dbFacts.imports.map(i => ({
-                module: i.module, importedNames: i.importedNames, line: i.line,
+                module: i.module, importedNames: i.importedNames,
+                line: i.line, startLine: i.startLine, endLine: i.endLine,
+            })),
+            importBindings: dbFacts.importBindings.map(i => ({
+                source: i.source,
+                localName: i.localName,
+                importedName: i.importedName,
+                importKind: i.importKind,
+                isTypeOnly: i.isTypeOnly,
+                line: i.line,
+                column: i.column,
             })),
             injections: dbFacts.injections.map(j => ({
                 injectedLang: j.injected_lang, startLine: j.start_line, endLine: j.end_line,

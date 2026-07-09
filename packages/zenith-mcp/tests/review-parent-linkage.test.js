@@ -65,6 +65,7 @@ function recordWithSymbols(relPath, symbols) {
         structures: [],
         anchors: [],
         imports: [],
+        importBindings: [],
         injections: [],
         locals: [],
         edges: [],

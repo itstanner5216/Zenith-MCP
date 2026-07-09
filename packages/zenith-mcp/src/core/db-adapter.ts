@@ -259,6 +259,50 @@ export function initSymbolSchema(conn: DbConnection): void {
             db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(1);
         });
     }
+
+    if (currentVersion < 2) {
+        // v1 → v2: binding-level import facts. The existing `imports` table stays
+        // statement-level; this table records each local binding for semantic consumers.
+        runTransaction(conn, () => {
+            db.exec(`
+            CREATE TABLE IF NOT EXISTS import_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT REFERENCES files(path) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                local_name TEXT NOT NULL,
+                imported_name TEXT,
+                import_kind TEXT NOT NULL,
+                is_type_only INTEGER NOT NULL,
+                line INTEGER NOT NULL,
+                column INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_import_bindings_file ON import_bindings(file_path);
+            CREATE INDEX IF NOT EXISTS idx_import_bindings_local ON import_bindings(file_path, local_name);
+            `);
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(2);
+        });
+    }
+
+    if (currentVersion < 3) {
+        // v2 → v3: statement-level imports carry spans for multiline import
+        // clusters. Existing rows backfill to their original single-line hint.
+        runTransaction(conn, () => {
+            const columnMigrations = [
+                'ALTER TABLE imports ADD COLUMN start_line INTEGER',
+                'ALTER TABLE imports ADD COLUMN end_line INTEGER',
+            ];
+            for (const sql of columnMigrations) {
+                try {
+                    db.exec(sql);
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw e;
+                }
+            }
+            db.exec('UPDATE imports SET start_line = COALESCE(start_line, line), end_line = COALESCE(end_line, line)');
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(3);
+        });
+    }
 }
 
 /**
@@ -655,7 +699,8 @@ export function getFileBlockEdges(
     // Build name → index lookup
     const nameToIndex = new Map<string, number>();
     for (let i = 0; i < blockNames.length; i++) {
-        nameToIndex.set(blockNames[i]!, i);
+        const blockName = blockNames[i];
+        if (blockName !== undefined) nameToIndex.set(blockName, i);
     }
 
     // Query all edges where the caller is a definition in this file
@@ -1150,18 +1195,55 @@ export function getAnchorsForFile(conn: DbConnection, filePath: string): Array<{
 // ---------------------------------------------------------------------------
 
 /**
- * SQL: INSERT INTO imports (file_path, module, imported_names_json, line) VALUES (?, ?, ?, ?)
+ * SQL: INSERT INTO imports (file_path, module, imported_names_json, line, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?)
  */
-export function insertImport(conn: DbConnection, row: { filePath: string; module: string; importedNamesJson: string; line: number }): void {
-    prepareOrCache(conn, 'INSERT INTO imports (file_path, module, imported_names_json, line) VALUES (?, ?, ?, ?)').run(row.filePath, row.module, row.importedNamesJson, row.line);
+export function insertImport(conn: DbConnection, row: { filePath: string; module: string; importedNamesJson: string; line: number; startLine?: number; endLine?: number }): void {
+    const startLine = row.startLine ?? row.line;
+    const endLine = row.endLine ?? row.line;
+    prepareOrCache(conn, 'INSERT INTO imports (file_path, module, imported_names_json, line, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(row.filePath, row.module, row.importedNamesJson, row.line, startLine, endLine);
 }
 
 /**
- * SQL: SELECT module, imported_names_json, line FROM imports WHERE file_path = ? ORDER BY line
+ * SQL: SELECT module, imported_names_json, line, COALESCE(start_line, line) AS startLine, COALESCE(end_line, line) AS endLine FROM imports WHERE file_path = ? ORDER BY startLine, line
  */
-export function getImportsForFile(conn: DbConnection, filePath: string): Array<{ module: string; importedNames: string[]; line: number }> {
-    const rows = prepareOrCache(conn, 'SELECT module, imported_names_json, line FROM imports WHERE file_path = ? ORDER BY line').all(filePath) as Array<{ module: string; imported_names_json: string; line: number }>;
-    return rows.map(r => ({ module: r.module, importedNames: JSON.parse(r.imported_names_json || '[]'), line: r.line }));
+export function getImportsForFile(conn: DbConnection, filePath: string): Array<{ module: string; importedNames: string[]; line: number; startLine: number; endLine: number }> {
+    const rows = prepareOrCache(conn, 'SELECT module, imported_names_json, line, COALESCE(start_line, line) AS startLine, COALESCE(end_line, line) AS endLine FROM imports WHERE file_path = ? ORDER BY startLine, line').all(filePath) as Array<{ module: string; imported_names_json: string; line: number; startLine: number; endLine: number }>;
+    return rows.map(r => ({ module: r.module, importedNames: JSON.parse(r.imported_names_json || '[]'), line: r.line, startLine: r.startLine, endLine: r.endLine }));
+}
+
+export type ImportBindingKind = 'named' | 'default' | 'namespace';
+
+/**
+ * SQL: INSERT INTO import_bindings (file_path, source, local_name, imported_name, import_kind, is_type_only, line, column) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ */
+export function insertImportBinding(conn: DbConnection, row: { filePath: string; source: string; localName: string; importedName: string | null; importKind: ImportBindingKind; isTypeOnly: boolean; line: number; column: number }): void {
+    prepareOrCache(conn, `INSERT INTO import_bindings
+        (file_path, source, local_name, imported_name, import_kind, is_type_only, line, column)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(row.filePath, row.source, row.localName, row.importedName, row.importKind, row.isTypeOnly ? 1 : 0, row.line, row.column);
+}
+
+/**
+ * SQL: SELECT source, local_name AS localName, imported_name AS importedName, import_kind AS importKind, is_type_only AS isTypeOnly, line, column FROM import_bindings WHERE file_path = ? ORDER BY line, column
+ */
+export function getImportBindingsForFile(conn: DbConnection, filePath: string): Array<{ source: string; localName: string; importedName: string | null; importKind: ImportBindingKind; isTypeOnly: boolean; line: number; column: number }> {
+    const rows = prepareOrCache(conn,
+        `SELECT source, local_name AS localName, imported_name AS importedName,
+                import_kind AS importKind, is_type_only AS isTypeOnly, line, column
+         FROM import_bindings
+         WHERE file_path = ?
+         ORDER BY line, column`
+    ).all(filePath) as Array<{ source: string; localName: string; importedName: string | null; importKind: ImportBindingKind; isTypeOnly: number; line: number; column: number }>;
+    return rows.map(r => ({
+        source: r.source,
+        localName: r.localName,
+        importedName: r.importedName,
+        importKind: r.importKind,
+        isTypeOnly: r.isTypeOnly !== 0,
+        line: r.line,
+        column: r.column,
+    }));
 }
 
 /**
@@ -1241,7 +1323,8 @@ export function getAllUnresolvedEdges(conn: DbConnection): Array<{ id: number; r
  */
 export function findSymbolByNameUnique(conn: DbConnection, name: string, kind: string): { id: number } | null {
     const rows = prepareOrCache(conn, 'SELECT id FROM symbols WHERE name = ? AND kind = ? LIMIT 2').all(name, kind) as { id: number }[];
-    return rows.length === 1 ? rows[0]! : null;
+    if (rows.length !== 1) return null;
+    return rows[0] ?? null;
 }
 
 /**
@@ -1291,7 +1374,8 @@ export interface FileFacts {
     edges: Array<{ callerLine: number; calleeLine: number; callCount: number }>;
     referenceEdges: Array<{ callerLine: number; referencedName: string; referenceCount: number }>;
     anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
-    imports: Array<{ module: string; importedNames: string[]; line: number }>;
+    imports: Array<{ module: string; importedNames: string[]; line: number; startLine: number; endLine: number }>;
+    importBindings: Array<{ source: string; localName: string; importedName: string | null; importKind: ImportBindingKind; isTypeOnly: boolean; line: number; column: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
     // CASING WARNING (C3): these fields are camelCase (scopeKind/startLine/endLine) and MUST stay
     // character-identical to compression.ts's `.map` reads in T4 AND to the SELECT aliases in
@@ -1333,6 +1417,7 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
     ).all(filePath) as FileFacts['referenceEdges'];
     const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
+    const importBindings = getImportBindingsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];
     // CASING WARNING (C3): the SELECT aliases below are camelCase (scopeKind/startLine/endLine) and
     // MUST match compression.ts's `.map` field reads in T4. A snake_case alias here + a camelCase
@@ -1349,7 +1434,7 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
          WHERE s.file_path = ?
          ORDER BY ls.start_line, ls.end_line`
     ).all(filePath) as FileFacts['scopes'];
-    return { defs, references, edges, referenceEdges, anchors, imports, injections, scopes };
+    return { defs, references, edges, referenceEdges, anchors, imports, importBindings, injections, scopes };
 }
 
 // ---------------------------------------------------------------------------

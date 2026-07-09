@@ -60,7 +60,7 @@ export interface TileRefinements {
   readonly scopes?: ReadonlyArray<{ startLine: number; endLine: number; scopeKind: string }>;
   readonly injections?: ReadonlyArray<{ startLine: number; endLine: number; injectedLang: string }>;
   readonly anchors?: ReadonlyArray<{ line: number; kind: string; symbolName: string; text: string }>;
-  readonly imports?: ReadonlyArray<{ line: number; module: string }>;
+  readonly imports?: ReadonlyArray<{ startLine: number; endLine: number; module: string }>;
 }
 
 // ── Tiling thresholds (L1) — named constants, tunable from T7's payoff data. ───────
@@ -188,30 +188,38 @@ function softSplitByHints(
 }
 
 /**
- * Group top-level import LINES into maximal contiguous CLUSTERS and return the candidate
+ * Group top-level import STATEMENT SPANS into maximal contiguous CLUSTERS and return the candidate
  * SOFT-split boundaries those clusters imply: the first line of each cluster (separating a
  * preamble from the imports) and the line just after each cluster (separating the imports
  * from the code that follows). Two adjacent imports never produce an interior split — only
- * the cluster's outer edges are offered — which is exactly "group contiguous import lines
+ * the cluster's outer edges are offered — which is exactly "group contiguous import spans
  * into clusters" rather than splitting between every import. The boundaries are still only
  * hints: `softSplitByHints` enforces the oversized + both-sides≥MIN rule, so a cluster at a
  * block edge (which would shave a sub-MIN sliver) is simply not acted on. Deduped + sorted
  * for deterministic application.
  */
-function importClusterBoundaries(importLines: readonly number[]): number[] {
-  const sorted = [...importLines].filter((l) => Number.isFinite(l)).sort((a, b) => a - b);
+function importClusterBoundaries(imports: ReadonlyArray<{ startLine: number; endLine: number }>): number[] {
+  const sorted = imports
+    .map((im) => {
+      const start = Math.floor(im.startLine);
+      const end = Math.floor(im.endLine);
+      return { start, end };
+    })
+    .filter((span) => Number.isFinite(span.start) && Number.isFinite(span.end))
+    .map((span) => ({ start: Math.min(span.start, span.end), end: Math.max(span.start, span.end) }))
+    .sort((a, b) => (a.start - b.start) || (a.end - b.end));
   const boundaries = new Set<number>();
   let i = 0;
   while (i < sorted.length) {
-    const start = sorted[i];
-    if (start === undefined) { i++; continue; }
-    let end = start;
+    const first = sorted[i];
+    if (first === undefined) { i++; continue; }
+    const start = first.start;
+    let end = first.end;
     let j = i + 1;
     while (j < sorted.length) {
       const nxt = sorted[j];
       if (nxt === undefined) break;
-      if (nxt === end + 1) { end = nxt; j++; continue; } // contiguous -> extend cluster
-      if (nxt === end) { j++; continue; }                // duplicate line -> skip
+      if (nxt.start <= end + 1) { end = Math.max(end, nxt.end); j++; continue; } // overlap/contiguous -> extend
       break;
     }
     boundaries.add(start);   // split before the cluster (preamble | imports)
@@ -410,7 +418,7 @@ export function tileByDefs(
     //     a def boundary), which stays intact so edges keep resolving to it (centrality (i)).
     // BOTH paths only act on a piece > ANCHOR_SPLIT_MIN_BLOCK and only where both resulting
     // sides ≥ MIN_SUB_BLOCK_LINES — the SAME rule, enforced once in softSplitByHints.
-    const importBoundaries = importClusterBoundaries(imports.map((im) => Math.floor(im.line)));
+    const importBoundaries = importClusterBoundaries(imports);
     const anchorLines = anchors.map((a) => Math.floor(a.line)).filter((l) => Number.isFinite(l));
     const defWasHardSubdivided = isDef && pieces.length > 1;
     const refined: Array<{ start: number; end: number }> = [];
@@ -505,6 +513,17 @@ export interface CompressFileRequest {
       readonly module: string;
       readonly importedNames: readonly string[];
       readonly line: number;
+      readonly startLine: number;
+      readonly endLine: number;
+    }>;
+    readonly importBindings: ReadonlyArray<{
+      readonly source: string;
+      readonly localName: string;
+      readonly importedName: string | null;
+      readonly importKind: 'named' | 'default' | 'namespace';
+      readonly isTypeOnly: boolean;
+      readonly line: number;
+      readonly column: number;
     }>;
     readonly injections: ReadonlyArray<{
       readonly injectedLang: string;
@@ -585,6 +604,7 @@ export function compressFile(request: CompressFileRequest): string | null {
         referenceEdges: request.facts.referenceEdges,
         anchors: request.facts.anchors,
         imports: request.facts.imports,
+        importBindings: request.facts.importBindings,
         injections: request.facts.injections,
         scopes: request.facts.scopes,
       },

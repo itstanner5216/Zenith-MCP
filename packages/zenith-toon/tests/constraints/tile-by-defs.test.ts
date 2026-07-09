@@ -282,7 +282,7 @@ describe('T5 — tileByDefs tiling contract (J2–J11, determinism, 2-arg backwa
 
   // ───────────────────────────────────────────────────────────────────────────────────
   it('J4 — import clusters: split only OUTSIDE defs, contiguous imports form one cluster block, def boundaries intact, both sides >= MIN', () => {
-    // gap 1-30 (size 30) with a contiguous import cluster at 7-12 -> boundaries {7,13}:
+    // gap 1-30 (size 30) with one multiline import statement at 7-12 -> boundaries {7,13}:
     //   -> [1,6],[7,12],[13,30]  (the [7,12] is the import/setup cluster; both sides >= MIN)
     // def 31-54 (24 lines > 18, no scopes) stays one block, boundary at 31 intact.
     const n = 54;
@@ -293,8 +293,7 @@ describe('T5 — tileByDefs tiling contract (J2–J11, determinism, 2-arg backwa
       injections: [],
       anchors: [],
       imports: [
-        { line: 7, module: 'a' }, { line: 8, module: 'b' }, { line: 9, module: 'c' },
-        { line: 10, module: 'd' }, { line: 11, module: 'e' }, { line: 12, module: 'f' },
+        { line: 7, startLine: 7, endLine: 12, module: 'a' },
       ],
     });
     const tiling = assertCompleteVerbatimTiling(source, blocks);
@@ -312,8 +311,7 @@ describe('T5 — tileByDefs tiling contract (J2–J11, determinism, 2-arg backwa
       injections: [],
       anchors: [],
       imports: [
-        { line: 10, module: 'a' }, { line: 11, module: 'b' }, { line: 12, module: 'c' },
-        { line: 13, module: 'd' }, { line: 14, module: 'e' }, { line: 15, module: 'f' },
+        { line: 10, startLine: 10, endLine: 15, module: 'a' },
       ],
     });
     const defWithImportsTiling = assertCompleteVerbatimTiling(defWithImports, defWithImportsBlocks);
@@ -601,7 +599,7 @@ describe('T5 — tileByDefs tiling contract (J2–J11, determinism, 2-arg backwa
         { startLine: 40, endLine: 47, injectedLang: 'html' },
       ],
       anchors: [{ line: 50, kind: 'export', symbolName: 'z', text: '' }],
-      imports: [{ line: 1, module: 'a' }, { line: 2, module: 'b' }],
+      imports: [{ startLine: 1, endLine: 1, module: 'a' }, { startLine: 2, endLine: 2, module: 'b' }],
     };
     const a = tileByDefs(source, defs, refine);
     const b = tileByDefs(source, defs, refine);

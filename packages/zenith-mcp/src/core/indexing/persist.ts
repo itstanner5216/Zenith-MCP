@@ -10,7 +10,7 @@ import {
     runTransaction, upsertFile, deleteSymbolsByFile,
     insertSymbol, insertEdge,
     insertSymbolStructure, insertAnchor,
-    insertImport, insertLocalScope, insertInjection,
+    insertImport, insertImportBinding, insertLocalScope, insertInjection,
     updateSymbolExtras,
 } from '../db-adapter.js';
 import type { ParsedFileRecord } from './types.js';
@@ -62,7 +62,19 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
         }
         // 7. Imports
         for (const imp of record.imports) {
-            insertImport(conn, { filePath: record.relPath, module: imp.module, importedNamesJson: JSON.stringify(imp.importedNames), line: imp.line });
+            insertImport(conn, { filePath: record.relPath, module: imp.module, importedNamesJson: JSON.stringify(imp.importedNames), line: imp.line, startLine: imp.startLine, endLine: imp.endLine });
+        }
+        for (const binding of record.importBindings) {
+            insertImportBinding(conn, {
+                filePath: record.relPath,
+                source: binding.source,
+                localName: binding.localName,
+                importedName: binding.importedName,
+                importKind: binding.importKind,
+                isTypeOnly: binding.isTypeOnly,
+                line: binding.line,
+                column: binding.column,
+            });
         }
         // 8. Injections
         for (const inj of record.injections) {

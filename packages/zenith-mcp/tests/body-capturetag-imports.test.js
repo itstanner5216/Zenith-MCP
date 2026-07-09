@@ -187,7 +187,7 @@ describe('extractImportsFromSymbols', () => {
         const symbols = [sym('ref', 'module', 'path', 1)];
         const imports = extractImportsFromSymbols(symbols);
         expect(imports).toHaveLength(1);
-        expect(imports[0]).toMatchObject({ module: 'path', importedNames: [], line: 1 });
+        expect(imports[0]).toMatchObject({ module: 'path', importedNames: [], line: 1, startLine: 1, endLine: 1 });
     });
 
     it('groups module + import refs on the same line into one ImportEdge', () => {
@@ -204,6 +204,8 @@ describe('extractImportsFromSymbols', () => {
         expect(imp.importedNames).toContain('readFile');
         expect(imp.importedNames).toContain('writeFile');
         expect(imp.line).toBe(3);
+        expect(imp.startLine).toBe(3);
+        expect(imp.endLine).toBe(3);
     });
 
     it('handles multiple import statements on different lines', () => {

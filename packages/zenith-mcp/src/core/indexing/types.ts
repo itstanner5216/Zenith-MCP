@@ -39,6 +39,18 @@ export interface ImportRow {
     module: string;
     importedNames: string[];
     line: number;
+    startLine: number;
+    endLine: number;
+}
+
+export interface ImportBindingRow {
+    source: string;
+    localName: string;
+    importedName: string | null;
+    importKind: 'named' | 'default' | 'namespace';
+    isTypeOnly: boolean;
+    line: number;
+    column: number;
 }
 
 export interface InjectionRow {
@@ -72,6 +84,7 @@ export interface ParsedFileRecord {
     structures: StructureRow[];
     anchors: AnchorRow[];
     imports: ImportRow[];
+    importBindings: ImportBindingRow[];
     injections: InjectionRow[];
     locals: LocalScopeRow[];
     edges: RawEdgeRow[];

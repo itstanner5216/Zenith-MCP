@@ -161,6 +161,7 @@ function facts(overrides: Partial<CompressFileRequest['facts']> = {}): CompressF
     referenceEdges: [],
     anchors: [],
     imports: [],
+    importBindings: [],
     injections: [],
     scopes: [],
     ...overrides,
