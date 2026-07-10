@@ -43,14 +43,16 @@ jobs:
 
       - name: Generate CI failure report
         if: steps.pr.outputs.number != ''
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           git-print ci-status --pr "${{ steps.pr.outputs.number }}" --sha "${{ github.event.workflow_run.head_sha }}" --out Git-Print-CI-Status.md
 
       - name: Upload report artifact
-        if: steps.pr.outputs.number != ''
+        if: ${{ always() && steps.pr.outputs.number != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: Git-Print-CI-Status
           path: Git-Print-CI-Status.md
+          if-no-files-found: warn
