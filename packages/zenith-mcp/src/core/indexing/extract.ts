@@ -10,11 +10,12 @@ import { loadLanguage, getCompiledQuery } from '../tree-sitter/runtime.js';
 import { extractStructureForDef } from '../tree-sitter/structure.js';
 import { extractAnchorsForDef } from '../tree-sitter/anchors.js';
 import { extractImportsFromSymbols } from '../tree-sitter/imports.js';
+import { extractImportStatements } from '../tree-sitter/import-bindings.js';
 import { extractInjections } from '../tree-sitter/injections.js';
 import { extractLocals } from '../tree-sitter/locals.js';
 import { bodySlice, bodyHash } from '../tree-sitter/body.js';
 import { selectDefinitionNode, type SymbolInfo } from '../tree-sitter/symbols.js';
-import type { ParsedFileRecord, SymbolRow, StructureRow, AnchorRow, RawEdgeRow, LocalScopeRow } from './types.js';
+import type { ParsedFileRecord, SymbolRow, StructureRow, AnchorRow, RawEdgeRow, LocalScopeRow, ImportBindingRow } from './types.js';
 
 export async function extractParsedFile(
     source: string, langName: string, relPath: string, hash: string
@@ -157,7 +158,21 @@ export async function extractParsedFile(
         }
 
         // --- Step 5: Imports (post-processes symbols, no re-parse) ---
-        const imports = extractImportsFromSymbols(rawSymbols);
+        // Spans and bindings come from the SAME statement node, so bindings can
+        // never cross-contaminate statements that share a line (PR-78 review).
+        const importStatements = extractImportStatements(rootNode, langName);
+        const importBindings: ImportBindingRow[] = importStatements
+            .flatMap(stmt => stmt.bindings)
+            .sort((a, b) => (a.line - b.line) || (a.column - b.column));
+        const imports = importStatements.length > 0
+            ? importStatements.map(stmt => ({
+                module: stmt.span.module,
+                importedNames: [...new Set(stmt.bindings.map(binding => binding.localName))],
+                line: stmt.span.line,
+                startLine: stmt.span.startLine,
+                endLine: stmt.span.endLine,
+            }))
+            : extractImportsFromSymbols(rawSymbols);
 
         // --- Step 6: Injections (shares rootNode) ---
         const injections = await extractInjections(rootNode, langName);
@@ -201,7 +216,7 @@ export async function extractParsedFile(
             if (bestDef) edges.push({ containerDefKey: `${bestDef.name}:${bestDef.line}:${bestDef.column}`, referencedName: ref.name });
         }
 
-        return { relPath, hash, lang: langName, symbols, structures, anchors, imports, injections: injectionRows, locals, edges };
+        return { relPath, hash, lang: langName, symbols, structures, anchors, imports, importBindings, injections: injectionRows, locals, edges };
     } finally {
         tree.delete();
         parser.delete();

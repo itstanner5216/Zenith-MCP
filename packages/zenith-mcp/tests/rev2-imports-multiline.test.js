@@ -48,6 +48,8 @@ describe('extractImportsFromSymbols — multi-line statements (rev2 [S])', () =>
         expect(edge.importedNames).toContain('c');
         // Anchored on the statement's source line, not a name line.
         expect(edge.line).toBe(1);
+        expect(edge.startLine).toBe(1);
+        expect(edge.endLine).toBe(4);
     });
 
     it('never misattributes an imported name as the module (the [S] bug)', () => {
@@ -84,6 +86,8 @@ describe('extractImportsFromSymbols — multi-line statements (rev2 [S])', () =>
         expect(imports[0].module).toBe('fs');
         expect(imports[0].importedNames).toEqual(['readFile', 'writeFile']);
         expect(imports[0].line).toBe(3);
+        expect(imports[0].startLine).toBe(3);
+        expect(imports[0].endLine).toBe(3);
     });
 
     it('separates two multi-line statements into two correct edges', () => {
@@ -106,7 +110,11 @@ describe('extractImportsFromSymbols — multi-line statements (rev2 [S])', () =>
         expect(b).toBeDefined();
         expect(a.importedNames).toEqual(['x', 'y']);
         expect(a.line).toBe(1);
+        expect(a.startLine).toBe(1);
+        expect(a.endLine).toBe(3);
         expect(b.importedNames).toEqual(['z']);
         expect(b.line).toBe(5);
+        expect(b.startLine).toBe(5);
+        expect(b.endLine).toBe(6);
     });
 });

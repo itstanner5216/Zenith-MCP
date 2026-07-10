@@ -35,6 +35,7 @@ describe('reference facts seam', () => {
         ],
         anchors: [],
         imports: [],
+        importBindings: [],
         injections: [],
         scopes: [],
       },

@@ -46,3 +46,7 @@ test-results/
 junit.xml
 *.junit.xml
 lcov.info
+
+# chunk active sidecar tracking
+.chunk/sidecar.json
+.chunk/sidecar.*.json

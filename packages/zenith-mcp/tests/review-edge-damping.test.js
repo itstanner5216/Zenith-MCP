@@ -67,6 +67,7 @@ function factsFor(defs, edges) {
     referenceEdges: [],
     anchors: [],
     imports: [],
+    importBindings: [],
     injections: [],
     scopes: [],
   };

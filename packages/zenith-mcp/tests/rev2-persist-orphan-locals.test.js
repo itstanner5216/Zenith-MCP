@@ -49,6 +49,7 @@ function makeRecord(locals) {
         structures: [],
         anchors: [],
         imports: [],
+        importBindings: [],
         injections: [],
         edges: [],
         locals,

@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm install --frozen-lockfile",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "pnpm test",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "chunk validate",
+            "timeout": 390
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -151,7 +151,20 @@ function buildFacts(dbFacts, relPath, langName) {
             symbolName: a.symbol_name, kind: a.kind, line: a.line, text: a.text,
         })),
         imports: dbFacts.imports.map(i => ({
-            module: i.module, importedNames: i.importedNames, line: i.line,
+            module: i.module,
+            importedNames: i.importedNames,
+            line: i.line,
+            startLine: i.startLine,
+            endLine: i.endLine,
+        })),
+        importBindings: dbFacts.importBindings.map(i => ({
+            source: i.source,
+            localName: i.localName,
+            importedName: i.importedName,
+            importKind: i.importKind,
+            isTypeOnly: i.isTypeOnly,
+            line: i.line,
+            column: i.column,
         })),
         injections: dbFacts.injections.map(j => ({
             injectedLang: j.injected_lang, startLine: j.start_line, endLine: j.end_line,
@@ -194,6 +207,7 @@ function buildBlocksAndSource(prefixed, facts, maxChars) {
             edges: facts.edges,
             anchors: facts.anchors,
             imports: facts.imports,
+            importBindings: facts.importBindings,
             injections: facts.injections,
             scopes: facts.scopes,
         },
@@ -213,7 +227,10 @@ function buildBlocksAndSource(prefixed, facts, maxChars) {
 function classifyBlocks(blocks, facts) {
     const defStart = new Set(facts.defs.map(d => d.line));
     const defRanges = facts.defs.map(d => ({ start: d.line, end: d.endLine }));
-    const importLines = new Set(facts.imports.map(i => i.line));
+    const importLines = new Set();
+    for (const im of facts.imports) {
+        for (let line = im.startLine; line <= im.endLine; line++) importLines.add(line);
+    }
     const anchorLines = new Set(facts.anchors.map(a => a.line));
     const scopeStart = new Set(facts.scopes.map(s => s.startLine));
     const injectionStart = new Set(facts.injections.map(j => j.startLine));
@@ -400,7 +417,7 @@ async function measureFile(db, relPath) {
 
     // Mirror compressForTool's DB hop: ensure facts describe THESE exact bytes,
     // then read them back. Any DB failure degrades to empty facts (Rule 12).
-    let dbFacts = { defs: [], edges: [], anchors: [], imports: [], injections: [], scopes: [] };
+    let dbFacts = { defs: [], edges: [], anchors: [], imports: [], importBindings: [], injections: [], scopes: [] };
     try {
         await ensureFreshFromContent(db, REPO_ROOT, validPath, indexedSource);
         dbFacts = getFileFacts(db, relForSeam);

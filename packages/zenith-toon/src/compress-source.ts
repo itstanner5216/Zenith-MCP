@@ -85,6 +85,17 @@ export interface RawFileFacts {
     readonly module: string;
     readonly importedNames: readonly string[];
     readonly line: number;
+    readonly startLine: number;
+    readonly endLine: number;
+  }>;
+  readonly importBindings: ReadonlyArray<{
+    readonly source: string;
+    readonly localName: string;
+    readonly importedName: string | null;
+    readonly importKind: 'named' | 'default' | 'namespace';
+    readonly isTypeOnly: boolean;
+    readonly line: number;
+    readonly column: number;
   }>;
   readonly injections: ReadonlyArray<{
     readonly injectedLang: string;

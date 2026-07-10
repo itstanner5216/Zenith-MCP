@@ -68,6 +68,7 @@ function emptyFacts(path = 'src/fixture.ts', langName = 'typescript') {
     referenceEdges: [],
     anchors: [],
     imports: [],
+    importBindings: [],
     injections: [],
     scopes: [],
   };
