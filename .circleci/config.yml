@@ -22,6 +22,7 @@ jobs:
           command: |
             pnpm build
             pnpm --filter zenith-mcp run test:coverage
+            pnpm --filter zenith-toon run test
   build-node:
     # Build node project
     executor:
