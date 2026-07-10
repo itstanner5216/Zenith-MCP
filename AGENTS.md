@@ -303,6 +303,18 @@ Do not propose or implement:
 
 ---
 
+### Rule 19 — The Symbol DB Is the Source of Truth; Read It Fresh
+
+The symbol index (SQLite, via `db-adapter.ts`) is the single source of truth for file facts across the entire MCP: symbols, imports, import bindings, structures, anchors, edges. It is kept current automatically — every read-tool read and every edit re-indexes the touched file. Consumers never parse for facts themselves; they read the DB. The full consumer contract:
+
+- **Extractor submodules (`tree-sitter/*`) are ingestion-only.** Exactly ONE write path feeds the index: `core/indexing/extract.ts`. This is why the public barrel (`core/tree-sitter.ts`) does not re-export them — a second extractor call site would mean a second, unverified source of facts. Needing extractor output is not a reason to import one; it is a reason to read the DB.
+- **Trust rows only after a freshness check you control.** Any consumer holding a file's current content and about to trust DB rows for it calls `ensureFreshFromContent(db, repoRoot, absPath, content)` (`symbol-index.ts`) first. When the index is already current — the normal case, because reads and edits refresh it — this is a hash compare, effectively free. When the file changed outside the MCP (hand edit, branch switch, formatter), it is a single-file reindex. Either way, after it returns the rows provably describe those exact bytes.
+- **Before/after snapshots for diff-style consumers** (edit advisories and similar): the pre-edit DB state IS the before-snapshot. Verify it with `ensureFreshFromContent(preEditContent)`, read the rows, apply the edit, let the post-edit refresh run, read again, diff. All reads from the DB; no extractor imports needed.
+- **Reference positions are deliberately not stored.** `edges` records that a name is referenced, not where. Needing identifier coordinates is not a reason to work around the DB — parse for positions (via the barrel's exposed surface), query for facts. That division is the design, not a gap.
+- **If the facts you need aren't queryable yet**, add the query to `db-adapter.ts` / `indexed-symbols.ts` — never an extractor call site.
+
+---
+
 ### The Value-Blind Gate (how selection actually decides)
 
 The removal gate has **no ranking of its own** and blends **no scores**. It consumes only boolean *verdicts* from the ranking engines:

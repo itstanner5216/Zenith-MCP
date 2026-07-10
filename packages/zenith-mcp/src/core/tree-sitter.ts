@@ -20,6 +20,14 @@
 //
 // If a future consumer needs symbol/structure/anchor data, add the query to
 // indexed-symbols.ts or db-adapter.ts — do not add an extractor call site.
+//
+// WHY one write path (AGENTS.md Rule 19): the index is the MCP-wide source of
+// truth, and its guarantees hold only because every row was written by the
+// single-parse orchestrator. A direct extractor call would create facts nobody
+// persisted or verified. And the index is never more than one
+// ensureFreshFromContent(content) call away from provably matching the bytes
+// in your hand (symbol-index.ts — a hash compare when already fresh, a
+// single-file reindex when not). Reach for that, not for the extractors.
 // ---------------------------------------------------------------------------
 
 export {
