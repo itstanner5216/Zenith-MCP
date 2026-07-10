@@ -190,6 +190,24 @@ describe('review #5: old-shape schema_version upgrade', () => {
         expect(importCols).toContain('end_line');
     });
 
+    it('invalidates stored file hashes during the v2 migration so bindings repopulate', () => {
+        db = openMemoryDb();
+        initSymbolSchema(db);
+        // Simulate a pre-v2 database that had already indexed a file: without
+        // hash invalidation, indexFile skips unchanged files on hash match and
+        // import_bindings stays empty for them indefinitely.
+        execRaw(db, 'DROP TABLE import_bindings');
+        execRaw(db, "INSERT INTO files (path, hash, last_indexed) VALUES ('src/a.ts', 'stale-hash', 1)");
+        execRaw(db, 'UPDATE schema_version SET version = 1 WHERE id = 1');
+
+        initSymbolSchema(db);
+
+        expect(getSchemaVersion(db)).toBe(3);
+        const rows = queryRaw(db, 'SELECT hash FROM files');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].hash).toBeNull();
+    });
+
     it('upgrades an existing v2 database to v3 by adding import span columns', () => {
         db = openMemoryDb();
         initSymbolSchema(db);

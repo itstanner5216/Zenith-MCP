@@ -26,62 +26,59 @@ export interface ImportStatementSpan {
     endLine: number;
 }
 
-export function extractImportStatementSpans(rootNode: Node, langName: string): ImportStatementSpan[] {
+export interface ImportStatementFacts {
+    span: ImportStatementSpan;
+    bindings: ImportBinding[];
+}
+
+export function extractImportStatements(rootNode: Node, langName: string): ImportStatementFacts[] {
     if (langName !== 'typescript' && langName !== 'tsx' && langName !== 'javascript') return [];
 
-    const statements: ImportStatementSpan[] = [];
-    const stack: Node[] = [rootNode];
+    const statements: ImportStatementFacts[] = [];
+    // `import_statement` is a top-level construct in JS/TS — always a direct
+    // child of the program node — so walking the full tree is wasted work.
+    for (let i = 0; i < rootNode.childCount; i++) {
+        const node = rootNode.child(i);
+        if (!node || node.type !== 'import_statement') continue;
 
-    while (stack.length > 0) {
-        const node = stack.pop();
-        if (!node) continue;
+        // The module specifier is the LAST direct `string` child of the
+        // statement (the `from` clause) — a first-descendant search would find
+        // a string-literal export name first: import { "a-b" as a } from "./m".
+        // `import x = require("m")` keeps its specifier inside the require
+        // clause, so that one is read from the clause's argument.
+        const requireClause = findDirectChildOfType(node, 'import_require_clause');
+        const sourceNode = requireClause
+            ? findFirstDescendantOfType(requireClause, 'string')
+            : findLastDirectChildOfType(node, 'string');
+        if (!sourceNode) continue;
+        const module = stringLiteralValue(sourceNode);
 
-        if (node.type === 'import_statement') {
-            const sourceNode = findFirstDescendantOfType(node, 'string');
-            if (sourceNode) {
-                statements.push({
-                    module: stringLiteralValue(sourceNode),
-                    line: node.startPosition.row + 1,
-                    startLine: node.startPosition.row + 1,
-                    endLine: node.endPosition.row + 1,
-                });
-            }
-        }
+        // Bindings are extracted from THIS statement node, so a binding can
+        // never be attributed to another statement sharing the same line span.
+        const bindings: ImportBinding[] = [];
+        extractFromImportStatement(node, module, bindings);
 
-        for (let i = node.childCount - 1; i >= 0; i--) {
-            const child = node.child(i);
-            if (child) stack.push(child);
-        }
+        statements.push({
+            span: {
+                module,
+                line: node.startPosition.row + 1,
+                startLine: node.startPosition.row + 1,
+                endLine: node.endPosition.row + 1,
+            },
+            bindings,
+        });
     }
 
-    statements.sort((a, b) => (a.startLine - b.startLine) || (a.endLine - b.endLine));
+    statements.sort((a, b) => (a.span.startLine - b.span.startLine) || (a.span.endLine - b.span.endLine));
     return statements;
 }
 
+export function extractImportStatementSpans(rootNode: Node, langName: string): ImportStatementSpan[] {
+    return extractImportStatements(rootNode, langName).map(stmt => stmt.span);
+}
+
 export function extractImportBindings(rootNode: Node, langName: string): ImportBinding[] {
-    if (langName !== 'typescript' && langName !== 'tsx' && langName !== 'javascript') return [];
-
-    const bindings: ImportBinding[] = [];
-    const stack: Node[] = [rootNode];
-
-    while (stack.length > 0) {
-        const node = stack.pop();
-        if (!node) continue;
-
-        if (node.type === 'import_statement') {
-            const sourceNode = findFirstDescendantOfType(node, 'string');
-            const source = sourceNode ? stringLiteralValue(sourceNode) : null;
-            if (source !== null) {
-                extractFromImportStatement(node, source, bindings);
-            }
-        }
-
-        for (let i = node.childCount - 1; i >= 0; i--) {
-            const child = node.child(i);
-            if (child) stack.push(child);
-        }
-    }
-
+    const bindings = extractImportStatements(rootNode, langName).flatMap(stmt => stmt.bindings);
     bindings.sort((a, b) => (a.line - b.line) || (a.column - b.column));
     return bindings;
 }
@@ -99,7 +96,9 @@ function extractFromImportStatement(node: Node, source: string, bindings: Import
                 localName: local.text,
                 importedName: null,
                 importKind: 'namespace',
-                isTypeOnly: false,
+                // `import type foo = require("m")` carries `type` on the
+                // statement node; the require clause is not exempt from it.
+                isTypeOnly: statementTypeOnly,
                 line: local.startPosition.row + 1,
                 column: local.startPosition.column,
             });
@@ -149,21 +148,27 @@ function extractNamedImports(node: Node, source: string, statementTypeOnly: bool
         const child = node.child(i);
         if (!child || child.type !== 'import_specifier') continue;
 
+        // Specifier names may be identifiers OR string literals — TS allows
+        // arbitrary module namespace names: import { "a-b" as a } from "./m".
         const names: Node[] = [];
         for (let j = 0; j < child.childCount; j++) {
             const specChild = child.child(j);
-            if (specChild && specChild.type === 'identifier') names.push(specChild);
+            if (specChild && (specChild.type === 'identifier' || specChild.type === 'string')) names.push(specChild);
         }
 
         const first = names[0];
         if (!first) continue;
         const second = names[1] ?? null;
         const local = second ?? first;
+        // The local binding must be an identifier; a lone string specifier
+        // binds nothing addressable in code.
+        if (local.type !== 'identifier') continue;
+        const importedName = first.type === 'string' ? stringLiteralValue(first) : first.text;
 
         bindings.push({
             source,
             localName: local.text,
-            importedName: first.text,
+            importedName,
             importKind: 'named',
             isTypeOnly: statementTypeOnly || hasDirectChildType(child, 'type'),
             line: local.startPosition.row + 1,

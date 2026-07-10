@@ -279,6 +279,11 @@ export function initSymbolSchema(conn: DbConnection): void {
             CREATE INDEX IF NOT EXISTS idx_import_bindings_file ON import_bindings(file_path);
             CREATE INDEX IF NOT EXISTS idx_import_bindings_local ON import_bindings(file_path, local_name);
             `);
+            // Invalidate stored content hashes so the next indexing pass re-parses
+            // every already-indexed file and populates import_bindings. Without
+            // this, unchanged files skip on hash match (indexFile) and keep empty
+            // binding facts indefinitely. Fresh databases have no rows; no-op.
+            db.exec('UPDATE files SET hash = NULL');
             db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(2);
         });
     }

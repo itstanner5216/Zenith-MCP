@@ -139,6 +139,53 @@ describe('import bindings', () => {
         }));
     });
 
+    it('keeps same-line import statements separated (no binding cross-contamination)', async () => {
+        const source = 'import { a } from "./x"; import { b } from "./y";\n';
+        const record = await extractParsedFile(source, 'typescript', 'src/sameline.ts', 'hash-sameline');
+        expect(record).not.toBeNull();
+        if (!record) return;
+
+        const byModule = new Map(record.imports.map(imp => [imp.module, imp]));
+        expect(byModule.get('./x')?.importedNames).toEqual(['a']);
+        expect(byModule.get('./y')?.importedNames).toEqual(['b']);
+
+        const bindings = byLocal(record.importBindings);
+        expect(bindings.get('a')).toMatchObject({ source: './x', importedName: 'a', importKind: 'named' });
+        expect(bindings.get('b')).toMatchObject({ source: './y', importedName: 'b', importKind: 'named' });
+    });
+
+    it('records the module specifier, not a string-literal export name', async () => {
+        const source = 'import { "a-b" as a } from "./mod";\n';
+        const record = await extractParsedFile(source, 'typescript', 'src/strlit.ts', 'hash-strlit');
+        expect(record).not.toBeNull();
+        if (!record) return;
+
+        expect(record.imports).toHaveLength(1);
+        expect(record.imports[0].module).toBe('./mod');
+
+        const bindings = byLocal(record.importBindings);
+        expect(bindings.get('a')).toMatchObject({
+            source: './mod',
+            localName: 'a',
+            importedName: 'a-b',
+            importKind: 'named',
+        });
+    });
+
+    it('marks `import type x = require(...)` as type-only', async () => {
+        const source = 'import type cjs = require("legacy");\n';
+        const record = await extractParsedFile(source, 'typescript', 'src/typereq.ts', 'hash-typereq');
+        expect(record).not.toBeNull();
+        if (!record) return;
+
+        const bindings = byLocal(record.importBindings);
+        expect(bindings.get('cjs')).toMatchObject({
+            source: 'legacy',
+            importKind: 'namespace',
+            isTypeOnly: true,
+        });
+    });
+
     it('persists import bindings into getFileFacts and replaces stale rows on re-index', async () => {
         db = openMemoryDb();
         initSymbolSchema(db);

@@ -10,7 +10,7 @@ import { loadLanguage, getCompiledQuery } from '../tree-sitter/runtime.js';
 import { extractStructureForDef } from '../tree-sitter/structure.js';
 import { extractAnchorsForDef } from '../tree-sitter/anchors.js';
 import { extractImportsFromSymbols } from '../tree-sitter/imports.js';
-import { extractImportBindings, extractImportStatementSpans } from '../tree-sitter/import-bindings.js';
+import { extractImportStatements } from '../tree-sitter/import-bindings.js';
 import { extractInjections } from '../tree-sitter/injections.js';
 import { extractLocals } from '../tree-sitter/locals.js';
 import { bodySlice, bodyHash } from '../tree-sitter/body.js';
@@ -158,17 +158,19 @@ export async function extractParsedFile(
         }
 
         // --- Step 5: Imports (post-processes symbols, no re-parse) ---
-        const statementSpans = extractImportStatementSpans(rootNode, langName);
-        const importBindings: ImportBindingRow[] = extractImportBindings(rootNode, langName);
-        const imports = statementSpans.length > 0
-            ? statementSpans.map(stmt => ({
-                module: stmt.module,
-                importedNames: [...new Set(importBindings
-                    .filter(binding => binding.line >= stmt.startLine && binding.line <= stmt.endLine)
-                    .map(binding => binding.localName))],
-                line: stmt.line,
-                startLine: stmt.startLine,
-                endLine: stmt.endLine,
+        // Spans and bindings come from the SAME statement node, so bindings can
+        // never cross-contaminate statements that share a line (PR-78 review).
+        const importStatements = extractImportStatements(rootNode, langName);
+        const importBindings: ImportBindingRow[] = importStatements
+            .flatMap(stmt => stmt.bindings)
+            .sort((a, b) => (a.line - b.line) || (a.column - b.column));
+        const imports = importStatements.length > 0
+            ? importStatements.map(stmt => ({
+                module: stmt.span.module,
+                importedNames: [...new Set(stmt.bindings.map(binding => binding.localName))],
+                line: stmt.span.line,
+                startLine: stmt.span.startLine,
+                endLine: stmt.span.endLine,
             }))
             : extractImportsFromSymbols(rawSymbols);
 
