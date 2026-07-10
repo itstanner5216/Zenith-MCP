@@ -54,6 +54,8 @@ jobs:
     # This is an example deploy job, not actually used by the workflow
     docker:
       - image: circleci/circleci-cli:latest
+    steps:
+      - checkout
       - run:
           name: Plan deployment
           command: |
