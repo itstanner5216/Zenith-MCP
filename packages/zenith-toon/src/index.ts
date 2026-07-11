@@ -59,7 +59,7 @@ export interface DefSpan {
 export interface TileRefinements {
   readonly scopes?: ReadonlyArray<{ startLine: number; endLine: number; scopeKind: string }>;
   readonly injections?: ReadonlyArray<{ startLine: number; endLine: number; injectedLang: string }>;
-  readonly anchors?: ReadonlyArray<{ line: number; kind: string; symbolName: string; text: string }>;
+  readonly anchors?: ReadonlyArray<{ line: number; endLine?: number; kind: string; symbolName: string; text: string }>;
   readonly imports?: ReadonlyArray<{ startLine: number; endLine: number; module: string }>;
 }
 
@@ -501,12 +501,14 @@ export interface CompressFileRequest {
     readonly referenceEdges: ReadonlyArray<{
       readonly callerLine: number;
       readonly referencedName: string;
+      readonly referenceKind?: string;
       readonly referenceCount: number;
     }>;
     readonly anchors: ReadonlyArray<{
       readonly symbolName: string;
       readonly kind: string;
       readonly line: number;
+      readonly endLine?: number;
       readonly text: string;
     }>;
     readonly imports: ReadonlyArray<{
@@ -601,8 +603,19 @@ export function compressFile(request: CompressFileRequest): string | null {
         })),
         references: request.facts.references,
         edges: request.facts.edges,
-        referenceEdges: request.facts.referenceEdges,
-        anchors: request.facts.anchors,
+        referenceEdges: request.facts.referenceEdges.map(e => ({
+          callerLine: e.callerLine,
+          referencedName: e.referencedName,
+          referenceKind: e.referenceKind ?? 'unknown',
+          referenceCount: e.referenceCount,
+        })),
+        anchors: request.facts.anchors.map(a => ({
+          symbolName: a.symbolName,
+          kind: a.kind,
+          line: a.line,
+          endLine: a.endLine ?? a.line,
+          text: a.text,
+        })),
         imports: request.facts.imports,
         importBindings: request.facts.importBindings,
         injections: request.facts.injections,

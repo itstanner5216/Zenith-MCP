@@ -94,10 +94,12 @@ export async function compressForTool(
                 callerLine: e.callerLine, calleeLine: e.calleeLine, callCount: e.callCount,
             })),
             referenceEdges: dbFacts.referenceEdges.map(e => ({
-                callerLine: e.callerLine, referencedName: e.referencedName, referenceCount: e.referenceCount,
+                callerLine: e.callerLine, referencedName: e.referencedName,
+                referenceKind: e.referenceKind, referenceCount: e.referenceCount,
             })),
             anchors: dbFacts.anchors.map(a => ({
-                symbolName: a.symbol_name, kind: a.kind, line: a.line, text: a.text,
+                symbolName: a.symbol_name, kind: a.kind,
+                line: a.line, endLine: a.endLine, text: a.text,
             })),
             imports: dbFacts.imports.map(i => ({
                 module: i.module, importedNames: i.importedNames,

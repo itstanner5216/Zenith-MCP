@@ -186,12 +186,7 @@ describe('persistParsedFile — parent linkage is insertion-order independent (f
 // ---------------------------------------------------------------------------
 // Real-extractor proof: the same-line TS class `class C { greet() {} }` flows
 // through extractParsedFile (so we exercise the genuine ParsedFileRecord shape,
-// not just a hand-built one) and persists with a non-null parent link.
-//
-// extractParsedFile emits `C` (col 6) BEFORE `greet` (col 10) but gives the
-// CLASS a parentSymbolKey pointing at the method (`greet:1:10`). Under the old
-// single-pass code that class→method link dropped to null because `greet` had
-// no id yet when `C` was inserted. The second pass fixes it.
+// not just a hand-built one) and persists the AST-correct child→parent link.
 // ---------------------------------------------------------------------------
 
 describe('persistParsedFile — same-line class/method via real extractParsedFile (finding #10)', () => {
@@ -199,27 +194,21 @@ describe('persistParsedFile — same-line class/method via real extractParsedFil
     beforeEach(() => { db = makeDb(); });
     afterEach(() => closeDb(db));
 
-    it('persists a non-null parent link for a single-line class definition', async () => {
+    it('persists the exact parent link for a single-line class definition', async () => {
         const relPath = 'src/single-line.ts';
         const source = 'class C { greet() {} }\n';
 
         const rec = await extractParsedFile(source, 'typescript', relPath, 'hash');
         expect(rec, 'extractParsedFile returned null (grammar failed to load)').toBeTruthy();
 
-        // Confirm the fixture really is order-sensitive: at least one symbol's
-        // parent key points at a symbol that is listed AFTER it. (Guards the
-        // test against an extractor change that would make it vacuous.)
-        const keyOf = (s) => `${s.name}:${s.line}:${s.column}`;
-        const indexByKey = new Map(rec.symbols.map((s, i) => [keyOf(s), i]));
-        const hasForwardRef = rec.symbols.some(
-            (s, i) => s.parentSymbolKey && (indexByKey.get(s.parentSymbolKey) ?? -1) > i,
-        );
-        expect(hasForwardRef, 'fixture is not order-sensitive; pick a stronger fixture').toBe(true);
-
         upsertFile(db, relPath, 'hash', Date.now());
         persistParsedFile(db, rec);
 
         const rows = readSymbols(db, relPath);
+        const classRow = findRow(rows, 'C');
+        const methodRow = findRow(rows, 'greet');
+        expect(classRow.parentId).toBeNull();
+        expect(methodRow.parentId).toBe(classRow.id);
         // Every symbol that carries a parentSymbolKey resolving to a real symbol
         // in this file must end up with a non-null parent_symbol_id.
         const idByKey = new Map(
