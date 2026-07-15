@@ -238,7 +238,8 @@ export class BMXIndex {
 
     const scores = new Map<string, number>();
     for (const chunkId of candidateIds) {
-      const docTokens = this._documents.get(chunkId)!;
+      const docTokens = this._documents.get(chunkId);
+      if (docTokens === undefined) continue;
       const score = this._scoreDocument(chunkId, docTokens, uniqueQuery, queryTokens, normEntropy, eBar, m);
       if (score > 0) scores.set(chunkId, score);
     }
@@ -336,7 +337,8 @@ export class BMXIndex {
     }
 
     for (const term of affectedTerms) {
-      const data = this._terms.get(term)!;
+      const data = this._terms.get(term);
+      if (data === undefined) continue;
       data.idf = Math.log(((this._totalDocs - data.docFreq + 0.5) / (data.docFreq + 0.5)) + 1.0);
     }
 
@@ -347,9 +349,8 @@ export class BMXIndex {
   }
 
   removeFromIndex(chunkId: string): boolean {
-    if (!this._documents.has(chunkId)) return false;
-
-    const tokens = this._documents.get(chunkId)!;
+    const tokens = this._documents.get(chunkId);
+    if (tokens === undefined) return false;
     const termCounts = new Map<string, number>();
     for (const t of tokens) termCounts.set(t, (termCounts.get(t) ?? 0) + 1);
 
@@ -378,7 +379,8 @@ export class BMXIndex {
     }
 
     for (const term of affectedTerms) {
-      const data = this._terms.get(term)!;
+      const data = this._terms.get(term);
+      if (data === undefined) continue;
       data.idf = Math.log(((this._totalDocs - data.docFreq + 0.5) / (data.docFreq + 0.5)) + 1.0);
     }
     for (const t of affectedTerms) this._dirtyTerms.add(t);

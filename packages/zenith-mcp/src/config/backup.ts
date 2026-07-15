@@ -4,44 +4,43 @@ import { homedir } from 'node:os';
 import { expandTilde } from './schema.js';
 import {
     DbConnection,
-    openDb,
-    closeDb as adapterCloseDb,
     initBackupSchema,
     insertBackup,
     getBackup,
     pruneExpiredBackups
 } from '../core/db-adapter.js';
+import { getGlobalDbConnection, closeGlobalDb } from '../core/project-context.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const ZENITH_HOME = join(homedir(), '.zenith-mcp');
-const GLOBAL_DB_PATH = join(ZENITH_HOME, 'global-stash.db');
 const DEFAULT_BACKUP_DIR = join(ZENITH_HOME, 'mcp_backups');  // used as fallback when backup_dir is empty
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ---------------------------------------------------------------------------
-// Lazy singleton DB connection — one open per process lifetime
+// Shared global connection (POLARIS Task 1.4): exactly ONE production code
+// path opens the global database — ProjectContext's private opener. This
+// module rides that connection and only ensures its own table exists.
 // ---------------------------------------------------------------------------
 
-let _db: DbConnection | null = null;
+let _schemaReady = false;
 
 function getDb(): DbConnection {
-    if (_db !== null) return _db;
-    mkdirSync(ZENITH_HOME, { recursive: true });
-    const conn = openDb(GLOBAL_DB_PATH);
-    initBackupSchema(conn);
-    _db = conn;
+    const conn = getGlobalDbConnection();
+    if (!_schemaReady) {
+        initBackupSchema(conn);
+        _schemaReady = true;
+    }
     return conn;
 }
 
-/** Exported for test teardown / clean shutdown. */
+/** Exported for test teardown / clean shutdown — closes the SHARED global
+ * connection via its owner so no stale handle survives anywhere. */
 export function closeDb(): void {
-    if (_db !== null) {
-        adapterCloseDb(_db);
-        _db = null;
-    }
+    _schemaReady = false;
+    closeGlobalDb();
 }
 
 // withDb signature preserved so callers are unchanged.

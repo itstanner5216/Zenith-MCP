@@ -27,7 +27,12 @@ class ContinueDevAdapter extends MCPConfigAdapter {
   }
 
   writeConfig(data: Record<string, unknown>) {
-    const p = this.configPath()!;
+    const p: string | null = this.configPath();
+    if (p === null) {
+      throw new Error(
+        `${this.displayName}: unable to resolve MCP config path on this platform`,
+      );
+    }
     this.backup(p);
     mkdirSync(join(p, ".."), { recursive: true });
     writeYaml(p, data);

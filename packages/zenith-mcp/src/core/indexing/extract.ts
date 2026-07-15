@@ -75,7 +75,18 @@ export async function extractParsedFile(
             } else {
                 endLine = bodyCapture ? bodyCapture.node.endPosition.row + 1 : nameCapture.node.endPosition.row + 1;
             }
-            const key = `${name}:${kind}:${line}`;
+            // Dedup key (POLARIS Task 1.2, G5): REFERENCES include the column so
+            // repeated same-line occurrences (`a(); a();`) persist as distinct
+            // facts — the old `name:kind:line` key silently dropped every
+            // occurrence after the first, halving call weights and hiding real
+            // references. DEFINITIONS keep the `name:kind:line` compatibility
+            // key on purpose: def identity stays line-scoped at v4 (exact
+            // byte-range occurrence identity begins in v5), and widening it
+            // would double-insert grammar patterns that capture one definition
+            // under two capture names at different columns.
+            const key = kind === 'ref'
+                ? `${name}:${kind}:${line}:${column}`
+                : `${name}:${kind}:${line}`;
             if (seen.has(key)) continue;
             seen.add(key);
             if (selPrimary !== null && selSpan !== null) {

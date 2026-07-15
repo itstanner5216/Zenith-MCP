@@ -16,7 +16,7 @@ import type { Edit } from '../core/edit-engine.js';
 import { normalizeLineEndings } from '../core/lib.js';
 import { loadConfig } from '../config/index.js';
 import type { ZenithConfig } from '../config/index.js';
-import { getFileCount, getFilePaths, findSymbolFiles, getFileHash, findSymbolStructuresByName } from '../core/db-adapter.js';
+import { getFileCount, getFilePaths, findSymbolFiles, getFileHash, findSymbolStructuresByName, deleteFile } from '../core/db-adapter.js';
 // ---------------------------------------------------------------------------
 // Lazy config accessors — avoids calling loadConfig() at module evaluation time
 // ---------------------------------------------------------------------------
@@ -364,7 +364,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             else {
                 contextLines = args.contextLines ?? DEFAULT_CONTEXT;
                 workList = [];
-                for (const entry of args.selection!) {
+                for (const entry of args.selection ?? []) {
                     if (typeof entry === 'number') {
                         if (!cached || !cached.results || !cached.results.length) {
                             return { content: [{ type: 'text' as const, text: 'Run query first.' }] };
@@ -461,12 +461,30 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const occ of occurrences) {
                 if (!bySymbol.has(occ.symbol))
                     bySymbol.set(occ.symbol, []);
-                bySymbol.get(occ.symbol)!.push(occ);
+                bySymbol.get(occ.symbol)?.push(occ);
             }
             for (const [symName, group] of bySymbol) {
                 if (group.length < 2)
                     continue;
-                const dbStructs = findSymbolStructuresByName(db, symName);
+                // Typed structure read (POLARIS Task 1.1): corrupt persisted JSON
+                // is never treated as absent facts. Correct it with exactly one
+                // forced rebuild of the affected files' facts (delete + reindex —
+                // the freshness path is hash-gated and would skip unchanged bytes,
+                // but write-path corruption lives in the DB, not the bytes), then
+                // fail loudly if corruption persists.
+                let lookup = findSymbolStructuresByName(db, symName);
+                if (lookup.corrupt.length > 0) {
+                    const corruptRels = [...new Set(lookup.corrupt.map(c => c.filePath).filter((p): p is string => p !== null))];
+                    for (const rel of corruptRels) deleteFile(db, rel);
+                    await ensureIndexFresh(db, repoRoot, corruptRels.map(rel => path.join(repoRoot, rel)));
+                    lookup = findSymbolStructuresByName(db, symName);
+                    if (lookup.corrupt.length > 0) {
+                        const c = lookup.corrupt[0];
+                        if (!c) throw new Error('STRUCTURE_CORRUPT: corrupt list unexpectedly empty');
+                        throw new Error(`STRUCTURE_CORRUPT: symbol_structures row ${c.rowId} (${c.filePath ?? 'unknown file'}:${c.line ?? '?'}) is unreadable after a reindex correction: ${c.detail}`);
+                    }
+                }
+                const dbStructs = lookup.rows;
                 const structs: (SymbolStructure | null)[] = group.map(occ => {
                     const match = dbStructs.find(s => s.file_path === occ.relFile && s.line === occ.line);
                     if (!match)
@@ -537,7 +555,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 flag: flagByOccurrence.get(o) || null,
             }));
             const priorOccurrences: LoadedOccurrence[] = (args.loadMore && Array.isArray(cached?.occurrences))
-                ? cached!.occurrences!
+                ? (cached?.occurrences ?? [])
                 : [];
             _loadCache.set(cacheKey, {
                 results: cached?.results || [],
@@ -587,7 +605,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             for (const occ of cached.occurrences) {
                 if (!loadedSymbols.has(occ.symbol))
                     loadedSymbols.set(occ.symbol, []);
-                loadedSymbols.get(occ.symbol)!.push(occ);
+                loadedSymbols.get(occ.symbol)?.push(occ);
             }
             // Flag set: every cached occurrence with a `flag` is an outlier.
             const flaggedIndices = new Set<number>();
@@ -623,7 +641,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // Gate: syntax.
             for (const g of groups) {
                 const occList = loadedSymbols.get(g.symbol);
-                const firstOcc = occList!.find(o => g.indices.includes(o.index)) || occList![0];
+                const firstOcc = occList?.find(o => g.indices.includes(o.index)) || occList?.[0];
                 if (!firstOcc)
                     continue;
                 const langName = getLangForFile(firstOcc.absPath);
@@ -654,13 +672,14 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // fileBundles: Map<absPath, { edits: [...], disambiguations: Map, occMeta: [{group, occ}] }>
             const fileBundles = new Map<string, FileBundle>();
             for (const g of groups) {
-                const occList = loadedSymbols.get(g.symbol)!;
+                const occList = loadedSymbols.get(g.symbol) ?? [];
                 const selected = occList.filter((o: LoadedOccurrence) => g.indices.includes(o.index));
                 for (const occ of selected) {
                     if (!fileBundles.has(occ.absPath)) {
                         fileBundles.set(occ.absPath, { edits: [], disambiguations: new Map(), occMeta: [], relFile: occ.relFile });
                     }
-                    const bundle = fileBundles.get(occ.absPath)!;
+                    const bundle = fileBundles.get(occ.absPath);
+                    if (!bundle) continue;
                     const editIdx = bundle.edits.length;
                     bundle.edits.push({ mode: 'symbol', symbol: g.symbol, newText: g.body });
                     // Always set a disambiguation anchor so batches with multiple symbols work.
@@ -977,10 +996,25 @@ export function register(server: ToolServer, ctx: ToolContext) {
             // dropping the query count from O(targets) to O(distinct symbol names). The
             // per-target struct selection below is byte-for-byte the same set it would
             // have received from a direct call, so behavior is unchanged.
-            const structsByName = new Map<string, ReturnType<typeof findSymbolStructuresByName>>();
+            const structsByName = new Map<string, ReturnType<typeof findSymbolStructuresByName>['rows']>();
             for (const t of targets) {
                 if (!structsByName.has(t.symbol)) {
-                    structsByName.set(t.symbol, findSymbolStructuresByName(db, t.symbol));
+                    // Typed structure read (POLARIS Task 1.1): corrupt rows get one
+                    // forced rebuild (delete + reindex — hash-gated freshness would
+                    // skip unchanged bytes), then a loud failure — never an empty shape.
+                    let lookup = findSymbolStructuresByName(db, t.symbol);
+                    if (lookup.corrupt.length > 0) {
+                        const corruptRels = [...new Set(lookup.corrupt.map(c => c.filePath).filter((p): p is string => p !== null))];
+                        for (const rel of corruptRels) deleteFile(db, rel);
+                        await ensureIndexFresh(db, repoRoot, corruptRels.map(rel => path.join(repoRoot, rel)));
+                        lookup = findSymbolStructuresByName(db, t.symbol);
+                        if (lookup.corrupt.length > 0) {
+                            const c = lookup.corrupt[0];
+                            if (!c) throw new Error('STRUCTURE_CORRUPT: corrupt list unexpectedly empty');
+                            throw new Error(`STRUCTURE_CORRUPT: symbol_structures row ${c.rowId} (${c.filePath ?? 'unknown file'}:${c.line ?? '?'}) is unreadable after a reindex correction: ${c.detail}`);
+                        }
+                    }
+                    structsByName.set(t.symbol, lookup.rows);
                 }
             }
             const structs: (SymbolStructure | null)[] = targets.map(t => {
@@ -1040,7 +1074,8 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (!fileBundles.has(t.absPath)) {
                     fileBundles.set(t.absPath, { edits: [], disambiguations: new Map(), occMeta: [] });
                 }
-                const bundle = fileBundles.get(t.absPath)!;
+                const bundle = fileBundles.get(t.absPath);
+                if (!bundle) continue;
                 const editIdx = bundle.edits.length;
                 bundle.edits.push({ mode: 'symbol', symbol: t.symbol, newText: cachedPayload.body });
                 bundle.disambiguations.set(editIdx, { nearLine: t.line });

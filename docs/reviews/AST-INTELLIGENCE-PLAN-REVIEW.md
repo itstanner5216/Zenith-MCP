@@ -6,7 +6,9 @@ Date: 2026-07-14. Reviewer: Claude (Fable). Plans under review, tested against t
 - **MERIDIAN** — `docs/concepts/MERIDIAN.md` (1,909 lines)
 - **PARALLAX** — `docs/concepts/PARALLAX.md` (1,127 lines)
 
-**Verdict up front: POLARIS wins (weighted 4.88 / 5.0, vs MERIDIAN 3.95, PARALLAX 3.09).** Its factual receipts verified against the codebase with line-level precision, its architecture closes every defect this review empirically reproduced, and it is the only plan that ships a releasable AstIntelligence milestone on the existing v4 schema before any semantic build — the Mission's explicit requirement. Section 8 contains the complete copy-paste-ready patch set that closes every weakness found in it. All seven patches were anchor-verified against the live document; apply them and POLARIS is ready to implement.
+**Verdict up front: POLARIS wins (weighted 4.88 / 5.0, vs MERIDIAN 3.95, PARALLAX 3.09).** Its factual receipts verified against the codebase with line-level precision, its architecture closes every defect this review empirically reproduced, and it is the only plan that ships a releasable AstIntelligence milestone on the existing v4 schema before any semantic build — the Mission's explicit requirement. Section 8 contains the complete patch set that closed every weakness found in it.
+
+> **STATUS (2026-07-14, second pass): ALL SEVEN PATCHES APPLIED to `AST_INTELLIGENCE_SYNTHESIS.md` and re-verified (14/14 fragments, each anchored exactly once). POLARIS is implementation-ready.** Section 8 is now a historical record, not a to-do. Context since the original review: MERIDIAN.md and PARALLAX.md were deleted by the owner; the dual project-detection split was forensically resolved (three generations — git-walk original, abandoned ladder, config-registry rewrite); the dead Gen-2 ladder was deleted; and ProjectContext was rebuilt with detection INSIDE the class (`core/detection/`, encapsulation-guarded, anti-litter promotion policy). PATCH 7 was rewritten before application to record that rebuild as the plan's new ground truth instead of scheduling work the rebuild had already done.
 
 ---
 
@@ -265,6 +267,15 @@ Move the already pinned TypeScript version to runtime dependencies. Implement on
 ```
 Move TypeScript from devDependencies to runtime dependencies and pin it exactly in the same change (the current spec is caret-ranged `^6.0.3`; strip the caret to the resolved lockfile version). Receipt domains hash `resolveModuleName` outcomes and failed-lookup lists, so a resolver minor-bump would silently change domain digests across machines; the pinned version participates in the `module` receipt key via configHash, and any deliberate TypeScript upgrade is a receipt-domain-version event, not a routine dependency bump. Implement only config parsing and `resolveModuleName`, plus the exact lexical/module/export/member/prelude receipt domains above.
 ```
+
+### PATCH 7 — Ground refresh for the 2026-07-14 ProjectContext rebuild (applied directly; final form)
+
+Written after the original six and applied in the same pass. Four fragments, all in `AST_INTELLIGENCE_SYNTHESIS.md`:
+
+1. **Verified-ground bullet replaced** — `core/project-context.ts` is now recorded as rebuilt: single routing authority with detection inside the class (`core/detection/boundaries.ts` pure-fs git/marker walk, `core/detection/process-tree.ts` caller-cwd evidence, both private behind an encapsulation guard test), resolution order explicit-binding → config registry → boundary detection → global fallback, anti-litter materialization (detection is signal, promotion is explicit), Gen-2 fossils deleted (recovered copies parked in `recovered-project-scoping/`, never importable), remaining dual-routing seams enumerated as fleet-rebuild casualties.
+2. **Task 1.4 extended** — the `getIntelligenceStore` accessor must obey the anti-litter gate (a detected-but-unpromoted root routes to the global store; promotion upgrades routing — the intelligence path never silently materializes a project DB); `config/backup.ts` added to the allowlist so exactly one code path opens the global DB; `project_roots` must gain a reader or be documented as write-only compatibility; acceptance extended accordingly.
+3. **Task 7.3 extended** — `docs/Developers-Guide.md` added to the allowlist; both docs were already corrected to the config-registry + internal-detection reality and must be kept aligned; the standing rule is stated: automatic detection lives INSIDE `ProjectContext`, never a second resolver.
+4. **Ground preamble re-pinned** — the commit pin is marked as amended by the rebuild and re-pinned at Wave 0.
 
 ---
 

@@ -89,11 +89,53 @@ export function closeDb(conn: DbConnection): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * The newest symbol-schema version this build understands. A database
+ * reporting a HIGHER version was written by a newer build; touching it could
+ * corrupt facts that build depends on, so initialization refuses it with
+ * zero physical change (POLARIS Task 1.1, FUTURE_SCHEMA).
+ */
+export const LATEST_SYMBOL_SCHEMA_VERSION = 4;
+
+/**
+ * Read the stored schema version WITHOUT creating, normalizing, or mutating
+ * anything — safe to call before any DDL. Handles all three on-disk states:
+ * no schema_version table (fresh/pre-ladder DB -> 0), the legacy shape with
+ * no `id` column (-> highest stored version), and the single-row shape
+ * (-> the id=1 row, 0 if absent).
+ */
+function inspectSchemaVersionReadOnly(db: DatabaseSync): number {
+    const columns = db.prepare('PRAGMA table_info(schema_version)').all() as Array<{ name: string }>;
+    if (columns.length === 0) return 0; // table absent — nothing to read
+    const hasIdColumn = columns.some((c) => c.name === 'id');
+    if (!hasIdColumn) {
+        const legacyRow = db.prepare('SELECT MAX(version) AS version FROM schema_version').get() as { version: number | null } | undefined;
+        return legacyRow && legacyRow.version !== null ? legacyRow.version : 0;
+    }
+    const row = db.prepare('SELECT version FROM schema_version WHERE id = 1').get() as { version: number } | undefined;
+    return row ? row.version : 0;
+}
+
+/**
  * Creates tables: files, symbols, edges, versions, patterns + all indexes for the project symbol database.
  * Also executes schema migrations in safe try/catch blocks.
+ *
+ * FUTURE_SCHEMA contract (POLARIS Task 1.1): the stored schema version is
+ * inspected READ-ONLY before any DDL, normalization, or ad-hoc ALTER runs.
+ * A version newer than {@link LATEST_SYMBOL_SCHEMA_VERSION} throws
+ * `FUTURE_SCHEMA: …` and leaves the database byte-for-byte untouched.
  */
 export function initSymbolSchema(conn: DbConnection): void {
     const db = handle(conn);
+
+    const preVersion = inspectSchemaVersionReadOnly(db);
+    if (preVersion > LATEST_SYMBOL_SCHEMA_VERSION) {
+        throw new Error(
+            `FUTURE_SCHEMA: this database reports symbol-schema version ${preVersion}, ` +
+            `newer than this build's ${LATEST_SYMBOL_SCHEMA_VERSION}. Refusing to touch it — ` +
+            `open it with the newer build that created it (database left unmodified).`
+        );
+    }
+
     db.exec(`
         CREATE TABLE IF NOT EXISTS files (
             path TEXT PRIMARY KEY,
@@ -439,11 +481,49 @@ export function getFileHash(conn: DbConnection, filePath: string): string | null
 }
 
 /**
- * SQL: INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)
+ * SQL: INSERT INTO files (path, hash, last_indexed) VALUES (?, ?, ?)
+ *      ON CONFLICT(path) DO UPDATE SET hash = excluded.hash, last_indexed = excluded.last_indexed
+ *
+ * Update-style conflict handling on purpose (POLARIS Task 1.1, G12): the old
+ * `INSERT OR REPLACE` implemented conflict as DELETE + INSERT, and with
+ * foreign_keys=ON the delete CASCADEd through symbols (and from there through
+ * every symbol-child table) — re-upserting a file's row silently destroyed
+ * its children. Benign only while every caller happened to delete children
+ * first; fatal for any file-keyed state that expects the row to be stable.
+ * DO UPDATE mutates the existing row in place: child rows survive until the
+ * explicit replacement transaction deletes them.
  */
 export function upsertFile(conn: DbConnection, filePath: string, hash: string, lastIndexed: number): void {
-    prepareOrCache(conn, 'INSERT OR REPLACE INTO files (path, hash, last_indexed) VALUES (?, ?, ?)')
+    prepareOrCache(conn, 'INSERT INTO files (path, hash, last_indexed) VALUES (?, ?, ?) ON CONFLICT(path) DO UPDATE SET hash = excluded.hash, last_indexed = excluded.last_indexed')
         .run(filePath, hash, lastIndexed);
+}
+
+/**
+ * SQL: DELETE FROM imports WHERE file_path = ?
+ *
+ * Explicit replacement-clear for a file-FK'd fact table (POLARIS Task 1.1).
+ * Before the non-destructive file upsert, `INSERT OR REPLACE INTO files`
+ * implicitly cascade-cleared this table on every re-persist; the explicit
+ * replacement transaction now owns that clear.
+ */
+export function deleteImportsByFile(conn: DbConnection, filePath: string): void {
+    prepareOrCache(conn, 'DELETE FROM imports WHERE file_path = ?').run(filePath);
+}
+
+/**
+ * SQL: DELETE FROM import_bindings WHERE file_path = ?
+ * See {@link deleteImportsByFile} — same replacement-clear contract.
+ */
+export function deleteImportBindingsByFile(conn: DbConnection, filePath: string): void {
+    prepareOrCache(conn, 'DELETE FROM import_bindings WHERE file_path = ?').run(filePath);
+}
+
+/**
+ * SQL: DELETE FROM injections WHERE file_path = ?
+ * See {@link deleteImportsByFile} — same replacement-clear contract.
+ */
+export function deleteInjectionsByFile(conn: DbConnection, filePath: string): void {
+    prepareOrCache(conn, 'DELETE FROM injections WHERE file_path = ?').run(filePath);
 }
 
 /**
@@ -1106,6 +1186,72 @@ export function listProjectObservations(conn: DbConnection): {
 }
 
 // ---------------------------------------------------------------------------
+// Global legacy-row handling (POLARIS Task 1.4, Decision 21)
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL: SELECT path FROM files WHERE path NOT LIKE 'g/%'
+ *
+ * Legacy (unprefixed) rows in the GLOBAL store: rows written before global
+ * symbol addressing existed. They take one of three explicit paths — none,
+ * provable transactional rewrite, or preserved-but-quarantined — decided by
+ * ProjectContext; this is the detection read.
+ */
+export function getLegacyGlobalFilePaths(conn: DbConnection): string[] {
+    return (prepareOrCache(conn, "SELECT path FROM files WHERE path NOT LIKE 'g/%'")
+        .all() as { path: string }[]).map((r) => r.path);
+}
+
+/**
+ * Transactionally rewrite legacy global rows onto their proven `g/<hash>/`
+ * keys (POLARIS Task 1.4, Decision 21 step 4). One outer transaction:
+ * insert the new files parents, re-point every v4 path-bearing child table
+ * (symbols, imports, import_bindings, injections) plus versions, delete the
+ * old files rows, then run a foreign-key check — any inconsistency throws
+ * and rolls the whole rewrite back. Aborts (without writing) if any target
+ * key already exists.
+ *
+ * Tables added in v5/v6 participate once they exist — this function is the
+ * single place that list lives.
+ */
+export function rewriteLegacyGlobalRows(
+    conn: DbConnection,
+    mapping: ReadonlyArray<{ oldKey: string; newKey: string }>
+): void {
+    if (mapping.length === 0) return;
+    runTransaction(conn, () => {
+        // Abort on any duplicate target BEFORE writing anything.
+        for (const { newKey } of mapping) {
+            const existing = prepareOrCache(conn, 'SELECT path FROM files WHERE path = ?').get(newKey);
+            if (existing) {
+                throw new Error(`LEGACY_GLOBAL_COLLISION: target key already exists: ${newKey}`);
+            }
+        }
+        for (const { oldKey, newKey } of mapping) {
+            const parent = prepareOrCache(conn, 'SELECT hash, last_indexed FROM files WHERE path = ?')
+                .get(oldKey) as { hash: string | null; last_indexed: number | null } | undefined;
+            if (!parent) {
+                throw new Error(`LEGACY_GLOBAL_MISSING: legacy files row disappeared mid-rewrite: ${oldKey}`);
+            }
+            prepareOrCache(conn, 'INSERT INTO files (path, hash, last_indexed) VALUES (?, ?, ?)')
+                .run(newKey, parent.hash, parent.last_indexed);
+            prepareOrCache(conn, 'UPDATE symbols SET file_path = ? WHERE file_path = ?').run(newKey, oldKey);
+            prepareOrCache(conn, 'UPDATE imports SET file_path = ? WHERE file_path = ?').run(newKey, oldKey);
+            prepareOrCache(conn, 'UPDATE import_bindings SET file_path = ? WHERE file_path = ?').run(newKey, oldKey);
+            prepareOrCache(conn, 'UPDATE injections SET file_path = ? WHERE file_path = ?').run(newKey, oldKey);
+            prepareOrCache(conn, 'UPDATE versions SET file_path = ? WHERE file_path = ?').run(newKey, oldKey);
+            prepareOrCache(conn, 'DELETE FROM files WHERE path = ?').run(oldKey);
+        }
+        // FK/integrity verification before commit (Decision 21): a violation
+        // throws, runTransaction rolls the whole rewrite back.
+        const violations = handle(conn).prepare('PRAGMA foreign_key_check').all();
+        if (violations.length > 0) {
+            throw new Error(`LEGACY_GLOBAL_FK_VIOLATION: ${JSON.stringify(violations.slice(0, 3))}`);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Transaction Support
 // ---------------------------------------------------------------------------
 
@@ -1120,7 +1266,9 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
     let started = false;
     conn._txDepth = depth + 1;
     try {
+        let changesBefore = 0;
         if (depth === 0) {
+            changesBefore = totalChanges(conn);
             db.exec('BEGIN');
         } else {
             db.exec(`SAVEPOINT sp_${depth}`);
@@ -1129,6 +1277,16 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
         fn();
         if (depth === 0) {
             db.exec('COMMIT');
+            // POLARIS Decision 16: the connection-local outer-commit
+            // generation increments only here — after a real outer COMMIT
+            // that actually wrote rows (total_changes moved). Read-only
+            // transactions, savepoint releases, and rollbacks (both catch
+            // arms below) never increment it. Together with PRAGMA
+            // data_version (blind to same-connection commits), this pair
+            // forms the session fact epoch read by getFactEpoch.
+            if (totalChanges(conn) !== changesBefore) {
+                _commitGenerations.set(conn, (_commitGenerations.get(conn) ?? 0) + 1);
+            }
         } else {
             db.exec(`RELEASE sp_${depth}`);
         }
@@ -1143,6 +1301,70 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
     } finally {
         conn._txDepth = depth;
     }
+}
+
+// ---------------------------------------------------------------------------
+// POLARIS session fact epoch (Task 2.1, Decision 16)
+// ---------------------------------------------------------------------------
+
+const _commitGenerations = new WeakMap<DbConnection, number>();
+
+/** Cumulative rows written by this connection (SQLite total_changes()). */
+function totalChanges(conn: DbConnection): number {
+    const row = handle(conn).prepare('SELECT total_changes() AS tc').get() as { tc?: number } | undefined;
+    return typeof row?.tc === 'number' ? row.tc : 0;
+}
+
+export interface FactEpoch {
+    /** PRAGMA data_version — moves when ANOTHER connection commits. */
+    dataVersion: number;
+    /** Row-writing outer commits on THIS connection via runTransaction. */
+    commitGeneration: number;
+}
+
+/**
+ * Read the two-part fact epoch for a connection. Neither half alone is
+ * sufficient: data_version never moves for the connection's own commits, and
+ * the commit generation never moves for another connection's. Sessions pin
+ * the pair at open and revalidate it at every query/page entry.
+ *
+ * Blind spot (deliberate, documented): a single-statement autocommit write on
+ * this connection that bypasses runTransaction moves neither half. Production
+ * fact mutations all flow through runTransaction; sessions additionally
+ * revalidate their pinned scope hash view (getScopeFileHashView), which
+ * catches any such write to the files table.
+ */
+export function getFactEpoch(conn: DbConnection): FactEpoch {
+    const row = handle(conn).prepare('PRAGMA data_version').get() as { data_version?: number } | undefined;
+    const dataVersion = typeof row?.data_version === 'number' ? row.data_version : 0;
+    return { dataVersion, commitGeneration: _commitGenerations.get(conn) ?? 0 };
+}
+
+/**
+ * Canonical (path, hash) view of every files row whose store key starts with
+ * scopePrefix, in raw binary path order. scopePrefix must be '' (everything —
+ * project-mode whole store) or end with '/'. The upper bound replaces the
+ * final '/' (0x2F) with '0' (0x30), which is binary-correct for UTF-8 keys.
+ * Sessions use this for the pinned source-domain digest and its per-call
+ * revalidation; composers never receive it.
+ */
+export function getScopeFileHashView(
+    conn: DbConnection,
+    scopePrefix: string,
+): { path: string; hash: string }[] {
+    if (scopePrefix === '') {
+        return queryRaw(conn, 'SELECT path, hash FROM files ORDER BY path') as { path: string; hash: string }[];
+    }
+    if (!scopePrefix.endsWith('/')) {
+        throw new Error(`getScopeFileHashView: scopePrefix must be '' or end with '/', got ${JSON.stringify(scopePrefix)}`);
+    }
+    const upper = scopePrefix.slice(0, -1) + '0';
+    return queryRaw(
+        conn,
+        'SELECT path, hash FROM files WHERE path >= ? AND path < ? ORDER BY path',
+        scopePrefix,
+        upper,
+    ) as { path: string; hash: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,68 +1433,155 @@ export interface SymbolStructureRow {
 }
 
 /**
- * SQL: SELECT * FROM symbol_structures WHERE symbol_id = ?
+ * A structure row whose persisted JSON is unreadable. Typed so consumers can
+ * fail loudly and trigger exactly one reindex correction — corruption must
+ * never be observable as an empty shape (POLARIS Task 1.1).
  */
-export function getSymbolStructure(conn: DbConnection, symbolId: number): SymbolStructureRow | null {
-    const row = prepareOrCache(conn, 'SELECT * FROM symbol_structures WHERE symbol_id = ?').get(symbolId) as {
-        symbol_id: number;
-        params_json: string;
-        return_text: string | null;
-        decorators_json: string;
-        modifiers_json: string;
-        generics_text: string | null;
-        parent_kind: string | null;
-        parent_name: string | null;
-    } | undefined;
-    if (!row) return null;
+export interface SymbolStructureCorruption {
+    rowId: number;           // symbol_structures.symbol_id of the corrupt row
+    filePath: string | null; // owning symbol's file, when the join resolves
+    line: number | null;     // owning symbol's line, when the join resolves
+    detail: string;          // which column failed and why
+}
+
+export type StructureReadResult =
+    | { status: 'ok'; structure: SymbolStructureRow }
+    | { status: 'missing' }
+    | { status: 'corrupt'; corruption: SymbolStructureCorruption };
+
+/**
+ * Parse one persisted JSON list column. NULL/empty means "no entries" (the
+ * writer's legitimate absent value); anything else must parse to an array.
+ * Returns null exactly when the stored text is corrupt for this column.
+ */
+function parseStructureListColumn(raw: string | null): string[] | null {
+    if (raw === null || raw === '') return [];
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(parsed)) return null;
+    return parsed as string[];
+}
+
+interface RawStructureJoinRow {
+    symbol_id: number;
+    params_json: string | null;
+    return_text: string | null;
+    decorators_json: string | null;
+    modifiers_json: string | null;
+    generics_text: string | null;
+    parent_kind: string | null;
+    parent_name: string | null;
+    file_path: string | null;
+    line: number | null;
+}
+
+function decodeStructureRow(row: RawStructureJoinRow):
+    | { status: 'ok'; structure: SymbolStructureRow }
+    | { status: 'corrupt'; corruption: SymbolStructureCorruption } {
+    const columns: Array<['params_json' | 'decorators_json' | 'modifiers_json', string]> = [
+        ['params_json', 'params_json'],
+        ['decorators_json', 'decorators_json'],
+        ['modifiers_json', 'modifiers_json'],
+    ];
+    const decoded: Record<string, string[]> = {};
+    for (const [column] of columns) {
+        const parsed = parseStructureListColumn(row[column]);
+        if (parsed === null) {
+            return {
+                status: 'corrupt',
+                corruption: {
+                    rowId: row.symbol_id,
+                    filePath: row.file_path,
+                    line: row.line,
+                    detail: `${column} is not a JSON array: ${String(row[column]).slice(0, 120)}`,
+                },
+            };
+        }
+        decoded[column] = parsed;
+    }
     return {
-        symbol_id: row.symbol_id,
-        params: JSON.parse(row.params_json || '[]'),
-        returnText: row.return_text,
-        decorators: JSON.parse(row.decorators_json || '[]'),
-        modifiers: JSON.parse(row.modifiers_json || '[]'),
-        genericsText: row.generics_text,
-        parentKind: row.parent_kind,
-        parentName: row.parent_name,
+        status: 'ok',
+        structure: {
+            symbol_id: row.symbol_id,
+            params: decoded['params_json'] ?? [],
+            returnText: row.return_text,
+            decorators: decoded['decorators_json'] ?? [],
+            modifiers: decoded['modifiers_json'] ?? [],
+            genericsText: row.generics_text,
+            parentKind: row.parent_kind,
+            parentName: row.parent_name,
+        },
     };
 }
 
 /**
- * SQL: SELECT ss.*, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def' [AND s.type = ?]
+ * SQL: SELECT ss.*, s.file_path, s.line FROM symbol_structures ss
+ *      LEFT JOIN symbols s ON s.id = ss.symbol_id WHERE ss.symbol_id = ?
+ *
+ * Typed read (POLARIS Task 1.1): `ok | missing | corrupt`. Corrupt JSON is
+ * reported with row/file/line/detail — never silently coerced to an empty
+ * shape.
  */
-export function findSymbolStructuresByName(conn: DbConnection, name: string, kind?: string): Array<SymbolStructureRow & { file_path: string; line: number; end_line: number }> {
-    let sql = `SELECT ss.*, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def'`;
+export function readSymbolStructure(conn: DbConnection, symbolId: number): StructureReadResult {
+    const row = prepareOrCache(conn,
+        'SELECT ss.symbol_id, ss.params_json, ss.return_text, ss.decorators_json, ss.modifiers_json, ss.generics_text, ss.parent_kind, ss.parent_name, s.file_path, s.line FROM symbol_structures ss LEFT JOIN symbols s ON s.id = ss.symbol_id WHERE ss.symbol_id = ?'
+    ).get(symbolId) as RawStructureJoinRow | undefined;
+    if (!row) return { status: 'missing' };
+    return decodeStructureRow(row);
+}
+
+/**
+ * Compatibility surface over {@link readSymbolStructure}: missing -> null.
+ * Corrupt rows THROW with full row context — the pre-Task-1.1 behavior was a
+ * raw SyntaxError from JSON.parse with no row identity; the defect class
+ * ("observed as [] / null") is impossible through either function.
+ */
+export function getSymbolStructure(conn: DbConnection, symbolId: number): SymbolStructureRow | null {
+    const result = readSymbolStructure(conn, symbolId);
+    if (result.status === 'missing') return null;
+    if (result.status === 'corrupt') {
+        const c = result.corruption;
+        throw new Error(`STRUCTURE_CORRUPT: symbol_structures row ${c.rowId} (${c.filePath ?? 'unknown file'}:${c.line ?? '?'}): ${c.detail}`);
+    }
+    return result.structure;
+}
+
+/**
+ * SQL: SELECT ss.*, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def' [AND s.type = ?]
+ *
+ * Typed read (POLARIS Task 1.1): readable rows land in `rows`; unreadable
+ * rows land in `corrupt` with row/file/line/detail. Callers on refactor
+ * paths must treat a non-empty `corrupt` list as a loud condition: reindex
+ * the named files once, re-read, and fail if corruption persists — never
+ * proceed as if the facts were absent.
+ */
+export function findSymbolStructuresByName(conn: DbConnection, name: string, kind?: string): {
+    rows: Array<SymbolStructureRow & { file_path: string; line: number; end_line: number }>;
+    corrupt: SymbolStructureCorruption[];
+} {
+    let sql = `SELECT ss.symbol_id, ss.params_json, ss.return_text, ss.decorators_json, ss.modifiers_json, ss.generics_text, ss.parent_kind, ss.parent_name, s.file_path, s.line, s.end_line FROM symbol_structures ss JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = ? AND s.kind = 'def'`;
     const params: string[] = [name];
     if (kind) { sql += ' AND s.type = ?'; params.push(kind); }
     // NOTE (v3 remediation): use prepareOrCache for uniformity with every other
     // adapter function in this file. Dynamic SQL is still cached — the cache key is
     // the final SQL string, so the 1-param and 2-param shapes get distinct slots.
-    const rows = prepareOrCache(conn, sql).all(...params) as Array<{
-        symbol_id: number;
-        params_json: string;
-        return_text: string | null;
-        decorators_json: string;
-        modifiers_json: string;
-        generics_text: string | null;
-        parent_kind: string | null;
-        parent_name: string | null;
-        file_path: string;
-        line: number;
-        end_line: number;
-    }>;
-    return rows.map(row => ({
-        symbol_id: row.symbol_id,
-        params: JSON.parse(row.params_json || '[]'),
-        returnText: row.return_text,
-        decorators: JSON.parse(row.decorators_json || '[]'),
-        modifiers: JSON.parse(row.modifiers_json || '[]'),
-        genericsText: row.generics_text,
-        parentKind: row.parent_kind,
-        parentName: row.parent_name,
-        file_path: row.file_path,
-        line: row.line,
-        end_line: row.end_line,
-    }));
+    // The INNER JOIN guarantees file_path/line/end_line are present on every row.
+    const raw = prepareOrCache(conn, sql).all(...params) as unknown as Array<RawStructureJoinRow & { file_path: string; line: number; end_line: number }>;
+    const rows: Array<SymbolStructureRow & { file_path: string; line: number; end_line: number }> = [];
+    const corrupt: SymbolStructureCorruption[] = [];
+    for (const row of raw) {
+        const decoded = decodeStructureRow(row);
+        if (decoded.status === 'corrupt') {
+            corrupt.push(decoded.corruption);
+            continue;
+        }
+        rows.push({ ...decoded.structure, file_path: row.file_path, line: row.line, end_line: row.end_line });
+    }
+    return { rows, corrupt };
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,6 +1706,88 @@ export function getLocalScopesForSymbol(conn: DbConnection, symbolId: number): A
 // ---------------------------------------------------------------------------
 // Edge Resolution (callee_symbol_id)
 // ---------------------------------------------------------------------------
+
+/** Chunk size for name-list SQL (POLARIS Decision 22: SQL ID chunks 100). */
+const NAME_CHUNK_SIZE = 100;
+
+function* chunks<T>(items: readonly T[], size: number): Generator<T[]> {
+    for (let i = 0; i < items.length; i += size) yield items.slice(i, i + size) as T[];
+}
+
+/**
+ * SQL: SELECT DISTINCT name FROM symbols WHERE file_path = ? AND kind = 'def'
+ *
+ * The "old definition names" read of the affected-name resolution protocol
+ * (POLARIS Task 1.3): captured BEFORE a file's facts are replaced so the
+ * union of old and new definition names can drive the stale-target clear.
+ */
+export function getDefinitionNamesByFile(conn: DbConnection, filePath: string): string[] {
+    return (prepareOrCache(conn, "SELECT DISTINCT name FROM symbols WHERE file_path = ? AND kind = 'def'")
+        .all(filePath) as { name: string }[]).map((r) => r.name);
+}
+
+/**
+ * SQL (per 100-name chunk):
+ *   UPDATE edges SET callee_symbol_id = NULL
+ *   WHERE (referenced_name IN (…)
+ *          OR callee_symbol_id IN (SELECT id FROM symbols WHERE kind = 'def' AND name IN (…)))
+ *     AND (referenced_name IN (…) OR callee_symbol_id IS NOT NULL)
+ *   RETURNING referenced_name
+ *
+ * The affected-name CLEAR (POLARIS Task 1.3). Two match arms on purpose:
+ *   (a) edges that REFERENCE a changed name directly — their resolution (or
+ *       lack of one) must be recomputed against the new definition set;
+ *   (b) edges currently RESOLVED TO a definition bearing a changed name —
+ *       this catches dot-qualified references (`Outer.method`) whose
+ *       referenced_name would never equal the bare changed name but whose
+ *       target just gained or lost a competitor.
+ * Returns the DISTINCT referenced names of every edge it touched so the
+ * caller can re-resolve exactly the affected groups — a cleared edge must
+ * never be left owed inside the same transaction.
+ */
+export function clearEdgeTargetsByNames(conn: DbConnection, names: readonly string[]): string[] {
+    const touched = new Set<string>();
+    for (const chunk of chunks(names, NAME_CHUNK_SIZE)) {
+        const placeholders = chunk.map(() => '?').join(', ');
+        const rows = prepareOrCache(
+            conn,
+            `UPDATE edges SET callee_symbol_id = NULL
+             WHERE referenced_name IN (${placeholders})
+                OR callee_symbol_id IN (SELECT id FROM symbols WHERE kind = 'def' AND name IN (${placeholders}))
+             RETURNING referenced_name`
+        ).all(...chunk, ...chunk) as { referenced_name: string }[];
+        for (const row of rows) touched.add(row.referenced_name);
+    }
+    return [...touched];
+}
+
+/**
+ * SQL (per 100-name chunk):
+ *   SELECT e.id, e.referenced_name, s.file_path AS caller_file_path
+ *   FROM edges e JOIN symbols s ON s.id = e.container_def_id
+ *   WHERE e.callee_symbol_id IS NULL AND e.referenced_name IN (…)
+ *
+ * Unresolved edges restricted to an affected-name set (POLARIS Task 1.3) —
+ * the read behind the affected-name resolver entry, so re-resolution work
+ * scales with the edit's blast radius instead of the whole database.
+ */
+export function getUnresolvedEdgesByNames(
+    conn: DbConnection,
+    names: readonly string[]
+): Array<{ id: number; referenced_name: string; caller_file_path: string }> {
+    const out: Array<{ id: number; referenced_name: string; caller_file_path: string }> = [];
+    for (const chunk of chunks(names, NAME_CHUNK_SIZE)) {
+        const placeholders = chunk.map(() => '?').join(', ');
+        const rows = prepareOrCache(
+            conn,
+            `SELECT e.id, e.referenced_name, s.file_path AS caller_file_path
+             FROM edges e JOIN symbols s ON s.id = e.container_def_id
+             WHERE e.callee_symbol_id IS NULL AND e.referenced_name IN (${placeholders})`
+        ).all(...chunk) as Array<{ id: number; referenced_name: string; caller_file_path: string }>;
+        out.push(...rows);
+    }
+    return out;
+}
 
 /**
  * SQL: SELECT e.id, e.referenced_name FROM edges e JOIN symbols s ON s.id = e.container_def_id WHERE s.file_path = ? AND e.callee_symbol_id IS NULL
@@ -1567,4 +1958,1331 @@ export function getSchemaVersion(conn: DbConnection): number {
         if (msg.includes('no such table')) return 0;
         throw e;
     }
+}
+
+// ---------------------------------------------------------------------------
+// POLARIS v4 intelligence read set (Task 2.2)
+// ---------------------------------------------------------------------------
+
+// These imports intentionally live with the append-only Task 2.2 slice. The
+// shared-file protocol forbids moving or modifying the owner's existing code.
+import { LOCKED_BOUNDS } from './intelligence/limits.js';
+import { getLangForFile } from './tree-sitter/languages.js';
+
+export interface V4FileCoverageRow {
+    filePath: string;
+    present: boolean;
+    hash: string | null;
+    lastIndexed: number | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4SymbolFactRow {
+    internalId: number;
+    name: string | null;
+    role: 'declaration' | 'reference' | null;
+    kind: string | null;
+    filePath: string;
+    line: number | null;
+    endLine: number | null;
+    column: number | null;
+    captureTag: string | null;
+    bodyHash: string | null;
+    parentInternalId: number | null;
+    visibility: string | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4EdgeFactRow {
+    internalId: number;
+    containerInternalId: number;
+    referencedName: string | null;
+    referenceKind: string;
+    legacyHeuristicTargetInternalId: number | null;
+    sourceFilePath: string;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4StructureFactRow {
+    symbolInternalId: number;
+    filePath: string | null;
+    name: string | null;
+    line: number | null;
+    column: number | null;
+    paramsJson: string | null;
+    returnText: string | null;
+    decoratorsJson: string | null;
+    modifiersJson: string | null;
+    genericsText: string | null;
+    parentKind: string | null;
+    parentName: string | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4AnchorFactRow {
+    internalId: number;
+    symbolInternalId: number;
+    filePath: string;
+    symbolName: string | null;
+    kind: string | null;
+    line: number | null;
+    endLine: number | null;
+    text: string | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4ImportFactRow {
+    internalId: number;
+    filePath: string;
+    module: string | null;
+    importedNamesJson: string | null;
+    line: number | null;
+    startLine: number | null;
+    endLine: number | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4ImportBindingFactRow {
+    internalId: number;
+    filePath: string;
+    source: string;
+    localName: string;
+    importedName: string | null;
+    importKind: string;
+    isTypeOnly: boolean;
+    line: number;
+    column: number;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4InjectionFactRow {
+    internalId: number;
+    filePath: string;
+    hostLanguage: string | null;
+    injectedLanguage: string | null;
+    startLine: number | null;
+    endLine: number | null;
+    startByte: number | null;
+    endByte: number | null;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4ScopeFactRow {
+    internalId: number;
+    symbolInternalId: number;
+    filePath: string;
+    symbolName: string | null;
+    scopeKind: string | null;
+    startLine: number | null;
+    endLine: number | null;
+    parametersJson: string | null;
+    localsJson: string | null;
+}
+
+export interface V4CompleteFileFactBundle {
+    files: V4FileCoverageRow[];
+    symbols: V4SymbolFactRow[];
+    edges: V4EdgeFactRow[];
+    structures: V4StructureFactRow[];
+    anchors: V4AnchorFactRow[];
+    imports: V4ImportFactRow[];
+    importBindings: V4ImportBindingFactRow[];
+    injections: V4InjectionFactRow[];
+    scopes: V4ScopeFactRow[];
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4ParentAncestryRow {
+    seedInternalId: number;
+    internalId: number;
+    parentInternalId: number | null;
+    name: string | null;
+    kind: string | null;
+    filePath: string | null;
+    line: number | null;
+    endLine: number | null;
+    column: number | null;
+    depth: number;
+}
+
+export type V4IntersectingFactRow =
+    | { factFamily: 'symbol'; fact: V4SymbolFactRow }
+    | { factFamily: 'anchor'; fact: V4AnchorFactRow }
+    | { factFamily: 'scope'; fact: V4ScopeFactRow }
+    | { factFamily: 'import'; fact: V4ImportFactRow }
+    | { factFamily: 'injection'; fact: V4InjectionFactRow };
+
+export interface V4OccurrenceFilter {
+    scopePrefix: string;
+    role: 'declaration' | 'reference';
+    name?: { mode: 'exact' | 'prefix'; value: string };
+    kinds?: readonly string[];
+}
+
+export interface V4OccurrenceKey {
+    path: string;
+    line: number;
+    column: number;
+    name: string;
+}
+
+export interface V4OccurrencePageRequest {
+    afterKey?: V4OccurrenceKey;
+    limit: number;
+}
+
+/** Adapter-only SQLite identities in this row never cross the facade. */
+export interface V4OccurrenceRow {
+    internalId: number;
+    path: string;
+    line: number;
+    endLine: number;
+    column: number;
+    name: string;
+    role: 'declaration' | 'reference';
+    kind: string;
+    captureTag: string | null;
+    parentInternalId: number | null;
+    visibility: string | null;
+}
+
+export interface V4OccurrencePage {
+    rows: V4OccurrenceRow[];
+    total: number;
+}
+
+export interface V4EdgeResolutionStatRow {
+    /** Storage state only; `resolved` here is never semantic proof. */
+    legacyStorageState: 'resolved' | 'unresolved';
+    referenceKind: string;
+    count: number;
+}
+
+/** Adapter-only SQLite identity in this row never crosses the facade. */
+export interface V4LegacyHeuristicTargetRow {
+    internalId: number;
+    filePath: string | null;
+    name: string | null;
+    kind: string | null;
+    type: string | null;
+    line: number | null;
+    endLine: number | null;
+    column: number | null;
+}
+
+/** Adapter-only SQLite source identity in this row never crosses the facade. */
+export interface V4EdgeFrontierRow {
+    sourceInternalId: number;
+    sourceFilePath: string | null;
+    sourceName: string | null;
+    sourceKind: string | null;
+    sourceLine: number | null;
+    sourceEndLine: number | null;
+    sourceColumn: number | null;
+    referencedName: string | null;
+    referenceKind: string;
+    count: number;
+    reason: 'name_only' | 'legacy_heuristic';
+    legacyHeuristicTarget: V4LegacyHeuristicTargetRow | null;
+}
+
+export interface V4LanguageAggregateRow {
+    language: string;
+    fileCount: number;
+}
+
+export interface V4ScopeAggregateRow {
+    key: string;
+    fileCount: number;
+    declarationCount: number;
+    referenceCount: number;
+    languages: V4LanguageAggregateRow[];
+}
+
+export interface V4DirectoryProjectAggregates {
+    scope: V4ScopeAggregateRow;
+    directories: V4ScopeAggregateRow[];
+}
+
+/**
+ * Read every v4 fact family for a set of store keys in one set-oriented SQL
+ * statement. Missing requested keys remain visible as `present:false` file
+ * rows. Statement count: 0 for an empty set, otherwise exactly 1.
+ *
+ * SQL: one requested-key CTE joined to files, symbols, edges,
+ * symbol_structures, anchors, imports, import_bindings, injections, and
+ * local_scopes, combined with UNION ALL in canonical file/family/position
+ * order.
+ */
+export function readV4CompleteFileFactBundle(
+    conn: DbConnection,
+    storeKeys: readonly string[],
+): V4CompleteFileFactBundle {
+    const keys = [...new Set(storeKeys)];
+    const bundle: V4CompleteFileFactBundle = {
+        files: [],
+        symbols: [],
+        edges: [],
+        structures: [],
+        anchors: [],
+        imports: [],
+        importBindings: [],
+        injections: [],
+        scopes: [],
+    };
+    if (keys.length === 0) return bundle;
+
+    const values = keys.map(() => '(?)').join(', ');
+    const sql = `
+        WITH requested(file_path) AS (VALUES ${values}),
+        facts(
+            file_path, family_order, sort_line, sort_column,
+            sort_start_byte, sort_end_byte, sort_end_line, sort_kind, sort_name,
+            fact_family, payload_json
+        ) AS (
+            SELECT r.file_path, 0, 0, 0, -1, -1, 0, '', r.file_path, 'file',
+                   json_object(
+                       'filePath', r.file_path,
+                       'present', CASE WHEN f.path IS NULL THEN 0 ELSE 1 END,
+                       'hash', f.hash,
+                       'lastIndexed', f.last_indexed
+                   )
+            FROM requested r
+            LEFT JOIN files f ON f.path = r.file_path
+
+            UNION ALL
+            SELECT s.file_path, 1, s.line, s.column, -1, -1, s.end_line, s.type, s.name, 'symbol',
+                   json_object(
+                       'internalId', s.id,
+                       'name', s.name,
+                       'role', CASE
+                           WHEN s.kind = 'def' THEN 'declaration'
+                           WHEN s.kind = 'ref' THEN 'reference'
+                           ELSE NULL
+                       END,
+                       'kind', s.type,
+                       'filePath', s.file_path,
+                       'line', s.line,
+                       'endLine', s.end_line,
+                       'column', s.column,
+                       'captureTag', s.capture_tag,
+                       'bodyHash', s.body_hash,
+                       'parentInternalId', s.parent_symbol_id,
+                       'visibility', s.visibility
+                   )
+            FROM symbols s
+            JOIN requested r ON r.file_path = s.file_path
+
+            UNION ALL
+            SELECT caller.file_path, 2, caller.line, caller.column, -1, -1,
+                   caller.end_line, e.reference_kind, e.referenced_name, 'edge',
+                   json_object(
+                       'internalId', e.id,
+                       'containerInternalId', e.container_def_id,
+                       'referencedName', e.referenced_name,
+                       'referenceKind', e.reference_kind,
+                       'legacyHeuristicTargetInternalId', e.callee_symbol_id,
+                       'sourceFilePath', caller.file_path
+                   )
+            FROM edges e
+            JOIN symbols caller ON caller.id = e.container_def_id
+            JOIN requested r ON r.file_path = caller.file_path
+
+            UNION ALL
+            SELECT s.file_path, 3, s.line, s.column, -1, -1, s.end_line, s.type, s.name, 'structure',
+                   json_object(
+                       'symbolInternalId', ss.symbol_id,
+                       'filePath', s.file_path,
+                       'name', s.name,
+                       'line', s.line,
+                       'column', s.column,
+                       'paramsJson', ss.params_json,
+                       'returnText', ss.return_text,
+                       'decoratorsJson', ss.decorators_json,
+                       'modifiersJson', ss.modifiers_json,
+                       'genericsText', ss.generics_text,
+                       'parentKind', ss.parent_kind,
+                       'parentName', ss.parent_name
+                   )
+            FROM symbol_structures ss
+            JOIN symbols s ON s.id = ss.symbol_id
+            JOIN requested r ON r.file_path = s.file_path
+
+            UNION ALL
+            SELECT s.file_path, 4, a.line, 0, -1, -1,
+                   COALESCE(a.end_line, a.line), a.kind, s.name, 'anchor',
+                   json_object(
+                       'internalId', a.id,
+                       'symbolInternalId', a.symbol_id,
+                       'filePath', s.file_path,
+                       'symbolName', s.name,
+                       'kind', a.kind,
+                       'line', a.line,
+                       'endLine', COALESCE(a.end_line, a.line),
+                       'text', a.text
+                   )
+            FROM anchors a
+            JOIN symbols s ON s.id = a.symbol_id
+            JOIN requested r ON r.file_path = s.file_path
+
+            UNION ALL
+            SELECT i.file_path, 5, COALESCE(i.start_line, i.line), 0, -1, -1,
+                   COALESCE(i.end_line, i.line), 'import', i.module, 'import',
+                   json_object(
+                       'internalId', i.id,
+                       'filePath', i.file_path,
+                       'module', i.module,
+                       'importedNamesJson', i.imported_names_json,
+                       'line', i.line,
+                       'startLine', COALESCE(i.start_line, i.line),
+                       'endLine', COALESCE(i.end_line, i.line)
+                   )
+            FROM imports i
+            JOIN requested r ON r.file_path = i.file_path
+
+            UNION ALL
+            SELECT ib.file_path, 6, ib.line, ib.column, -1, -1,
+                   ib.line, ib.import_kind, ib.local_name, 'import_binding',
+                   json_object(
+                       'internalId', ib.id,
+                       'filePath', ib.file_path,
+                       'source', ib.source,
+                       'localName', ib.local_name,
+                       'importedName', ib.imported_name,
+                       'importKind', ib.import_kind,
+                       'isTypeOnly', ib.is_type_only,
+                       'line', ib.line,
+                       'column', ib.column
+                   )
+            FROM import_bindings ib
+            JOIN requested r ON r.file_path = ib.file_path
+
+            UNION ALL
+            SELECT inj.file_path, 7, inj.start_line, 0, inj.start_byte, inj.end_byte,
+                   inj.end_line, inj.host_lang, inj.injected_lang, 'injection',
+                   json_object(
+                       'internalId', inj.id,
+                       'filePath', inj.file_path,
+                       'hostLanguage', inj.host_lang,
+                       'injectedLanguage', inj.injected_lang,
+                       'startLine', inj.start_line,
+                       'endLine', inj.end_line,
+                       'startByte', inj.start_byte,
+                       'endByte', inj.end_byte
+                   )
+            FROM injections inj
+            JOIN requested r ON r.file_path = inj.file_path
+
+            UNION ALL
+            SELECT s.file_path, 8, ls.start_line, 0, -1, -1,
+                   ls.end_line, ls.scope_kind, s.name, 'scope',
+                   json_object(
+                       'internalId', ls.id,
+                       'symbolInternalId', ls.symbol_id,
+                       'filePath', s.file_path,
+                       'symbolName', s.name,
+                       'scopeKind', ls.scope_kind,
+                       'startLine', ls.start_line,
+                       'endLine', ls.end_line,
+                       'parametersJson', ls.parameters_json,
+                       'localsJson', ls.locals_json
+                   )
+            FROM local_scopes ls
+            JOIN symbols s ON s.id = ls.symbol_id
+            JOIN requested r ON r.file_path = s.file_path
+        )
+        SELECT fact_family AS factFamily, payload_json AS payloadJson
+        FROM facts
+        ORDER BY file_path, family_order, sort_line, sort_column,
+                 sort_start_byte, sort_end_byte, sort_end_line, sort_kind, sort_name
+    `;
+    const rows = prepareOrCache(conn, sql).all(...keys) as Array<{
+        factFamily: 'file' | 'symbol' | 'edge' | 'structure' | 'anchor'
+            | 'import' | 'import_binding' | 'injection' | 'scope';
+        payloadJson: string;
+    }>;
+    for (const row of rows) {
+        switch (row.factFamily) {
+            case 'file': {
+                const value = JSON.parse(row.payloadJson) as Omit<V4FileCoverageRow, 'present'> & { present: number };
+                bundle.files.push({ ...value, present: value.present !== 0 });
+                break;
+            }
+            case 'symbol':
+                bundle.symbols.push(JSON.parse(row.payloadJson) as V4SymbolFactRow);
+                break;
+            case 'edge':
+                bundle.edges.push(JSON.parse(row.payloadJson) as V4EdgeFactRow);
+                break;
+            case 'structure':
+                bundle.structures.push(JSON.parse(row.payloadJson) as V4StructureFactRow);
+                break;
+            case 'anchor':
+                bundle.anchors.push(JSON.parse(row.payloadJson) as V4AnchorFactRow);
+                break;
+            case 'import':
+                bundle.imports.push(JSON.parse(row.payloadJson) as V4ImportFactRow);
+                break;
+            case 'import_binding': {
+                const value = JSON.parse(row.payloadJson) as Omit<V4ImportBindingFactRow, 'isTypeOnly'> & { isTypeOnly: number };
+                bundle.importBindings.push({ ...value, isTypeOnly: value.isTypeOnly !== 0 });
+                break;
+            }
+            case 'injection':
+                bundle.injections.push(JSON.parse(row.payloadJson) as V4InjectionFactRow);
+                break;
+            case 'scope':
+                bundle.scopes.push(JSON.parse(row.payloadJson) as V4ScopeFactRow);
+                break;
+        }
+    }
+    return bundle;
+}
+
+/**
+ * Batched seed-inclusive parent walk. The recursive arm uses the locked
+ * `depth < 64` guard, so a cyclic seed can produce depths 0 through 64 and
+ * always terminates. Statement count: 0 for no seeds, otherwise exactly 1.
+ *
+ * SQL: WITH RECURSIVE requested(seed_internal_id) AS (VALUES ...),
+ * ancestry AS (seed rows UNION ALL parent PK joins WHERE depth < ?).
+ */
+export function readV4ParentAncestry(
+    conn: DbConnection,
+    symbolInternalIds: readonly number[],
+): V4ParentAncestryRow[] {
+    const ids = [...new Set(symbolInternalIds)];
+    if (ids.length === 0) return [];
+    const values = ids.map(() => '(?)').join(', ');
+    const sql = `
+        WITH RECURSIVE requested(seed_internal_id) AS (VALUES ${values}),
+        ancestry(
+            seed_internal_id, internal_id, parent_internal_id, name, kind,
+            file_path, line, end_line, column, depth
+        ) AS (
+            SELECT r.seed_internal_id, s.id, s.parent_symbol_id, s.name, s.type,
+                   s.file_path, s.line, s.end_line, s.column, 0
+            FROM requested r
+            JOIN symbols s ON s.id = r.seed_internal_id
+            UNION ALL
+            SELECT a.seed_internal_id, p.id, p.parent_symbol_id, p.name, p.type,
+                   p.file_path, p.line, p.end_line, p.column, a.depth + 1
+            FROM ancestry a
+            JOIN symbols p ON p.id = a.parent_internal_id
+            WHERE a.depth < ?
+        )
+        SELECT seed_internal_id AS seedInternalId,
+               internal_id AS internalId,
+               parent_internal_id AS parentInternalId,
+               name,
+               kind,
+               file_path AS filePath,
+               line,
+               end_line AS endLine,
+               column,
+               depth
+        FROM ancestry
+        ORDER BY seed_internal_id, depth
+    `;
+    return prepareOrCache(conn, sql).all(
+        ...ids,
+        LOCKED_BOUNDS.ancestryDepth,
+    ) as unknown as V4ParentAncestryRow[];
+}
+
+/**
+ * Read all v4 symbols, anchors, scopes, imports, and injections whose inclusive
+ * line spans intersect one validated inclusive query range. Statement count:
+ * exactly 1.
+ *
+ * SQL: one bounds CTE plus five indexed file/range arms combined by UNION ALL.
+ */
+export function readV4FactsIntersectingRange(
+    conn: DbConnection,
+    fileKey: string,
+    startLine: number,
+    endLine: number,
+): V4IntersectingFactRow[] {
+    if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
+        throw new Error('readV4FactsIntersectingRange: expected an inclusive positive line range');
+    }
+    const sql = `
+        WITH bounds(file_path, start_line, end_line) AS (VALUES (?, ?, ?)),
+        facts(
+            file_path, sort_line, sort_end_line, sort_column,
+            sort_start_byte, sort_end_byte, family_order, sort_kind, sort_name,
+            fact_family, payload_json
+        ) AS (
+            SELECT s.file_path, s.line, s.end_line, s.column,
+                   -1, -1, 0, s.type, s.name, 'symbol',
+                   json_object(
+                       'internalId', s.id,
+                       'name', s.name,
+                       'role', CASE
+                           WHEN s.kind = 'def' THEN 'declaration'
+                           WHEN s.kind = 'ref' THEN 'reference'
+                           ELSE NULL
+                       END,
+                       'kind', s.type,
+                       'filePath', s.file_path,
+                       'line', s.line,
+                       'endLine', s.end_line,
+                       'column', s.column,
+                       'captureTag', s.capture_tag,
+                       'bodyHash', s.body_hash,
+                       'parentInternalId', s.parent_symbol_id,
+                       'visibility', s.visibility
+                   )
+            FROM symbols s
+            JOIN bounds b ON b.file_path = s.file_path
+            WHERE s.line <= b.end_line AND s.end_line >= b.start_line
+
+            UNION ALL
+            SELECT s.file_path, a.line, COALESCE(a.end_line, a.line), 0,
+                   -1, -1, 1, a.kind, s.name, 'anchor',
+                   json_object(
+                       'internalId', a.id,
+                       'symbolInternalId', a.symbol_id,
+                       'filePath', s.file_path,
+                       'symbolName', s.name,
+                       'kind', a.kind,
+                       'line', a.line,
+                       'endLine', COALESCE(a.end_line, a.line),
+                       'text', a.text
+                   )
+            FROM anchors a
+            JOIN symbols s ON s.id = a.symbol_id
+            JOIN bounds b ON b.file_path = s.file_path
+            WHERE a.line <= b.end_line AND COALESCE(a.end_line, a.line) >= b.start_line
+
+            UNION ALL
+            SELECT s.file_path, ls.start_line, ls.end_line, 0,
+                   -1, -1, 2, ls.scope_kind, s.name, 'scope',
+                   json_object(
+                       'internalId', ls.id,
+                       'symbolInternalId', ls.symbol_id,
+                       'filePath', s.file_path,
+                       'symbolName', s.name,
+                       'scopeKind', ls.scope_kind,
+                       'startLine', ls.start_line,
+                       'endLine', ls.end_line,
+                       'parametersJson', ls.parameters_json,
+                       'localsJson', ls.locals_json
+                   )
+            FROM local_scopes ls
+            JOIN symbols s ON s.id = ls.symbol_id
+            JOIN bounds b ON b.file_path = s.file_path
+            WHERE ls.start_line <= b.end_line AND ls.end_line >= b.start_line
+
+            UNION ALL
+            SELECT i.file_path, COALESCE(i.start_line, i.line), COALESCE(i.end_line, i.line),
+                   0, -1, -1, 3, i.module, i.module, 'import',
+                   json_object(
+                       'internalId', i.id,
+                       'filePath', i.file_path,
+                       'module', i.module,
+                       'importedNamesJson', i.imported_names_json,
+                       'line', i.line,
+                       'startLine', COALESCE(i.start_line, i.line),
+                       'endLine', COALESCE(i.end_line, i.line)
+                   )
+            FROM imports i
+            JOIN bounds b ON b.file_path = i.file_path
+            WHERE COALESCE(i.start_line, i.line) <= b.end_line
+              AND COALESCE(i.end_line, i.line) >= b.start_line
+
+            UNION ALL
+            SELECT inj.file_path, inj.start_line, inj.end_line, 0,
+                   inj.start_byte, inj.end_byte, 4, inj.host_lang, inj.injected_lang, 'injection',
+                   json_object(
+                       'internalId', inj.id,
+                       'filePath', inj.file_path,
+                       'hostLanguage', inj.host_lang,
+                       'injectedLanguage', inj.injected_lang,
+                       'startLine', inj.start_line,
+                       'endLine', inj.end_line,
+                       'startByte', inj.start_byte,
+                       'endByte', inj.end_byte
+                   )
+            FROM injections inj
+            JOIN bounds b ON b.file_path = inj.file_path
+            WHERE inj.start_line <= b.end_line AND inj.end_line >= b.start_line
+        )
+        SELECT fact_family AS factFamily, payload_json AS payloadJson
+        FROM facts
+        ORDER BY file_path, sort_line, sort_column, sort_start_byte,
+                 sort_end_byte, sort_end_line, family_order, sort_kind, sort_name
+    `;
+    const rows = prepareOrCache(conn, sql).all(fileKey, startLine, endLine) as Array<{
+        factFamily: 'symbol' | 'anchor' | 'scope' | 'import' | 'injection';
+        payloadJson: string;
+    }>;
+    return rows.map((row): V4IntersectingFactRow => {
+        switch (row.factFamily) {
+            case 'symbol': return { factFamily: 'symbol', fact: JSON.parse(row.payloadJson) as V4SymbolFactRow };
+            case 'anchor': return { factFamily: 'anchor', fact: JSON.parse(row.payloadJson) as V4AnchorFactRow };
+            case 'scope': return { factFamily: 'scope', fact: JSON.parse(row.payloadJson) as V4ScopeFactRow };
+            case 'import': return { factFamily: 'import', fact: JSON.parse(row.payloadJson) as V4ImportFactRow };
+            case 'injection': return { factFamily: 'injection', fact: JSON.parse(row.payloadJson) as V4InjectionFactRow };
+        }
+    });
+}
+
+/**
+ * Return the exclusive SQLite BINARY-collation bound for a non-empty prefix.
+ * UTF-8 preserves Unicode scalar-value order, so advancing the final scalar
+ * (with carry over U+10FFFF) produces the smallest finite prefix successor.
+ */
+export function namePrefixUpperBound(prefix: string): string | null {
+    if (prefix === '') {
+        throw new Error('namePrefixUpperBound: prefix must not be empty');
+    }
+
+    const codePoints = Array.from(prefix).map((character) => {
+        const codePoint = character.codePointAt(0);
+        if (codePoint === undefined) {
+            throw new Error('namePrefixUpperBound: invalid empty code point');
+        }
+        return codePoint;
+    });
+    while (codePoints.length > 0) {
+        const lastIndex = codePoints.length - 1;
+        const codePoint = codePoints[lastIndex];
+        if (codePoint === undefined) {
+            throw new Error('namePrefixUpperBound: invalid code-point state');
+        }
+        codePoints.length = lastIndex;
+        if (codePoint === 0x10FFFF) continue;
+
+        let successor = codePoint + 1;
+        if (successor >= 0xD800 && successor <= 0xDFFF) successor = 0xE000;
+        codePoints.push(successor);
+        return codePoints.map((value) => String.fromCodePoint(value)).join('');
+    }
+    return null;
+}
+
+/**
+ * Conjunctive declaration/reference discovery with one canonical keyset page
+ * and the exact pre-keyset total returned by the same SQL statement. The
+ * adapter deliberately has no regex-shaped input. Statement count: 0 for an
+ * empty kind set, otherwise exactly 1.
+ *
+ * SQL: filtered symbols materialized once; metadata counts the full filtered
+ * domain; page applies `(file_path,line,column,name) > (?,?,?,?)`, canonical
+ * ordering, and LIMIT.
+ */
+export function queryV4Occurrences(
+    conn: DbConnection,
+    filter: V4OccurrenceFilter,
+    page: V4OccurrencePageRequest,
+): V4OccurrencePage {
+    if (filter.scopePrefix !== '' && !filter.scopePrefix.endsWith('/')) {
+        throw new Error('queryV4Occurrences: scopePrefix must be empty or end with /');
+    }
+    if (!Number.isInteger(page.limit) || page.limit < 1) {
+        throw new Error('queryV4Occurrences: limit must be a positive integer');
+    }
+    if (filter.kinds?.length === 0) return { rows: [], total: 0 };
+
+    const where: string[] = ['s.kind = ?'];
+    const params: Array<string | number> = [filter.role === 'declaration' ? 'def' : 'ref'];
+    if (filter.scopePrefix !== '') {
+        where.push('s.file_path >= ? AND s.file_path < ?');
+        params.push(filter.scopePrefix, filter.scopePrefix.slice(0, -1) + '0');
+    }
+    if (filter.name?.mode === 'exact') {
+        where.push('s.name = ?');
+        params.push(filter.name.value);
+    } else if (filter.name?.mode === 'prefix' && filter.name.value !== '') {
+        // node:sqlite binds lone surrogates as U+FFFD. Derive the range from
+        // that same well-formed text so its bounds cannot exclude an exact hit.
+        const prefix = Buffer.from(filter.name.value, 'utf8').toString('utf8');
+        const upperBound = namePrefixUpperBound(prefix);
+        where.push('s.name >= ?');
+        params.push(prefix);
+        if (upperBound !== null) {
+            where.push('s.name < ?');
+            params.push(upperBound);
+        }
+        // substr is the exactness guarantee; the range only enables the
+        // (kind, name) index, so successor mistakes can at worst over-scan.
+        where.push('substr(s.name, 1, length(?)) = ?');
+        params.push(prefix, prefix);
+    }
+    if (filter.kinds && filter.kinds.length > 0) {
+        where.push(`s.type IN (${filter.kinds.map(() => '?').join(', ')})`);
+        params.push(...filter.kinds);
+    }
+
+    const afterSql = page.afterKey
+        ? 'WHERE (path, line, column, name) > (?, ?, ?, ?)'
+        : '';
+    if (page.afterKey) {
+        params.push(page.afterKey.path, page.afterKey.line, page.afterKey.column, page.afterKey.name);
+    }
+    params.push(page.limit);
+
+    const sql = `
+        WITH filtered AS MATERIALIZED (
+            SELECT s.id AS internalId,
+                   s.file_path AS path,
+                   s.line AS line,
+                   s.end_line AS endLine,
+                   s.column AS column,
+                   s.name AS name,
+                   CASE WHEN s.kind = 'def' THEN 'declaration' ELSE 'reference' END AS role,
+                   s.type AS kind,
+                   s.capture_tag AS captureTag,
+                   s.parent_symbol_id AS parentInternalId,
+                   s.visibility AS visibility
+            FROM symbols s
+            WHERE ${where.join(' AND ')}
+        ),
+        metadata AS (
+            SELECT COUNT(*) AS total FROM filtered
+        ),
+        page_rows AS (
+            SELECT *
+            FROM filtered
+            ${afterSql}
+            ORDER BY path, line, column, name
+            LIMIT ?
+        )
+        SELECT 0 AS metadataOnly,
+               p.internalId, p.path, p.line, p.endLine, p.column, p.name,
+               p.role, p.kind, p.captureTag, p.parentInternalId, p.visibility,
+               m.total
+        FROM page_rows p
+        CROSS JOIN metadata m
+        UNION ALL
+        SELECT 1 AS metadataOnly,
+               NULL, NULL, NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL, NULL, NULL,
+               m.total
+        FROM metadata m
+        WHERE NOT EXISTS (SELECT 1 FROM page_rows)
+        ORDER BY metadataOnly, path, line, column, name
+    `;
+    const raw = prepareOrCache(conn, sql).all(...params) as unknown as Array<{
+        metadataOnly: number;
+        internalId: number | null;
+        path: string | null;
+        line: number | null;
+        endLine: number | null;
+        column: number | null;
+        name: string | null;
+        role: 'declaration' | 'reference' | null;
+        kind: string | null;
+        captureTag: string | null;
+        parentInternalId: number | null;
+        visibility: string | null;
+        total: number;
+    }>;
+    const total = raw[0]?.total ?? 0;
+    const rows: V4OccurrenceRow[] = [];
+    for (const row of raw) {
+        if (row.metadataOnly !== 0) continue;
+        if (
+            row.internalId === null || row.path === null || row.line === null
+            || row.endLine === null || row.column === null || row.name === null
+            || row.role === null || row.kind === null
+        ) {
+            throw new Error('STORE_CORRUPT: queryV4Occurrences: malformed persisted symbol key');
+        }
+        rows.push({
+            internalId: row.internalId,
+            path: row.path,
+            line: row.line,
+            endLine: row.endLine,
+            column: row.column,
+            name: row.name,
+            role: row.role,
+            kind: row.kind,
+            captureTag: row.captureTag,
+            parentInternalId: row.parentInternalId,
+            visibility: row.visibility,
+        });
+    }
+    return { rows, total };
+}
+
+/**
+ * Read raw v4 structure rows for adapter-only symbol identities in locked
+ * 100-ID chunks. Statement count: ceil(distinct IDs / 100), or 0 when empty.
+ *
+ * SQL per chunk: symbol_structures joined to symbols by PK, restricted by a
+ * parameterized symbol_id IN set.
+ */
+export function readV4StructuresByInternalIds(
+    conn: DbConnection,
+    symbolInternalIds: readonly number[],
+): V4StructureFactRow[] {
+    const ids = [...new Set(symbolInternalIds)];
+    const rows: V4StructureFactRow[] = [];
+    for (const chunk of chunks(ids, LOCKED_BOUNDS.sqlIdNameChunkSize)) {
+        const placeholders = chunk.map(() => '?').join(', ');
+        const sql = `
+            SELECT ss.symbol_id AS symbolInternalId,
+                   s.file_path AS filePath,
+                   s.name AS name,
+                   s.line AS line,
+                   s.column AS column,
+                   ss.params_json AS paramsJson,
+                   ss.return_text AS returnText,
+                   ss.decorators_json AS decoratorsJson,
+                   ss.modifiers_json AS modifiersJson,
+                   ss.generics_text AS genericsText,
+                   ss.parent_kind AS parentKind,
+                   ss.parent_name AS parentName
+            FROM symbol_structures ss
+            JOIN symbols s ON s.id = ss.symbol_id
+            WHERE ss.symbol_id IN (${placeholders})
+            ORDER BY s.file_path, s.line, s.column, s.name
+        `;
+        rows.push(...prepareOrCache(conn, sql).all(...chunk) as unknown as V4StructureFactRow[]);
+    }
+    rows.sort((a, b) => {
+        const aFilePath = a.filePath ?? '';
+        const bFilePath = b.filePath ?? '';
+        if (aFilePath !== bFilePath) return aFilePath < bFilePath ? -1 : 1;
+        const aLine = a.line ?? -1;
+        const bLine = b.line ?? -1;
+        if (aLine !== bLine) return aLine - bLine;
+        const aColumn = a.column ?? -1;
+        const bColumn = b.column ?? -1;
+        if (aColumn !== bColumn) return aColumn - bColumn;
+        const aName = a.name ?? '';
+        const bName = b.name ?? '';
+        if (aName !== bName) return aName < bName ? -1 : 1;
+        const aFactKey = JSON.stringify([
+            a.paramsJson, a.returnText, a.decoratorsJson, a.modifiersJson,
+            a.genericsText, a.parentKind, a.parentName,
+        ]) ?? '';
+        const bFactKey = JSON.stringify([
+            b.paramsJson, b.returnText, b.decoratorsJson, b.modifiersJson,
+            b.genericsText, b.parentKind, b.parentName,
+        ]) ?? '';
+        return aFactKey < bFactKey ? -1 : aFactKey > bFactKey ? 1 : 0;
+    });
+    return rows;
+}
+
+/**
+ * Statement count: 0 for no keys, otherwise 1.
+ * SQL: SELECT imports WHERE file_path IN (...) in canonical position order.
+ */
+export function readV4ImportsByFileKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4ImportFactRow[] {
+    const keys = [...new Set(fileKeys)];
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const sql = `
+        SELECT id AS internalId,
+               file_path AS filePath,
+               module,
+               imported_names_json AS importedNamesJson,
+               line,
+               COALESCE(start_line, line) AS startLine,
+               COALESCE(end_line, line) AS endLine
+        FROM imports
+        WHERE file_path IN (${placeholders})
+        ORDER BY file_path, startLine, endLine, module
+    `;
+    return prepareOrCache(conn, sql).all(...keys) as unknown as V4ImportFactRow[];
+}
+
+/**
+ * Statement count: 0 for no keys, otherwise 1.
+ * SQL: SELECT import_bindings WHERE file_path IN (...) in canonical order.
+ */
+export function readV4ImportBindingsByFileKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4ImportBindingFactRow[] {
+    const keys = [...new Set(fileKeys)];
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const sql = `
+        SELECT id AS internalId,
+               file_path AS filePath,
+               source,
+               local_name AS localName,
+               imported_name AS importedName,
+               import_kind AS importKind,
+               is_type_only AS isTypeOnly,
+               line,
+               column
+        FROM import_bindings
+        WHERE file_path IN (${placeholders})
+        ORDER BY file_path, line, column, local_name
+    `;
+    const raw = prepareOrCache(conn, sql).all(...keys) as unknown as Array<
+        Omit<V4ImportBindingFactRow, 'isTypeOnly'> & { isTypeOnly: number }
+    >;
+    return raw.map((row) => ({ ...row, isTypeOnly: row.isTypeOnly !== 0 }));
+}
+
+/**
+ * Statement count: 0 for no keys, otherwise 1.
+ * SQL: anchors joined through symbols, filtered by symbol file_path IN (...).
+ */
+export function readV4AnchorsByFileKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4AnchorFactRow[] {
+    const keys = [...new Set(fileKeys)];
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const sql = `
+        SELECT a.id AS internalId,
+               a.symbol_id AS symbolInternalId,
+               s.file_path AS filePath,
+               s.name AS symbolName,
+               a.kind,
+               a.line,
+               COALESCE(a.end_line, a.line) AS endLine,
+               a.text
+        FROM anchors a
+        JOIN symbols s ON s.id = a.symbol_id
+        WHERE s.file_path IN (${placeholders})
+        ORDER BY s.file_path, a.line, endLine, a.kind, s.name
+    `;
+    return prepareOrCache(conn, sql).all(...keys) as unknown as V4AnchorFactRow[];
+}
+
+/**
+ * Statement count: 0 for no keys, otherwise 1.
+ * SQL: SELECT injections WHERE file_path IN (...) in canonical range order.
+ */
+export function readV4InjectionsByFileKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4InjectionFactRow[] {
+    const keys = [...new Set(fileKeys)];
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const sql = `
+        SELECT id AS internalId,
+               file_path AS filePath,
+               host_lang AS hostLanguage,
+               injected_lang AS injectedLanguage,
+               start_line AS startLine,
+               end_line AS endLine,
+               start_byte AS startByte,
+               end_byte AS endByte
+        FROM injections
+        WHERE file_path IN (${placeholders})
+        ORDER BY file_path, start_line, start_byte, end_byte, end_line, host_lang, injected_lang
+    `;
+    return prepareOrCache(conn, sql).all(...keys) as unknown as V4InjectionFactRow[];
+}
+
+/**
+ * Statement count: 0 for no keys, otherwise 1.
+ * SQL: local_scopes joined through symbols, filtered by file_path IN (...).
+ */
+export function readV4ScopesByFileKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4ScopeFactRow[] {
+    const keys = [...new Set(fileKeys)];
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const sql = `
+        SELECT ls.id AS internalId,
+               ls.symbol_id AS symbolInternalId,
+               s.file_path AS filePath,
+               s.name AS symbolName,
+               ls.scope_kind AS scopeKind,
+               ls.start_line AS startLine,
+               ls.end_line AS endLine,
+               ls.parameters_json AS parametersJson,
+               ls.locals_json AS localsJson
+        FROM local_scopes ls
+        JOIN symbols s ON s.id = ls.symbol_id
+        WHERE s.file_path IN (${placeholders})
+        ORDER BY s.file_path, ls.start_line, ls.end_line, ls.scope_kind, s.name
+    `;
+    return prepareOrCache(conn, sql).all(...keys) as unknown as V4ScopeFactRow[];
+}
+
+/**
+ * Count persisted edge target state by reference kind inside a scope prefix.
+ * The state is explicitly legacy storage metadata, never proof. Statement
+ * count: exactly 1.
+ *
+ * SQL: scoped caller symbols joined to edges and grouped by null/non-null
+ * callee_symbol_id plus reference_kind.
+ */
+export function readV4EdgeResolutionStats(
+    conn: DbConnection,
+    scopePrefix: string,
+): V4EdgeResolutionStatRow[] {
+    if (scopePrefix !== '' && !scopePrefix.endsWith('/')) {
+        throw new Error('readV4EdgeResolutionStats: scopePrefix must be empty or end with /');
+    }
+    const scopeSql = scopePrefix === ''
+        ? ''
+        : 'AND caller.file_path >= ? AND caller.file_path < ?';
+    const params = scopePrefix === ''
+        ? []
+        : [scopePrefix, scopePrefix.slice(0, -1) + '0'];
+    const sql = `
+        SELECT CASE WHEN e.callee_symbol_id IS NULL THEN 'unresolved' ELSE 'resolved' END
+                   AS legacyStorageState,
+               e.reference_kind AS referenceKind,
+               COUNT(*) AS count
+        FROM symbols caller
+        JOIN edges e ON e.container_def_id = caller.id
+        WHERE caller.kind = 'def'
+          ${scopeSql}
+        GROUP BY legacyStorageState, e.reference_kind
+        ORDER BY legacyStorageState, e.reference_kind
+    `;
+    return prepareOrCache(conn, sql).all(...params) as unknown as V4EdgeResolutionStatRow[];
+}
+
+/**
+ * Surface every v4 name edge as uncertainty. Null targets are `name_only`;
+ * non-null legacy IDs are `legacy_heuristic` and carry the target definition
+ * row only as a frontier candidate. Statement count: exactly 1.
+ *
+ * SQL: scoped source symbols joined to edges and LEFT JOINed to legacy target
+ * rows, grouped without promoting any target to a relation.
+ */
+export function readV4EdgeFrontier(
+    conn: DbConnection,
+    scopePrefix: string,
+): V4EdgeFrontierRow[] {
+    if (scopePrefix !== '' && !scopePrefix.endsWith('/')) {
+        throw new Error('readV4EdgeFrontier: scopePrefix must be empty or end with /');
+    }
+    const scopeSql = scopePrefix === ''
+        ? ''
+        : 'AND caller.file_path >= ? AND caller.file_path < ?';
+    const params = scopePrefix === ''
+        ? []
+        : [scopePrefix, scopePrefix.slice(0, -1) + '0'];
+    const sql = `
+        SELECT caller.id AS sourceInternalId,
+               caller.file_path AS sourceFilePath,
+               caller.name AS sourceName,
+               caller.type AS sourceKind,
+               caller.line AS sourceLine,
+               caller.end_line AS sourceEndLine,
+               caller.column AS sourceColumn,
+               e.referenced_name AS referencedName,
+               e.reference_kind AS referenceKind,
+               COUNT(*) AS count,
+               CASE WHEN e.callee_symbol_id IS NULL THEN 'name_only' ELSE 'legacy_heuristic' END AS reason,
+               target.id AS legacyHeuristicTargetInternalId,
+               target.file_path AS legacyHeuristicTargetFilePath,
+               target.name AS legacyHeuristicTargetName,
+               target.kind AS legacyHeuristicTargetKind,
+               target.type AS legacyHeuristicTargetType,
+               target.line AS legacyHeuristicTargetLine,
+               target.end_line AS legacyHeuristicTargetEndLine,
+               target.column AS legacyHeuristicTargetColumn
+        FROM symbols caller
+        JOIN edges e ON e.container_def_id = caller.id
+        LEFT JOIN symbols target ON target.id = e.callee_symbol_id
+        WHERE caller.kind = 'def'
+          ${scopeSql}
+        GROUP BY caller.id, e.referenced_name, e.reference_kind, e.callee_symbol_id
+        ORDER BY caller.file_path, caller.line, caller.column, caller.name,
+                 e.referenced_name, e.reference_kind,
+                 target.file_path, target.line, target.column, target.name
+    `;
+    const raw = prepareOrCache(conn, sql).all(...params) as unknown as Array<{
+        sourceInternalId: number;
+        sourceFilePath: string | null;
+        sourceName: string | null;
+        sourceKind: string | null;
+        sourceLine: number | null;
+        sourceEndLine: number | null;
+        sourceColumn: number | null;
+        referencedName: string | null;
+        referenceKind: string;
+        count: number;
+        reason: 'name_only' | 'legacy_heuristic';
+        legacyHeuristicTargetInternalId: number | null;
+        legacyHeuristicTargetFilePath: string | null;
+        legacyHeuristicTargetName: string | null;
+        legacyHeuristicTargetKind: string | null;
+        legacyHeuristicTargetType: string | null;
+        legacyHeuristicTargetLine: number | null;
+        legacyHeuristicTargetEndLine: number | null;
+        legacyHeuristicTargetColumn: number | null;
+    }>;
+    return raw.map((row): V4EdgeFrontierRow => {
+        const target = row.legacyHeuristicTargetInternalId === null
+            ? null
+            : {
+                internalId: row.legacyHeuristicTargetInternalId,
+                filePath: row.legacyHeuristicTargetFilePath,
+                name: row.legacyHeuristicTargetName,
+                kind: row.legacyHeuristicTargetKind,
+                type: row.legacyHeuristicTargetType,
+                line: row.legacyHeuristicTargetLine,
+                endLine: row.legacyHeuristicTargetEndLine,
+                column: row.legacyHeuristicTargetColumn,
+            };
+        return {
+            sourceInternalId: row.sourceInternalId,
+            sourceFilePath: row.sourceFilePath,
+            sourceName: row.sourceName,
+            sourceKind: row.sourceKind,
+            sourceLine: row.sourceLine,
+            sourceEndLine: row.sourceEndLine,
+            sourceColumn: row.sourceColumn,
+            referencedName: row.referencedName,
+            referenceKind: row.referenceKind,
+            count: row.count,
+            reason: row.reason,
+            legacyHeuristicTarget: target,
+        };
+    });
+}
+
+/**
+ * Produce directory and selected-scope/project aggregates from one SQL
+ * statement. Schema v4 has neither persisted language nor module identity:
+ * language is derived from each persisted path with the canonical detector,
+ * and no module selector or synthetic module group is exposed here.
+ * Statement count: exactly 1.
+ *
+ * SQL: files LEFT JOIN symbols, one row per file with declaration/reference
+ * counts; TypeScript folds directory groups and the language histogram.
+ */
+export function readV4DirectoryProjectAggregates(
+    conn: DbConnection,
+    scopePrefix: string,
+): V4DirectoryProjectAggregates {
+    if (scopePrefix !== '' && !scopePrefix.endsWith('/')) {
+        throw new Error('readV4DirectoryProjectAggregates: scopePrefix must be empty or end with /');
+    }
+    const scopeSql = scopePrefix === ''
+        ? ''
+        : 'WHERE f.path >= ? AND f.path < ?';
+    const params = scopePrefix === ''
+        ? []
+        : [scopePrefix, scopePrefix.slice(0, -1) + '0'];
+    const sql = `
+        SELECT f.path AS filePath,
+               SUM(CASE WHEN s.kind = 'def' THEN 1 ELSE 0 END) AS declarationCount,
+               SUM(CASE WHEN s.kind = 'ref' THEN 1 ELSE 0 END) AS referenceCount
+        FROM files f
+        LEFT JOIN symbols s ON s.file_path = f.path
+        ${scopeSql}
+        GROUP BY f.path
+        ORDER BY f.path
+    `;
+    const raw = prepareOrCache(conn, sql).all(...params) as unknown as Array<{
+        filePath: string | null;
+        declarationCount: number;
+        referenceCount: number;
+    }>;
+
+    interface AggregateAccumulator {
+        fileCount: number;
+        declarationCount: number;
+        referenceCount: number;
+        languages: Map<string, number>;
+    }
+    const scopeAccumulator: AggregateAccumulator = {
+        fileCount: 0,
+        declarationCount: 0,
+        referenceCount: 0,
+        languages: new Map(),
+    };
+    const directoryAccumulators = new Map<string, AggregateAccumulator>();
+    for (const row of raw) {
+        if (row.filePath === null) {
+            throw new Error('STORE_CORRUPT: readV4DirectoryProjectAggregates: null persisted file path');
+        }
+        const language = getLangForFile(row.filePath) ?? 'unknown';
+        scopeAccumulator.fileCount += 1;
+        scopeAccumulator.declarationCount += row.declarationCount;
+        scopeAccumulator.referenceCount += row.referenceCount;
+        scopeAccumulator.languages.set(language, (scopeAccumulator.languages.get(language) ?? 0) + 1);
+
+        const separator = row.filePath.lastIndexOf('/');
+        const directory = separator < 0 ? '' : row.filePath.slice(0, separator);
+        let accumulator = directoryAccumulators.get(directory);
+        if (!accumulator) {
+            accumulator = {
+                fileCount: 0,
+                declarationCount: 0,
+                referenceCount: 0,
+                languages: new Map(),
+            };
+            directoryAccumulators.set(directory, accumulator);
+        }
+        accumulator.fileCount += 1;
+        accumulator.declarationCount += row.declarationCount;
+        accumulator.referenceCount += row.referenceCount;
+        accumulator.languages.set(language, (accumulator.languages.get(language) ?? 0) + 1);
+    }
+
+    const scopeLanguages = [...scopeAccumulator.languages.entries()]
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .map(([language, fileCount]) => ({ language, fileCount }));
+    const directories = [...directoryAccumulators.entries()]
+        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .map(([key, accumulator]): V4ScopeAggregateRow => ({
+            key,
+            fileCount: accumulator.fileCount,
+            declarationCount: accumulator.declarationCount,
+            referenceCount: accumulator.referenceCount,
+            languages: [...accumulator.languages.entries()]
+                .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+                .map(([language, fileCount]) => ({ language, fileCount })),
+        }));
+    return {
+        scope: {
+            key: scopePrefix === '' ? '' : scopePrefix.slice(0, -1),
+            fileCount: scopeAccumulator.fileCount,
+            declarationCount: scopeAccumulator.declarationCount,
+            referenceCount: scopeAccumulator.referenceCount,
+            languages: scopeLanguages,
+        },
+        directories,
+    };
+}
+
+/**
+ * Return one present/missing coverage row for every distinct requested file
+ * key in locked 100-key chunks. Statement count: ceil(distinct keys / 100),
+ * or 0 for an empty set.
+ *
+ * SQL per chunk: requested-key CTE LEFT JOIN files by primary key.
+ */
+export function readV4FileHashesByKeys(
+    conn: DbConnection,
+    fileKeys: readonly string[],
+): V4FileCoverageRow[] {
+    const keys = [...new Set(fileKeys)];
+    const rows: V4FileCoverageRow[] = [];
+    for (const chunk of chunks(keys, LOCKED_BOUNDS.sqlIdNameChunkSize)) {
+        const values = chunk.map(() => '(?)').join(', ');
+        const sql = `
+            WITH requested(file_path) AS (VALUES ${values})
+            SELECT r.file_path AS filePath,
+                   CASE WHEN f.path IS NULL THEN 0 ELSE 1 END AS present,
+                   f.hash AS hash,
+                   f.last_indexed AS lastIndexed
+            FROM requested r
+            LEFT JOIN files f ON f.path = r.file_path
+            ORDER BY r.file_path
+        `;
+        const raw = prepareOrCache(conn, sql).all(...chunk) as unknown as Array<
+            Omit<V4FileCoverageRow, 'present'> & { present: number }
+        >;
+        rows.push(...raw.map((row) => ({ ...row, present: row.present !== 0 })));
+    }
+    rows.sort((a, b) => a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0);
+    return rows;
 }

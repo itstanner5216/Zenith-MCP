@@ -57,6 +57,11 @@ describe('typed edge and anchor span persistence', () => {
         `)).toEqual([
             { callerName: 'target', referencedName: 'Widget', referenceKind: 'class', calleeName: 'Widget' },
             { callerName: 'target', referencedName: 'Widget', referenceKind: 'type', calleeName: 'Widget' },
+            // Line 5 (`function caller(value: Widget): Widget`) truly contains
+            // TWO type references — the parameter type and the return type.
+            // The pre-POLARIS `name:kind:line` dedup collapsed them into one
+            // edge (defect G5); Task 1.2's column-aware dedup persists both.
+            { callerName: 'caller', referencedName: 'Widget', referenceKind: 'type', calleeName: 'Widget' },
             { callerName: 'caller', referencedName: 'Widget', referenceKind: 'type', calleeName: 'Widget' },
             { callerName: 'caller', referencedName: 'target', referenceKind: 'call', calleeName: 'target' },
         ]);
@@ -89,7 +94,9 @@ describe('typed edge and anchor span persistence', () => {
             { callerLine: 2, referencedName: 'Widget', referenceKind: 'class', referenceCount: 1 },
             { callerLine: 2, referencedName: 'Widget', referenceKind: 'type', referenceCount: 1 },
             { callerLine: 5, referencedName: 'target', referenceKind: 'call', referenceCount: 1 },
-            { callerLine: 5, referencedName: 'Widget', referenceKind: 'type', referenceCount: 1 },
+            // Both type references on line 5 aggregate here: the seam now hands
+            // TOON the true count (2), not the G5-halved one.
+            { callerLine: 5, referencedName: 'Widget', referenceKind: 'type', referenceCount: 2 },
         ]);
         expect(facts.anchors.map(anchor => ({
             symbolName: anchor.symbol_name,

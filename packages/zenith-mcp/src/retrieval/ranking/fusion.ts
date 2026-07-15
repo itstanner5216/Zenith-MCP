@@ -30,10 +30,14 @@ export function weightedRrf(
   for (const key of allKeys) {
     const envR = envRanks.get(key) ?? envMax;
     const convR = convRanks.get(key) ?? convMax;
+    // Every key in allKeys came from envRanked/convRanked, which also populated
+    // toolMap, so the mapping is always present.
+    const toolMapping = toolMap.get(key);
+    if (toolMapping === undefined) continue;
     const score = alpha / (RRF_K + envR) + (1 - alpha) / (RRF_K + convR);
     fused.push({
       toolKey: key,
-      toolMapping: toolMap.get(key)!,
+      toolMapping,
       score,
       tier: "full",
     });

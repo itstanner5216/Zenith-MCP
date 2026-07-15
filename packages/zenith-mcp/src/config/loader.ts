@@ -131,12 +131,14 @@ function normalizeLegacyRaw(raw: RawConfig): { normalized: RawConfig; wasMigrate
     if (entry.type === "comment") {
       const bare = entry.text.trim();
       const m = bare.match(/^([a-z][a-z_]*):$/);
-      if (m && m[1] !== undefined && m[1] in LEGACY_YAML_SECTION_MAP) {
-        const sectionName = LEGACY_YAML_SECTION_MAP[m[1]]!;
-        legacySection = sectionName.toLowerCase();
-        result.push({ type: "subsection", name: sectionName, raw: `### ${sectionName}` });
-        wasMigrated = true;
-        continue;
+      if (m && m[1] !== undefined) {
+        const sectionName = LEGACY_YAML_SECTION_MAP[m[1]];
+        if (sectionName !== undefined) {
+          legacySection = sectionName.toLowerCase();
+          result.push({ type: "subsection", name: sectionName, raw: `### ${sectionName}` });
+          wasMigrated = true;
+          continue;
+        }
       }
       result.push(entry);
       continue;

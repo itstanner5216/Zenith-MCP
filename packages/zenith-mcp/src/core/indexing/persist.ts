@@ -2,23 +2,46 @@
 // indexing/persist.ts — Writes ParsedFileRecord in one transaction
 //
 // Invariant: Every DB write goes through a named db-adapter function.
-// Single transaction per file. FK cascades handle child table cleanup.
+// Single transaction per file. FK cascades handle symbol-child cleanup;
+// file-FK'd tables are cleared explicitly (Task 1.1).
+//
+// Affected-name resolution (POLARIS Task 1.3) happens INSIDE this same
+// transaction: read old definition names, replace facts, clear every stale
+// edge target touching the changed names, re-resolve the affected names —
+// then commit. A fault at any statement leaves the entire old state or the
+// entire new state; no cleared-but-owed resolution can ever commit.
 // ---------------------------------------------------------------------------
 
 import type { DbConnection } from '../db-adapter.js';
 import {
     runTransaction, upsertFile, deleteSymbolsByFile,
+    deleteImportsByFile, deleteImportBindingsByFile, deleteInjectionsByFile,
+    getDefinitionNamesByFile, clearEdgeTargetsByNames,
     insertSymbol, insertEdge,
     insertSymbolStructure, insertAnchor,
     insertImport, insertImportBinding, insertLocalScope, insertInjection,
     updateSymbolExtras,
 } from '../db-adapter.js';
+import { resolveEdgesForNames } from './resolve.js';
 import type { ParsedFileRecord } from './types.js';
 
 export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord): void {
     runTransaction(conn, () => {
-        // 1. Clear old data (FK cascades clean child tables)
+        // 0. Read the OLD definition names before anything is replaced — the
+        //    affected-name protocol needs the old∪new union (Task 1.3).
+        const oldDefinitionNames = getDefinitionNamesByFile(conn, record.relPath);
+
+        // 1. Clear old data. Symbol-FK'd children (structures, anchors,
+        //    local_scopes, edges) go with their symbols via FK cascade. The
+        //    file-FK'd tables (imports, import_bindings, injections) are
+        //    cleared EXPLICITLY: since the file upsert became non-destructive
+        //    (POLARIS Task 1.1, ON CONFLICT DO UPDATE), the old
+        //    INSERT-OR-REPLACE cascade no longer clears them implicitly — the
+        //    replacement transaction owns that clear now.
         deleteSymbolsByFile(conn, record.relPath);
+        deleteImportsByFile(conn, record.relPath);
+        deleteImportBindingsByFile(conn, record.relPath);
+        deleteInjectionsByFile(conn, record.relPath);
         // 2. Upsert file
         upsertFile(conn, record.relPath, record.hash, Date.now());
         // 3. Insert symbols, build key→id map.
@@ -92,5 +115,31 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
             if (symbolId === null) continue;
             insertLocalScope(conn, { symbolId, scopeKind: local.scopeKind, startLine: local.startLine, endLine: local.endLine, parametersJson: JSON.stringify(local.parameters), localsJson: JSON.stringify(local.locals) });
         }
+
+        // 10. Affected-name resolution (POLARIS Task 1.3), same transaction:
+        //     changedDefinitions = old ∪ new definition names, computed only
+        //     when the sets differ (a caller-only edit must not churn other
+        //     files' resolutions). Clear every stale target touching those
+        //     names — including dot-qualified edges currently RESOLVED TO a
+        //     changed name — then re-resolve exactly the affected names plus
+        //     this file's own (all-unresolved) new references. The clear
+        //     returns the referenced names it touched, so nothing cleared is
+        //     ever left owed at commit.
+        const newDefinitionNames = [...new Set(record.symbols.filter((s) => s.kind === 'def').map((s) => s.name))];
+        const oldSet = new Set(oldDefinitionNames);
+        const newSet = new Set(newDefinitionNames);
+        const setsDiffer = oldSet.size !== newSet.size
+            || [...newSet].some((n) => !oldSet.has(n));
+        const changedDefinitions = setsDiffer
+            ? [...new Set([...oldDefinitionNames, ...newDefinitionNames])]
+            : [];
+
+        const clearedNames = changedDefinitions.length > 0
+            ? clearEdgeTargetsByNames(conn, changedDefinitions)
+            : [];
+
+        const newReferencedNames = record.edges.map((e) => e.referencedName);
+        const affectedNames = [...new Set([...changedDefinitions, ...clearedNames, ...newReferencedNames])];
+        resolveEdgesForNames(conn, affectedNames);
     });
 }

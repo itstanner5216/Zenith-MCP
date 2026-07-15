@@ -12,7 +12,10 @@ import {
     closeDb,
     initSymbolSchema,
     getFileHash,
+    upsertFile,
     deleteFile,
+    getDefinitionNamesByFile,
+    clearEdgeTargetsByNames,
     getFilesByPrefix,
     deleteSymbolsByFile,
     getCallers,
@@ -31,7 +34,7 @@ import {
 } from './db-adapter.js';
 import { extractParsedFile } from './indexing/extract.js';
 import { persistParsedFile } from './indexing/persist.js';
-import { resolveAllEdgeTargets } from './indexing/resolve.js';
+import { resolveEdgesForNames } from './indexing/resolve.js';
 
 // ---------------------------------------------------------------------------
 // Repo root detection
@@ -94,7 +97,10 @@ const _dbCache = new Map<string, DbConnection>();
 let _exitHandlerRegistered = false;
 
 export function getDb(repoRoot: string): DbConnection {
-    if (_dbCache.has(repoRoot)) return _dbCache.get(repoRoot)!;
+    // Explicit guard instead of a non-null assertion (POLARIS Task 1.5 /
+    // AGENTS.md Rule 6): the has/get pair is a TOCTOU-free single read.
+    const cached = _dbCache.get(repoRoot);
+    if (cached) return cached;
 
     const mcpDir = path.join(repoRoot, '.mcp'); // nosemgrep
     mkdirSync(mcpDir, { recursive: true }); // nosemgrep
@@ -152,8 +158,123 @@ function hashFileContent(content: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// IndexAddress — the one store-addressing contract (POLARIS Task 1.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * The single addressing object every ingestion and read path shares
+ * (POLARIS Decision 19): one database handle, one scope identity, one codec.
+ * Code never derives a DB key with an ad-hoc `path.relative` after routing —
+ * the codec IS the key derivation, and persistence receives keys already
+ * encoded.
+ *
+ * Construction is restricted by convention to `ProjectContext`
+ * (getIntelligenceStore) and the factories below (the project factory doubles
+ * as the test-only entry). Store keys are slash-normalized:
+ *   project mode:  `src/lib/a.ts`
+ *   global mode:   `g/<sha256(canonicalAllowedRoot)>/<root-relative path>`
+ */
+export interface IndexAddress {
+    db: DbConnection;
+    mode: 'project' | 'global';
+    scopeRoot: string;
+    scopeKey: string;
+    toStoreKey(absPath: string): string | null;
+    fromStoreKey(storeKey: string): string | null;
+}
+
+function slashNormalize(relPath: string): string {
+    return relPath.split(path.sep).join('/');
+}
+
+/**
+ * Project-mode address: keys are repo-relative slash-normalized paths —
+ * byte-identical to the historical `path.relative` keys on POSIX, so
+ * project-mode visible paths do not change. Also the test-only factory.
+ */
+export function createProjectIndexAddress(db: DbConnection, repoRoot: string): IndexAddress {
+    const scopeRoot = path.resolve(repoRoot);
+    return {
+        db,
+        mode: 'project',
+        scopeRoot,
+        scopeKey: scopeRoot,
+        toStoreKey(absPath: string): string | null {
+            const rel = path.relative(scopeRoot, absPath);
+            if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+            return slashNormalize(rel);
+        },
+        fromStoreKey(storeKey: string): string | null {
+            if (storeKey.startsWith('g/')) return null;
+            return storeKey;
+        },
+    };
+}
+
+/**
+ * Global-mode address for one allowed root (POLARIS Decision 18/20): keys are
+ * `g/<sha256(canonicalAllowedRoot)>/<root-relative slash path>`. The codec
+ * accepts only descendants of its root — a global anchor can never sweep
+ * another allowed root's namespace, and two roots' identical relative paths
+ * can never collide.
+ */
+export function createGlobalIndexAddress(db: DbConnection, allowedRoot: string): IndexAddress {
+    const scopeRoot = path.resolve(allowedRoot);
+    const rootHash = createHash('sha256').update(scopeRoot).digest('hex');
+    const scopeKey = `g/${rootHash}`;
+    return {
+        db,
+        mode: 'global',
+        scopeRoot,
+        scopeKey,
+        toStoreKey(absPath: string): string | null {
+            const rel = path.relative(scopeRoot, absPath);
+            if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+            return `${scopeKey}/${slashNormalize(rel)}`;
+        },
+        fromStoreKey(storeKey: string): string | null {
+            const prefix = `${scopeKey}/`;
+            if (!storeKey.startsWith(prefix)) return null;
+            return storeKey.slice(prefix.length);
+        },
+    };
+}
+
+/** Internal: bridge the legacy `(db, repoRoot)` call shape onto an address. */
+function toProjectAddress(db: DbConnection, repoRoot: string): IndexAddress {
+    return createProjectIndexAddress(db, repoRoot);
+}
+
+// ---------------------------------------------------------------------------
 // Indexing
 // ---------------------------------------------------------------------------
+
+/**
+ * Provisional source-size safety bound (POLARIS Decision 23: source file
+ * bytes 16 MiB; settled at Wave 7 from measured p99 with 4x headroom — the
+ * constant moves to core/intelligence/limits.ts when Wave 2 creates it).
+ * Files over the bound are never parsed; they receive the versioned
+ * too-large sentinel below instead, and their previously persisted facts are
+ * never purged by the skip.
+ */
+export const PROVISIONAL_MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Versioned sentinel stored in files.hash for over-limit files:
+ * `toolarge@1:<md5-of-content>`. The embedded content hash keeps freshness
+ * honest — when the file changes (and possibly shrinks under the bound), the
+ * hash mismatch routes it back through indexFile, which parses it normally.
+ */
+export const TOO_LARGE_SENTINEL_PREFIX = 'toolarge@1:';
+
+/** Typed per-file indexing outcome (POLARIS Task 1.2). */
+export type IndexFileOutcome =
+    | 'indexed'            // parsed and persisted
+    | 'fresh'              // stored hash matched; nothing to do
+    | 'too_large'          // over the source-byte bound; sentinel recorded, no parse, no purge
+    | 'purged_unindexable' // unsupported/sensitive/excluded path; stale rows purged
+    | 'purged_unreadable'  // disk read failed; stale rows purged
+    | 'skipped_outside_root'; // path escapes repoRoot; untouched
 
 function shouldIndexFile(repoRoot: string, absPath: string): boolean {
     if (!isSupported(absPath)) return false;
@@ -177,31 +298,49 @@ function shouldIndexFile(repoRoot: string, absPath: string): boolean {
 
 function purgeIndexedPath(db: DbConnection, relPath: string): void {
     runTransaction(db, () => {
+        // Deletion-side affected-name resolution (POLARIS Task 1.3): removing
+        // this file's definitions can make a previously ambiguous name unique
+        // elsewhere. Capture the names, purge (the symbols cascade SET-NULLs
+        // any edges resolved to them), then re-resolve those names in the
+        // SAME transaction — a purge never commits owing resolution work.
+        const oldDefinitionNames = getDefinitionNamesByFile(db, relPath);
         deleteSymbolsByFile(db, relPath);
         deleteFile(db, relPath);
+        if (oldDefinitionNames.length > 0) {
+            const cleared = clearEdgeTargetsByNames(db, oldDefinitionNames);
+            resolveEdgesForNames(db, [...new Set([...oldDefinitionNames, ...cleared])]);
+        }
     });
 }
 
 /**
- * Index a single file's symbols into the DB.
+ * Index a single file's symbols into the store named by `address`
+ * (POLARIS Task 1.4 — the address-cored primitive; the legacy `(db, repoRoot)`
+ * wrapper below builds a project-mode address, so existing callers are
+ * unchanged and project-mode visible paths stay byte-identical).
  *
  * `content` (optional, content-addressed path): when provided, the file's bytes
  * are taken directly from `content` — NO disk read occurs and `absFilePath` is
- * used only for path math (relPath / language detection by extension). The
+ * used only for path math (store key / language detection by extension). The
  * stored file hash is computed from the SAME `content` that is indexed, so a
- * later content-addressed freshness check (ensureFreshFromContent) matches
+ * later content-addressed freshness check (ensureFreshFromContentAt) matches
  * exactly. When `content` is omitted, behaviour is unchanged: the source is read
  * from disk and an unreadable file purges its stale index rows.
+ *
+ * Returns the typed {@link IndexFileOutcome} for the file (POLARIS Task 1.2).
+ * Over-limit sources (PROVISIONAL_MAX_SOURCE_BYTES) are never parsed: the
+ * versioned too-large sentinel is recorded in files.hash and any previously
+ * persisted facts for the path are left untouched — a skip is not evidence of
+ * emptiness.
  */
-export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string, content?: string): Promise<void> {
-    const relPath = path.relative(repoRoot, absFilePath);
+export async function indexFileAt(address: IndexAddress, absFilePath: string, content?: string): Promise<IndexFileOutcome> {
+    const db = address.db;
+    const storeKey = address.toStoreKey(absFilePath);
+    if (storeKey === null) return 'skipped_outside_root';
 
-    // Guard: reject paths that escape repoRoot
-    if (relPath.startsWith('..') || path.isAbsolute(relPath)) return;
-
-    if (!shouldIndexFile(repoRoot, absFilePath)) {
-        purgeIndexedPath(db, relPath);
-        return;
+    if (!shouldIndexFile(address.scopeRoot, absFilePath)) {
+        purgeIndexedPath(db, storeKey);
+        return 'purged_unindexable';
     }
 
     let source: string;
@@ -213,49 +352,90 @@ export async function indexFile(db: DbConnection, repoRoot: string, absFilePath:
         try {
             source = await fs.readFile(absFilePath, 'utf-8'); // nosemgrep
         } catch {
-            purgeIndexedPath(db, relPath);
-            return;
+            purgeIndexedPath(db, storeKey);
+            return 'purged_unreadable';
         }
     }
 
     // Hash the SAME content that is indexed so a content-addressed freshness
-    // check (ensureFreshFromContent) compares like-for-like.
+    // check (ensureFreshFromContentAt) compares like-for-like.
     const hash = hashFileContent(source);
-    const existingHash = getFileHash(db, relPath);
-    if (existingHash && existingHash === hash) return;
+    const existingHash = getFileHash(db, storeKey);
+    if (existingHash && existingHash === hash) return 'fresh';
+
+    // Source-byte safety bound — checked BEFORE any parse, for both disk and
+    // supplied content (POLARIS Task 1.2). Record the versioned sentinel so
+    // the skip is typed and re-checkable, keep every previously persisted
+    // fact (never replace real facts with an empty parse), and do not parse.
+    if (Buffer.byteLength(source, 'utf8') > PROVISIONAL_MAX_SOURCE_BYTES) {
+        const sentinel = TOO_LARGE_SENTINEL_PREFIX + hash;
+        if (existingHash !== sentinel) {
+            upsertFile(db, storeKey, sentinel, Date.now());
+        }
+        return 'too_large';
+    }
 
     const langName = getLangForFile(absFilePath);
     if (!langName) {
-        purgeIndexedPath(db, relPath);
-        return;
+        purgeIndexedPath(db, storeKey);
+        return 'purged_unindexable';
     }
 
-    const parsed = await extractParsedFile(source, langName, relPath, hash);
+    // The record's relPath field carries the STORE KEY — persistence receives
+    // it already encoded and never calls path.relative (Decision 19).
+    const parsed = await extractParsedFile(source, langName, storeKey, hash);
     if (!parsed) {
-        purgeIndexedPath(db, relPath);
-        return;
+        purgeIndexedPath(db, storeKey);
+        return 'purged_unindexable';
     }
     persistParsedFile(db, parsed);
+    return 'indexed';
+}
+
+/** Legacy call shape — builds a project-mode address (keys unchanged). */
+export async function indexFile(db: DbConnection, repoRoot: string, absFilePath: string, content?: string): Promise<IndexFileOutcome> {
+    return indexFileAt(toProjectAddress(db, repoRoot), absFilePath, content);
 }
 
 interface IndexDirectoryOpts {
     maxFiles?: number;
 }
 
-export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<void> {
+/**
+ * Honest walk coverage (POLARIS Task 1.2). `complete` is true only when every
+ * indexable file under the directory was visited; `stopReason` names the cap
+ * that truncated an incomplete walk ('max_files') or why nothing was walked
+ * at all ('outside_scope'). Purging of unvisited rows happens ONLY on
+ * complete walks — an incomplete walk is not evidence of deletion.
+ */
+export interface IndexCoverage {
+    visited: number;
+    complete: boolean;
+    stopReason: 'max_files' | 'outside_scope' | null;
+}
+
+export async function indexDirectoryAt(address: IndexAddress, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<IndexCoverage> {
+    const db = address.db;
     const maxFiles = opts.maxFiles || 5000;
-    const filePaths: string[] = [];
+    const dirKey = address.toStoreKey(dirPath);
+    if (dirKey === null) {
+        return { visited: 0, complete: false, stopReason: 'outside_scope' };
+    }
+    const discovered: string[] = [];
     const excludes = getDefaultExcludes();
 
+    // Discovery is exhaustive (directory metadata only — cheap relative to
+    // parsing) so that (a) `complete` is a fact, not a guess, and (b) cap
+    // membership is deterministic: the discovered set is sorted before the
+    // cap is applied, so WHICH files a truncated walk indexes never depends
+    // on readdir order (POLARIS Task 1.2).
     async function walk(dir: string): Promise<void> {
-        if (filePaths.length >= maxFiles) return;
         let entries;
         try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; } // nosemgrep
         for (const entry of entries) {
-            if (filePaths.length >= maxFiles) return;
             const fullPath = path.join(dir, entry.name); // nosemgrep
             if (entry.isDirectory()) {
-                const relDir = path.relative(repoRoot, fullPath);
+                const relDir = path.relative(address.scopeRoot, fullPath);
                 if (excludes.some(pattern =>
                     entry.name === pattern ||
                     minimatch(relDir, pattern, { dot: true, nocase: true }) ||
@@ -264,79 +444,99 @@ export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath
                     continue;
                 }
                 await walk(fullPath);
-            } else if (entry.isFile() && shouldIndexFile(repoRoot, fullPath)) {
-                filePaths.push(fullPath);
+            } else if (entry.isFile() && shouldIndexFile(address.scopeRoot, fullPath)) {
+                discovered.push(fullPath);
             }
         }
     }
 
     await walk(dirPath);
 
+    discovered.sort();
+    const complete = discovered.length <= maxFiles;
+    const filePaths = complete ? discovered : discovered.slice(0, maxFiles);
+
     // Purge stale DB rows for files under this directory that were not visited
-    // (e.g. files under now-excluded directories or deleted files)
-    const dirRelPath = path.relative(repoRoot, dirPath);
-    const prefix = dirRelPath ? dirRelPath + path.sep : '';
-    const indexedFiles = getFilesByPrefix(db, `${prefix}%`);
-    const visitedRelPaths = new Set(filePaths.map(f => path.relative(repoRoot, f)));
-    for (const row of indexedFiles) {
-        if (!visitedRelPaths.has(row.path)) {
-            purgeIndexedPath(db, row.path);
+    // (deleted files, files under now-excluded directories) — but ONLY when
+    // the walk was complete. On a truncated walk, "not visited" says nothing
+    // about existence, and purging on it destroyed live rows (defect G8).
+    if (complete) {
+        const prefix = dirKey === '' ? '' : (dirKey.endsWith('/') ? dirKey : `${dirKey}/`);
+        const indexedFiles = getFilesByPrefix(db, `${prefix}%`);
+        const visitedKeys = new Set(filePaths.map(f => address.toStoreKey(f)));
+        for (const row of indexedFiles) {
+            if (!visitedKeys.has(row.path)) {
+                purgeIndexedPath(db, row.path);
+            }
         }
     }
 
     const BATCH_SIZE = 50;
     for (let i = 0; i < filePaths.length; i += BATCH_SIZE) {
         const batch = filePaths.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(f => indexFile(db, repoRoot, f)));
+        await Promise.all(batch.map(f => indexFileAt(address, f)));
     }
 
-    // Resolve pass: now that all defs across the directory are indexed,
-    // resolve unresolved edge targets to their definition sites in ONE pass over
-    // the whole DB (review #18, "Performance Is Correctness"). The previous code
-    // looped resolveEdgeTargets per file — re-querying and re-resolving for each
-    // file, an N+1. resolveAllEdgeTargets fetches all unresolved edges once,
-    // groups by name, and fetches each name's candidate set once. The healing
-    // semantics are unchanged: stale rows nulled by ON DELETE SET NULL are
-    // re-read and re-resolved on the next sweep.
-    resolveAllEdgeTargets(db);
+    // No trailing whole-DB resolve pass (POLARIS Task 1.3): every persist
+    // resolves its own affected names inside its own transaction, and a file
+    // indexed EARLIER in this batch whose references point at a file indexed
+    // LATER is healed by the later persist (the later file's definitions are
+    // new names, so the clear-and-re-resolve covers the earlier edges).
+    // Resolution therefore converges per-file with no end-of-batch sweep owed.
+
+    return {
+        visited: filePaths.length,
+        complete,
+        stopReason: complete ? null : 'max_files',
+    };
 }
 
-export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFilePaths: string[]): Promise<number> {
+/** Legacy call shape — builds a project-mode address (keys unchanged). */
+export async function indexDirectory(db: DbConnection, repoRoot: string, dirPath: string, opts: IndexDirectoryOpts = {}): Promise<IndexCoverage> {
+    return indexDirectoryAt(toProjectAddress(db, repoRoot), dirPath, opts);
+}
+
+export async function ensureIndexFreshAt(address: IndexAddress, absFilePaths: string[]): Promise<number> {
+    const db = address.db;
     let reindexed = 0;
     for (const absPath of absFilePaths) {
-        const relPath = path.relative(repoRoot, absPath);
-        if (!shouldIndexFile(repoRoot, absPath)) {
-            purgeIndexedPath(db, relPath);
+        const storeKey = address.toStoreKey(absPath);
+        if (storeKey === null) continue;
+        if (!shouldIndexFile(address.scopeRoot, absPath)) {
+            purgeIndexedPath(db, storeKey);
             continue;
         }
         let source: string;
         try { source = await fs.readFile(absPath, 'utf-8'); } catch { // nosemgrep
             // File is unreadable or deleted — purge stale index rows
-            purgeIndexedPath(db, relPath);
+            purgeIndexedPath(db, storeKey);
             continue;
         }
         const hash = hashFileContent(source);
-        const existingHash = getFileHash(db, relPath);
+        const existingHash = getFileHash(db, storeKey);
         if (!existingHash || existingHash !== hash) {
-            await indexFile(db, repoRoot, absPath);
-            reindexed++;
+            // Only a real (re)parse counts as reindexed: a too-large skip
+            // records its sentinel without changing any fact rows (Task 1.2).
+            const outcome = await indexFileAt(address, absPath);
+            if (outcome === 'indexed') reindexed++;
         }
     }
-    // Batch-level resolve: now that every touched file has been reindexed, run ONE
-    // whole-DB pass to resolve unresolved edge targets. NOT per-file (the N+1 the
-    // batch pass exists to avoid) and not never (the bug this fixes: read tools all
-    // route through ensureIndexFresh, which left their edges permanently
-    // unresolved). Guarded by reindexed > 0 so an all-fresh batch costs nothing;
-    // resolveAllEdgeTargets also short-circuits when zero edges are unresolved. Runs
-    // AFTER each indexFile's own persist transaction has completed — not nested.
-    if (reindexed > 0) resolveAllEdgeTargets(db);
+    // No batch-level resolve pass (POLARIS Task 1.3): each reindexed file's
+    // persist transaction cleared and re-resolved its own affected names
+    // before committing. There is nothing owed here — and nothing for a
+    // same-byte freshness pass to "heal" later.
     return reindexed;
+}
+
+/** Legacy call shape — builds a project-mode address (keys unchanged). */
+export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFilePaths: string[]): Promise<number> {
+    return ensureIndexFreshAt(toProjectAddress(db, repoRoot), absFilePaths);
 }
 
 /**
  * Content-addressed freshness for a SINGLE file whose exact bytes the caller
  * already holds (e.g. read-tool rawText, or post-edit content). Mirrors the
- * per-file body of {@link ensureIndexFresh} — same shouldIndexFile / purge
+ * per-file body of {@link ensureIndexFreshAt} — same shouldIndexFile / purge
  * guard, same hash-compare-reindex logic, same `number` return (count
  * reindexed: 0 or 1) — but asks the content-addressed question "do the DB facts
  * describe THESE bytes?" instead of re-reading disk.
@@ -348,37 +548,38 @@ export async function ensureIndexFresh(db: DbConnection, repoRoot: string, absFi
  * miss, reindexing FROM that same `content` (no disk read) guarantees the
  * indexed facts describe exactly the bytes the caller will consume.
  *
- * Note vs ensureIndexFresh: there is no unreadable-file branch — the bytes are
- * in-hand by construction, so the only purge path is the shouldIndexFile guard
- * (unsupported / sensitive / excluded path).
+ * Note vs ensureIndexFreshAt: there is no unreadable-file branch — the bytes
+ * are in-hand by construction, so the only purge path is the shouldIndexFile
+ * guard (unsupported / sensitive / excluded path).
  *
  * @returns 1 if the file was (re)indexed from `content`, 0 if facts were
  *          already fresh (stored hash matched) or the path is not indexable.
  */
-export async function ensureFreshFromContent(db: DbConnection, repoRoot: string, absFilePath: string, content: string): Promise<number> {
-    const relPath = path.relative(repoRoot, absFilePath);
+export async function ensureFreshFromContentAt(address: IndexAddress, absFilePath: string, content: string): Promise<number> {
+    const db = address.db;
+    const storeKey = address.toStoreKey(absFilePath);
+    if (storeKey === null) return 0;
 
-    // Guard: reject paths that escape repoRoot (mirrors indexFile's containment guard).
-    if (relPath.startsWith('..') || path.isAbsolute(relPath)) return 0;
-
-    if (!shouldIndexFile(repoRoot, absFilePath)) {
-        purgeIndexedPath(db, relPath);
+    if (!shouldIndexFile(address.scopeRoot, absFilePath)) {
+        purgeIndexedPath(db, storeKey);
         return 0;
     }
 
     const hash = hashFileContent(content);
-    const existingHash = getFileHash(db, relPath);
+    const existingHash = getFileHash(db, storeKey);
     if (!existingHash || existingHash !== hash) {
-        await indexFile(db, repoRoot, absFilePath, content);
-        // Resolve after indexFile's transaction completes (separate statement, not
-        // nested in persist). The single-file content path (compression seam,
-        // edit_file) just wrote edges that would otherwise stay permanently
-        // unresolved. Only the reindex branch resolves — the return-0 path changed
-        // nothing, so there is nothing to resolve.
-        resolveAllEdgeTargets(db);
+        const outcome = await indexFileAt(address, absFilePath, content);
+        if (outcome !== 'indexed') return 0; // too-large sentinel or purge — no new facts
+        // Resolution already happened inside the persist transaction
+        // (POLARIS Task 1.3) — nothing further is owed here.
         return 1;
     }
     return 0;
+}
+
+/** Legacy call shape — builds a project-mode address (keys unchanged). */
+export async function ensureFreshFromContent(db: DbConnection, repoRoot: string, absFilePath: string, content: string): Promise<number> {
+    return ensureFreshFromContentAt(toProjectAddress(db, repoRoot), absFilePath, content);
 }
 
 // ---------------------------------------------------------------------------

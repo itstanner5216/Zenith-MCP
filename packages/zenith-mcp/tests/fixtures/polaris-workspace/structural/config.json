@@ -1,0 +1,6 @@
+{
+    "name": "polaris",
+    "limits": {
+        "maxFiles": 5000
+    }
+}

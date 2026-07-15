@@ -1,0 +1,2078 @@
+{
+  "$meta": {
+    "title": "POLARIS Task 0.1 — adversarial truth corpus for tests/fixtures/polaris-workspace",
+    "authored": "2026-07-15",
+    "conventions": {
+      "paths": "scope-relative, slash-normalized; never absolute; never SQLite row IDs",
+      "lines": "1-based",
+      "columns": "0-based UTF-8 byte columns (tree-sitter convention)"
+    },
+    "sections": {
+      "truth": "Hand-authored CORRECT answers, independent of current behavior. Later waves consume these as fixture-truth oracles. Where current v4 behavior disagrees, the disagreement is a live defect (see polaris-current-failures.test.js) or a scheduled capability (v5/v6).",
+      "currentV4": "VERIFIED current-behavior baseline (2026-07-15, real pipeline over the fixture workspace, hand-checked against sources). polaris-baseline.test.js asserts this ground with superset semantics on refs/edges: Wave 1 repairs may ADD rows (same-line dedup fix) but must never lose or alter what is recorded here. callee links recorded under edges[].resolved are the v4 COMPATIBILITY HEURISTIC (name-uniqueness), never binding proof."
+    }
+  },
+  "truth": {
+    "resolutions": [
+      {
+        "scenario": "same-line repeated call, module-local target",
+        "file": "typescript/same-line.ts",
+        "name": "slAdd",
+        "line": 6,
+        "columns": [
+          11,
+          22
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "typescript/same-line.ts",
+          "line": 1
+        },
+        "occurrences": 2,
+        "note": "BOTH same-line occurrences are distinct facts. Current v4 collapses them to one row (defect G5)."
+      },
+      {
+        "scenario": "parameter shadows module function (advisory counterexample)",
+        "file": "typescript/shadowing.ts",
+        "name": "shFormat",
+        "line": 6,
+        "columns": [
+          11
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "typescript/shadowing.ts",
+          "line": 5,
+          "kind": "parameter"
+        },
+        "note": "The call binds the PARAMETER declared on line 5, not the module function on line 1. Current v4 heuristically links the module def — plausible-but-wrong. v4 structural truth: the parameter is not even a persisted def row, so an honest v4 answer is candidates-without-proof, never a resolved module target.",
+        "v4Expectation": {
+          "status": "ambiguous-or-frontier",
+          "mustNotResolveTo": {
+            "path": "typescript/shadowing.ts",
+            "line": 1
+          }
+        }
+      },
+      {
+        "scenario": "unimported globally unique name",
+        "file": "typescript/unimported.ts",
+        "name": "orphanHelper",
+        "line": 2,
+        "columns": [
+          11
+        ],
+        "status": "unresolved",
+        "reason": "not_visible",
+        "candidates": [
+          {
+            "path": "typescript/orphan-def.ts",
+            "line": 1
+          }
+        ],
+        "note": "unimported.ts is a module (has exports); orphanHelper is declared in another module and never imported. Global name-uniqueness is not reachability. Current v4 heuristically resolves it."
+      },
+      {
+        "scenario": "duplicate wrong-twin definitions behind an explicit import",
+        "file": "typescript/twins/consumer.ts",
+        "name": "fetchTwinData",
+        "line": 4,
+        "columns": [
+          11
+        ],
+        "status": "resolved",
+        "basis": "explicit_import",
+        "target": {
+          "path": "typescript/twins/twin-a.ts",
+          "line": 1
+        },
+        "note": "Proof requires the import binding (line 1) plus twin-a export — v6 capability. Honest v4 answer: ambiguous with both twins as candidates (current v4 correctly leaves the edge null).",
+        "v4Expectation": {
+          "status": "ambiguous",
+          "candidates": [
+            {
+              "path": "typescript/twins/twin-a.ts",
+              "line": 1
+            },
+            {
+              "path": "typescript/twins/twin-b.ts",
+              "line": 1
+            }
+          ]
+        }
+      },
+      {
+        "scenario": "value/type collision — value-position call",
+        "file": "typescript/value-type-collision.ts",
+        "name": "Result",
+        "line": 10,
+        "columns": [
+          11
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "namespace": "value",
+        "target": {
+          "path": "typescript/value-type-collision.ts",
+          "line": 5
+        },
+        "note": "The call resolves in the VALUE namespace to the function (line 5), never the interface (line 1). v4 has no namespace split: honest answer is ambiguous (current v4 correctly leaves it null).",
+        "v4Expectation": {
+          "status": "ambiguous"
+        }
+      },
+      {
+        "scenario": "value/type collision — type-position references",
+        "file": "typescript/value-type-collision.ts",
+        "name": "Result",
+        "line": 9,
+        "columns": [
+          30
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "namespace": "type",
+        "target": {
+          "path": "typescript/value-type-collision.ts",
+          "line": 1
+        }
+      },
+      {
+        "scenario": "aliased named import",
+        "file": "typescript/imports.ts",
+        "name": "aliasedHelper",
+        "line": 6,
+        "columns": [
+          11
+        ],
+        "status": "resolved",
+        "basis": "explicit_import",
+        "target": {
+          "path": "typescript/import-target.ts",
+          "line": 5,
+          "name": "importHelper"
+        },
+        "note": "Current v4 leaves this null (no def named aliasedHelper) — honest, but blind to the alias binding it already persists."
+      },
+      {
+        "scenario": "default import",
+        "file": "typescript/imports.ts",
+        "name": "primaryFn",
+        "line": 6,
+        "columns": [
+          33
+        ],
+        "status": "resolved",
+        "basis": "explicit_import",
+        "target": {
+          "path": "typescript/import-target.ts",
+          "line": 1
+        }
+      },
+      {
+        "scenario": "namespace member call",
+        "file": "typescript/imports.ts",
+        "name": "targetNs.importHelper",
+        "line": 6,
+        "columns": [
+          59
+        ],
+        "status": "resolved",
+        "basis": "qualified_namespace",
+        "target": {
+          "path": "typescript/import-target.ts",
+          "line": 5
+        },
+        "note": "Requires the namespace import proof chain (v6)."
+      },
+      {
+        "scenario": "missing-then-created module",
+        "file": "typescript/missing-dep.ts",
+        "name": "ghostFn",
+        "line": 4,
+        "columns": [
+          11
+        ],
+        "status": "unresolved",
+        "reason": "module_not_found",
+        "note": "Import source './not-yet-created' does not exist. When a test creates it, the answer must transition to resolved WITH proof — the negative dependency must invalidate."
+      },
+      {
+        "scenario": "direct re-export chain",
+        "file": "typescript/reexports/consumer.ts",
+        "name": "originFn",
+        "line": 5,
+        "columns": [
+          11,
+          31
+        ],
+        "status": "resolved",
+        "basis": "explicit_reexport",
+        "target": {
+          "path": "typescript/reexports/base.ts",
+          "line": 1
+        },
+        "occurrences": 2,
+        "note": "First occurrence proves through direct.ts (named re-export); second through star.ts (star re-export, column 31 — currently LOST to same-line dedup, defect G5)."
+      },
+      {
+        "scenario": "star re-export is not an import (cyclic pair)",
+        "file": "typescript/reexports/cycle-b.ts",
+        "name": "cycAlpha",
+        "line": 4,
+        "columns": [
+          11
+        ],
+        "status": "unresolved",
+        "reason": "not_visible",
+        "candidates": [
+          {
+            "path": "typescript/reexports/cycle-a.ts",
+            "line": 3
+          }
+        ],
+        "note": "cycle-b.ts star-EXPORTS cycle-a but never imports it; cycAlpha is not in scope. Current v4 heuristically resolves it (globally unique) — plausible-but-wrong."
+      },
+      {
+        "scenario": "python: module function shadowed by same-name method (lexical, not class scope)",
+        "file": "python/app.py",
+        "name": "py_greet",
+        "line": 15,
+        "columns": [
+          15
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "python/app.py",
+          "line": 5
+        },
+        "note": "Python class bodies are not in the lexical chain of methods: the bare call binds the MODULE function (line 5), never the method (line 14). Current v4: null (two same-file candidates)."
+      },
+      {
+        "scenario": "python: same-line repeated call",
+        "file": "python/app.py",
+        "name": "py_greet",
+        "line": 10,
+        "columns": [
+          11,
+          28
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "python/app.py",
+          "line": 5
+        },
+        "occurrences": 2
+      },
+      {
+        "scenario": "go: package-scope call, same-line repeat",
+        "file": "go/app.go",
+        "name": "goHelper",
+        "line": 9,
+        "columns": [
+          8,
+          22
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "go/app.go",
+          "line": 12
+        },
+        "occurrences": 2
+      },
+      {
+        "scenario": "go: stdlib namespace members are external",
+        "file": "go/app.go",
+        "name": "fmt.Println",
+        "line": 13,
+        "columns": [
+          5
+        ],
+        "status": "external",
+        "reason": "external_module"
+      },
+      {
+        "scenario": "rust: module-scope call, same-line repeat",
+        "file": "rust/app.rs",
+        "name": "rs_helper",
+        "line": 5,
+        "columns": [
+          4,
+          19
+        ],
+        "status": "resolved",
+        "basis": "lexical_scope",
+        "target": {
+          "path": "rust/app.rs",
+          "line": 8
+        },
+        "occurrences": 2
+      },
+      {
+        "scenario": "rust: receiver method call needs type information",
+        "file": "rust/app.rs",
+        "name": "insert",
+        "line": 10,
+        "columns": [
+          6
+        ],
+        "status": "unsupported",
+        "reason": "requires_type_information"
+      },
+      {
+        "scenario": "java: same-class method call, same-line repeat",
+        "file": "java/App.java",
+        "name": "javaHelper",
+        "line": 6,
+        "columns": [
+          15,
+          31
+        ],
+        "status": "resolved",
+        "basis": "direct_member",
+        "target": {
+          "path": "java/App.java",
+          "line": 9
+        },
+        "occurrences": 2
+      },
+      {
+        "scenario": "java: static import of a JDK member is external",
+        "file": "java/App.java",
+        "name": "max",
+        "line": 10,
+        "columns": [
+          15
+        ],
+        "status": "external",
+        "reason": "external_module"
+      }
+    ],
+    "exports": {
+      "note": "Explicit export facts — schema v4 persists NONE of these (verified: direct.ts and star.ts index with zero rows). v5 ast_exports must cover every entry.",
+      "typescript/import-target.ts": [
+        {
+          "exportedName": "default",
+          "localName": "primaryFn",
+          "kind": "default"
+        },
+        {
+          "exportedName": "importHelper",
+          "kind": "named"
+        },
+        {
+          "exportedName": "plainFn",
+          "kind": "named"
+        },
+        {
+          "exportedName": "OnlyType",
+          "kind": "named",
+          "namespace": "type"
+        },
+        {
+          "exportedName": "PureType",
+          "kind": "named",
+          "namespace": "type"
+        }
+      ],
+      "typescript/reexports/base.ts": [
+        {
+          "exportedName": "originFn",
+          "kind": "named"
+        }
+      ],
+      "typescript/reexports/direct.ts": [
+        {
+          "exportedName": "originFn",
+          "kind": "named",
+          "source": "./base",
+          "imported": "originFn"
+        }
+      ],
+      "typescript/reexports/star.ts": [
+        {
+          "kind": "star",
+          "source": "./base"
+        }
+      ],
+      "typescript/reexports/cycle-a.ts": [
+        {
+          "exportedName": "cycAlpha",
+          "kind": "named"
+        },
+        {
+          "kind": "star",
+          "source": "./cycle-b"
+        }
+      ],
+      "typescript/reexports/cycle-b.ts": [
+        {
+          "exportedName": "cycBeta",
+          "kind": "named"
+        },
+        {
+          "kind": "star",
+          "source": "./cycle-a"
+        }
+      ]
+    },
+    "parseTainted": [
+      "typescript/parse-error/broken.ts"
+    ],
+    "structuralOnly": {
+      "note": "Indexed with structural facts but no semantic profile: resolution/member questions answer structural or unsupported, never invented bindings.",
+      "files": [
+        "structural/config.json",
+        "structural/corrupt.json"
+      ]
+    }
+  },
+  "currentV4": {
+    "files": [
+      "go/app.go",
+      "java/App.java",
+      "javascript/app.js",
+      "python/app.py",
+      "rust/app.rs",
+      "structural/config.json",
+      "structural/corrupt.json",
+      "typescript/exact-span-tie.ts",
+      "typescript/import-target.ts",
+      "typescript/imports.ts",
+      "typescript/missing-dep.ts",
+      "typescript/nesting.ts",
+      "typescript/orphan-def.ts",
+      "typescript/parse-error/broken.ts",
+      "typescript/parse-error/clean.ts",
+      "typescript/reexports/base.ts",
+      "typescript/reexports/consumer.ts",
+      "typescript/reexports/cycle-a.ts",
+      "typescript/reexports/cycle-b.ts",
+      "typescript/reexports/direct.ts",
+      "typescript/reexports/star.ts",
+      "typescript/same-line.ts",
+      "typescript/shadowing.ts",
+      "typescript/twins/consumer.ts",
+      "typescript/twins/twin-a.ts",
+      "typescript/twins/twin-b.ts",
+      "typescript/unimported.ts",
+      "typescript/value-type-collision.ts"
+    ],
+    "perFile": {
+      "go/app.go": {
+        "defs": [
+          {
+            "name": "GoCompute",
+            "type": "function",
+            "line": 8,
+            "endLine": 10,
+            "column": 5
+          },
+          {
+            "name": "goHelper",
+            "type": "function",
+            "line": 12,
+            "endLine": 15,
+            "column": 5
+          }
+        ],
+        "refs": [
+          {
+            "name": "\"fmt\"",
+            "type": "module",
+            "line": 4,
+            "column": 1
+          },
+          {
+            "name": "\"strings\"",
+            "type": "module",
+            "line": 5,
+            "column": 9
+          },
+          {
+            "name": "int",
+            "type": "type",
+            "line": 8,
+            "column": 17
+          },
+          {
+            "name": "goHelper",
+            "type": "call",
+            "line": 9,
+            "column": 8
+          },
+          {
+            "name": "int",
+            "type": "type",
+            "line": 12,
+            "column": 16
+          },
+          {
+            "name": "Println",
+            "type": "call",
+            "line": 13,
+            "column": 5
+          },
+          {
+            "name": "ToUpper",
+            "type": "call",
+            "line": 13,
+            "column": 21
+          }
+        ],
+        "edges": [
+          {
+            "caller": "GoCompute",
+            "callerLine": 8,
+            "name": "goHelper",
+            "kind": "call",
+            "resolved": {
+              "path": "go/app.go",
+              "line": 12
+            }
+          },
+          {
+            "caller": "GoCompute",
+            "callerLine": 8,
+            "name": "int",
+            "kind": "type",
+            "resolved": null
+          },
+          {
+            "caller": "goHelper",
+            "callerLine": 12,
+            "name": "Println",
+            "kind": "call",
+            "resolved": null
+          },
+          {
+            "caller": "goHelper",
+            "callerLine": 12,
+            "name": "ToUpper",
+            "kind": "call",
+            "resolved": null
+          },
+          {
+            "caller": "goHelper",
+            "callerLine": 12,
+            "name": "int",
+            "kind": "type",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "fmt",
+            "names": [
+              "fmt",
+              "strutil"
+            ],
+            "line": 3,
+            "startLine": 3,
+            "endLine": 6
+          }
+        ],
+        "bindings": [
+          {
+            "source": "fmt",
+            "localName": "fmt",
+            "importedName": null,
+            "kind": "namespace",
+            "typeOnly": false,
+            "line": 4,
+            "column": 2
+          },
+          {
+            "source": "strings",
+            "localName": "strutil",
+            "importedName": null,
+            "kind": "namespace",
+            "typeOnly": false,
+            "line": 5,
+            "column": 1
+          }
+        ]
+      },
+      "java/App.java": {
+        "defs": [
+          {
+            "name": "PolarisApp",
+            "type": "class",
+            "line": 4,
+            "endLine": 12,
+            "column": 13,
+            "visibility": "public"
+          },
+          {
+            "name": "javaCompute",
+            "type": "method",
+            "line": 5,
+            "endLine": 7,
+            "column": 15,
+            "parent": {
+              "name": "PolarisApp",
+              "line": 4
+            },
+            "visibility": "public"
+          },
+          {
+            "name": "javaHelper",
+            "type": "method",
+            "line": 9,
+            "endLine": 11,
+            "column": 16,
+            "parent": {
+              "name": "PolarisApp",
+              "line": 4
+            },
+            "visibility": "private"
+          }
+        ],
+        "refs": [
+          {
+            "name": "util",
+            "type": "scoped",
+            "line": 1,
+            "column": 12
+          },
+          {
+            "name": "ArrayList",
+            "type": "import",
+            "line": 1,
+            "column": 17
+          },
+          {
+            "name": "lang",
+            "type": "scoped",
+            "line": 2,
+            "column": 19
+          },
+          {
+            "name": "Math",
+            "type": "scoped",
+            "line": 2,
+            "column": 24
+          },
+          {
+            "name": "max",
+            "type": "import",
+            "line": 2,
+            "column": 29
+          },
+          {
+            "name": "javaHelper",
+            "type": "call",
+            "line": 6,
+            "column": 15
+          },
+          {
+            "name": "max",
+            "type": "call",
+            "line": 10,
+            "column": 15
+          }
+        ],
+        "edges": [
+          {
+            "caller": "javaCompute",
+            "callerLine": 5,
+            "name": "javaHelper",
+            "kind": "call",
+            "resolved": {
+              "path": "java/App.java",
+              "line": 9
+            }
+          },
+          {
+            "caller": "javaHelper",
+            "callerLine": 9,
+            "name": "max",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "java.util",
+            "names": [
+              "ArrayList"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          },
+          {
+            "module": "java.lang.Math",
+            "names": [
+              "max"
+            ],
+            "line": 2,
+            "startLine": 2,
+            "endLine": 2
+          }
+        ],
+        "bindings": [
+          {
+            "source": "java.util",
+            "localName": "ArrayList",
+            "importedName": "ArrayList",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 17
+          },
+          {
+            "source": "java.lang.Math",
+            "localName": "max",
+            "importedName": "max",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 2,
+            "column": 29
+          }
+        ]
+      },
+      "javascript/app.js": {
+        "defs": [
+          {
+            "name": "jsGreet",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 9
+          },
+          {
+            "name": "jsShout",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 9
+          }
+        ],
+        "refs": [
+          {
+            "name": "jsGreet",
+            "type": "call",
+            "line": 6,
+            "column": 11
+          },
+          {
+            "name": "exports",
+            "type": "property",
+            "line": 9,
+            "column": 7
+          }
+        ],
+        "edges": [
+          {
+            "caller": "jsShout",
+            "callerLine": 5,
+            "name": "jsGreet",
+            "kind": "call",
+            "resolved": {
+              "path": "javascript/app.js",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "python/app.py": {
+        "defs": [
+          {
+            "name": "py_greet",
+            "type": "function",
+            "line": 5,
+            "endLine": 6,
+            "column": 4
+          },
+          {
+            "name": "py_call_twice",
+            "type": "function",
+            "line": 9,
+            "endLine": 10,
+            "column": 4
+          },
+          {
+            "name": "PyGreeter",
+            "type": "class",
+            "line": 13,
+            "endLine": 15,
+            "column": 6
+          },
+          {
+            "name": "py_greet",
+            "type": "function",
+            "line": 14,
+            "endLine": 15,
+            "column": 8,
+            "parent": {
+              "name": "PyGreeter",
+              "line": 13
+            }
+          }
+        ],
+        "refs": [
+          {
+            "name": "collections",
+            "type": "module",
+            "line": 2,
+            "column": 5
+          },
+          {
+            "name": "OrderedDict",
+            "type": "import",
+            "line": 2,
+            "column": 24
+          },
+          {
+            "name": "py_greet",
+            "type": "call",
+            "line": 10,
+            "column": 11
+          },
+          {
+            "name": "py_greet",
+            "type": "call",
+            "line": 15,
+            "column": 15
+          }
+        ],
+        "edges": [
+          {
+            "caller": "py_call_twice",
+            "callerLine": 9,
+            "name": "py_greet",
+            "kind": "call",
+            "resolved": null
+          },
+          {
+            "caller": "py_greet",
+            "callerLine": 14,
+            "name": "py_greet",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "os.path",
+            "names": [
+              "osp"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          },
+          {
+            "module": "collections",
+            "names": [
+              "OrderedDict"
+            ],
+            "line": 2,
+            "startLine": 2,
+            "endLine": 2
+          }
+        ],
+        "bindings": [
+          {
+            "source": "os.path",
+            "localName": "osp",
+            "importedName": null,
+            "kind": "namespace",
+            "typeOnly": false,
+            "line": 1,
+            "column": 18
+          },
+          {
+            "source": "collections",
+            "localName": "OrderedDict",
+            "importedName": "OrderedDict",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 2,
+            "column": 24
+          }
+        ]
+      },
+      "rust/app.rs": {
+        "defs": [
+          {
+            "name": "rs_compute",
+            "type": "function",
+            "line": 4,
+            "endLine": 6,
+            "column": 7
+          },
+          {
+            "name": "rs_helper",
+            "type": "function",
+            "line": 8,
+            "endLine": 12,
+            "column": 3
+          }
+        ],
+        "refs": [
+          {
+            "name": "std",
+            "type": "module",
+            "line": 1,
+            "column": 4
+          },
+          {
+            "name": "HashMap",
+            "type": "import",
+            "line": 1,
+            "column": 22
+          },
+          {
+            "name": "std",
+            "type": "module",
+            "line": 2,
+            "column": 4
+          },
+          {
+            "name": "rs_helper",
+            "type": "call",
+            "line": 5,
+            "column": 4
+          },
+          {
+            "name": "HashMap",
+            "type": "type",
+            "line": 9,
+            "column": 15
+          },
+          {
+            "name": "new",
+            "type": "call",
+            "line": 9,
+            "column": 44
+          },
+          {
+            "name": "insert",
+            "type": "call",
+            "line": 10,
+            "column": 6
+          }
+        ],
+        "edges": [
+          {
+            "caller": "rs_compute",
+            "callerLine": 4,
+            "name": "rs_helper",
+            "kind": "call",
+            "resolved": {
+              "path": "rust/app.rs",
+              "line": 8
+            }
+          },
+          {
+            "caller": "rs_helper",
+            "callerLine": 8,
+            "name": "HashMap",
+            "kind": "type",
+            "resolved": null
+          },
+          {
+            "caller": "rs_helper",
+            "callerLine": 8,
+            "name": "insert",
+            "kind": "call",
+            "resolved": null
+          },
+          {
+            "caller": "rs_helper",
+            "callerLine": 8,
+            "name": "new",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "std::collections",
+            "names": [
+              "HashMap"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          },
+          {
+            "module": "std",
+            "names": [
+              "rsfmt"
+            ],
+            "line": 2,
+            "startLine": 2,
+            "endLine": 2
+          }
+        ],
+        "bindings": [
+          {
+            "source": "std::collections",
+            "localName": "HashMap",
+            "importedName": "HashMap",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 22
+          },
+          {
+            "source": "std",
+            "localName": "rsfmt",
+            "importedName": "fmt",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 2,
+            "column": 16
+          }
+        ]
+      },
+      "structural/config.json": {
+        "defs": [
+          {
+            "name": "name",
+            "type": "property",
+            "line": 2,
+            "endLine": 2,
+            "column": 5
+          },
+          {
+            "name": "limits",
+            "type": "property",
+            "line": 3,
+            "endLine": 5,
+            "column": 5
+          },
+          {
+            "name": "maxFiles",
+            "type": "property",
+            "line": 4,
+            "endLine": 4,
+            "column": 9,
+            "parent": {
+              "name": "limits",
+              "line": 3
+            }
+          }
+        ],
+        "refs": [
+          {
+            "name": "polaris",
+            "type": "value",
+            "line": 2,
+            "column": 13
+          }
+        ],
+        "edges": [
+          {
+            "caller": "name",
+            "callerLine": 2,
+            "name": "polaris",
+            "kind": "value",
+            "resolved": null
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "structural/corrupt.json": {
+        "defs": [
+          {
+            "name": "name",
+            "type": "property",
+            "line": 2,
+            "endLine": 2,
+            "column": 5
+          },
+          {
+            "name": "limits",
+            "type": "property",
+            "line": 3,
+            "endLine": 3,
+            "column": 5
+          }
+        ],
+        "refs": [
+          {
+            "name": "polaris-corrupt",
+            "type": "value",
+            "line": 2,
+            "column": 13
+          }
+        ],
+        "edges": [
+          {
+            "caller": "name",
+            "callerLine": 2,
+            "name": "polaris-corrupt",
+            "kind": "value",
+            "resolved": null
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/exact-span-tie.ts": {
+        "defs": [
+          {
+            "name": "tieBreaker",
+            "type": "variable",
+            "line": 1,
+            "endLine": 1,
+            "column": 13
+          },
+          {
+            "name": "useTie",
+            "type": "function",
+            "line": 3,
+            "endLine": 5,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "tieBreaker",
+            "type": "call",
+            "line": 4,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "useTie",
+            "callerLine": 3,
+            "name": "tieBreaker",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/exact-span-tie.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/import-target.ts": {
+        "defs": [
+          {
+            "name": "primaryFn",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 24,
+            "visibility": "public"
+          },
+          {
+            "name": "importHelper",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 16,
+            "visibility": "public"
+          },
+          {
+            "name": "plainFn",
+            "type": "function",
+            "line": 9,
+            "endLine": 11,
+            "column": 16,
+            "visibility": "public"
+          },
+          {
+            "name": "OnlyType",
+            "type": "interface",
+            "line": 13,
+            "endLine": 15,
+            "column": 17,
+            "visibility": "public"
+          },
+          {
+            "name": "tag",
+            "type": "property",
+            "line": 14,
+            "endLine": 14,
+            "column": 4,
+            "parent": {
+              "name": "OnlyType",
+              "line": 13
+            }
+          },
+          {
+            "name": "PureType",
+            "type": "type",
+            "line": 17,
+            "endLine": 17,
+            "column": 12,
+            "visibility": "public"
+          },
+          {
+            "name": "id",
+            "type": "property",
+            "line": 17,
+            "endLine": 17,
+            "column": 25,
+            "parent": {
+              "name": "PureType",
+              "line": 17
+            }
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/imports.ts": {
+        "defs": [
+          {
+            "name": "useImports",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "'./import-target'",
+            "type": "module",
+            "line": 1,
+            "column": 81
+          },
+          {
+            "name": "'./import-target'",
+            "type": "module",
+            "line": 2,
+            "column": 26
+          },
+          {
+            "name": "'./import-target'",
+            "type": "module",
+            "line": 3,
+            "column": 30
+          },
+          {
+            "name": "aliasedHelper",
+            "type": "call",
+            "line": 6,
+            "column": 11
+          },
+          {
+            "name": "plainFn",
+            "type": "call",
+            "line": 6,
+            "column": 25
+          },
+          {
+            "name": "primaryFn",
+            "type": "call",
+            "line": 6,
+            "column": 33
+          },
+          {
+            "name": "importHelper",
+            "type": "call",
+            "line": 6,
+            "column": 59
+          }
+        ],
+        "edges": [
+          {
+            "caller": "useImports",
+            "callerLine": 5,
+            "name": "aliasedHelper",
+            "kind": "call",
+            "resolved": null
+          },
+          {
+            "caller": "useImports",
+            "callerLine": 5,
+            "name": "importHelper",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/import-target.ts",
+              "line": 5
+            }
+          },
+          {
+            "caller": "useImports",
+            "callerLine": 5,
+            "name": "plainFn",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/import-target.ts",
+              "line": 9
+            }
+          },
+          {
+            "caller": "useImports",
+            "callerLine": 5,
+            "name": "primaryFn",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/import-target.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [
+          {
+            "module": "./import-target",
+            "names": [
+              "primaryFn",
+              "aliasedHelper",
+              "OnlyType",
+              "plainFn"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          },
+          {
+            "module": "./import-target",
+            "names": [
+              "targetNs"
+            ],
+            "line": 2,
+            "startLine": 2,
+            "endLine": 2
+          },
+          {
+            "module": "./import-target",
+            "names": [
+              "PureType"
+            ],
+            "line": 3,
+            "startLine": 3,
+            "endLine": 3
+          }
+        ],
+        "bindings": [
+          {
+            "source": "./import-target",
+            "localName": "primaryFn",
+            "importedName": "default",
+            "kind": "default",
+            "typeOnly": false,
+            "line": 1,
+            "column": 7
+          },
+          {
+            "source": "./import-target",
+            "localName": "aliasedHelper",
+            "importedName": "importHelper",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 36
+          },
+          {
+            "source": "./import-target",
+            "localName": "OnlyType",
+            "importedName": "OnlyType",
+            "kind": "named",
+            "typeOnly": true,
+            "line": 1,
+            "column": 56
+          },
+          {
+            "source": "./import-target",
+            "localName": "plainFn",
+            "importedName": "plainFn",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 66
+          },
+          {
+            "source": "./import-target",
+            "localName": "targetNs",
+            "importedName": null,
+            "kind": "namespace",
+            "typeOnly": false,
+            "line": 2,
+            "column": 12
+          },
+          {
+            "source": "./import-target",
+            "localName": "PureType",
+            "importedName": "PureType",
+            "kind": "named",
+            "typeOnly": true,
+            "line": 3,
+            "column": 14
+          }
+        ]
+      },
+      "typescript/missing-dep.ts": {
+        "defs": [
+          {
+            "name": "summonGhost",
+            "type": "function",
+            "line": 3,
+            "endLine": 5,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "'./not-yet-created'",
+            "type": "module",
+            "line": 1,
+            "column": 24
+          },
+          {
+            "name": "ghostFn",
+            "type": "call",
+            "line": 4,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "summonGhost",
+            "callerLine": 3,
+            "name": "ghostFn",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "./not-yet-created",
+            "names": [
+              "ghostFn"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          }
+        ],
+        "bindings": [
+          {
+            "source": "./not-yet-created",
+            "localName": "ghostFn",
+            "importedName": "ghostFn",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 9
+          }
+        ]
+      },
+      "typescript/nesting.ts": {
+        "defs": [
+          {
+            "name": "Outer",
+            "type": "class",
+            "line": 1,
+            "endLine": 4,
+            "column": 13,
+            "visibility": "public"
+          },
+          {
+            "name": "compute",
+            "type": "method",
+            "line": 2,
+            "endLine": 2,
+            "column": 4,
+            "parent": {
+              "name": "Outer",
+              "line": 1
+            }
+          },
+          {
+            "name": "nestHelper",
+            "type": "method",
+            "line": 3,
+            "endLine": 3,
+            "column": 4,
+            "parent": {
+              "name": "Outer",
+              "line": 1
+            }
+          },
+          {
+            "name": "nestInner",
+            "type": "function",
+            "line": 6,
+            "endLine": 6,
+            "column": 9
+          },
+          {
+            "name": "Shape",
+            "type": "type",
+            "line": 8,
+            "endLine": 8,
+            "column": 12,
+            "visibility": "public"
+          },
+          {
+            "name": "area",
+            "type": "property",
+            "line": 8,
+            "endLine": 8,
+            "column": 22,
+            "parent": {
+              "name": "Shape",
+              "line": 8
+            }
+          }
+        ],
+        "refs": [
+          {
+            "name": "nestHelper",
+            "type": "call",
+            "line": 2,
+            "column": 36
+          },
+          {
+            "name": "nestInner",
+            "type": "call",
+            "line": 2,
+            "column": 51
+          }
+        ],
+        "edges": [
+          {
+            "caller": "compute",
+            "callerLine": 2,
+            "name": "nestHelper",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/nesting.ts",
+              "line": 3
+            }
+          },
+          {
+            "caller": "compute",
+            "callerLine": 2,
+            "name": "nestInner",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/nesting.ts",
+              "line": 6
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/orphan-def.ts": {
+        "defs": [
+          {
+            "name": "orphanHelper",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/parse-error/broken.ts": {
+        "defs": [
+          {
+            "name": "brokenPrefix",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/parse-error/clean.ts": {
+        "defs": [
+          {
+            "name": "pristineFn",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/reexports/base.ts": {
+        "defs": [
+          {
+            "name": "originFn",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/reexports/consumer.ts": {
+        "defs": [
+          {
+            "name": "useOrigin",
+            "type": "function",
+            "line": 4,
+            "endLine": 6,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "'./direct'",
+            "type": "module",
+            "line": 1,
+            "column": 25
+          },
+          {
+            "name": "'./star'",
+            "type": "module",
+            "line": 2,
+            "column": 24
+          },
+          {
+            "name": "originFn",
+            "type": "call",
+            "line": 5,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "useOrigin",
+            "callerLine": 4,
+            "name": "originFn",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/reexports/base.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [
+          {
+            "module": "./direct",
+            "names": [
+              "originFn"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          },
+          {
+            "module": "./star",
+            "names": [
+              "starNs"
+            ],
+            "line": 2,
+            "startLine": 2,
+            "endLine": 2
+          }
+        ],
+        "bindings": [
+          {
+            "source": "./direct",
+            "localName": "originFn",
+            "importedName": "originFn",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 9
+          },
+          {
+            "source": "./star",
+            "localName": "starNs",
+            "importedName": null,
+            "kind": "namespace",
+            "typeOnly": false,
+            "line": 2,
+            "column": 12
+          }
+        ]
+      },
+      "typescript/reexports/cycle-a.ts": {
+        "defs": [
+          {
+            "name": "cycAlpha",
+            "type": "function",
+            "line": 3,
+            "endLine": 5,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/reexports/cycle-b.ts": {
+        "defs": [
+          {
+            "name": "cycBeta",
+            "type": "function",
+            "line": 3,
+            "endLine": 5,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "cycAlpha",
+            "type": "call",
+            "line": 4,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "cycBeta",
+            "callerLine": 3,
+            "name": "cycAlpha",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/reexports/cycle-a.ts",
+              "line": 3
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/reexports/direct.ts": {
+        "defs": [],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/reexports/star.ts": {
+        "defs": [],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/same-line.ts": {
+        "defs": [
+          {
+            "name": "slAdd",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          },
+          {
+            "name": "slDouble",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "slAdd",
+            "type": "call",
+            "line": 6,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "slDouble",
+            "callerLine": 5,
+            "name": "slAdd",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/same-line.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/shadowing.ts": {
+        "defs": [
+          {
+            "name": "shFormat",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          },
+          {
+            "name": "shReport",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "shFormat",
+            "type": "call",
+            "line": 6,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "shReport",
+            "callerLine": 5,
+            "name": "shFormat",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/shadowing.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/twins/consumer.ts": {
+        "defs": [
+          {
+            "name": "loadTwins",
+            "type": "function",
+            "line": 3,
+            "endLine": 5,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "'./twin-a'",
+            "type": "module",
+            "line": 1,
+            "column": 30
+          },
+          {
+            "name": "fetchTwinData",
+            "type": "call",
+            "line": 4,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "loadTwins",
+            "callerLine": 3,
+            "name": "fetchTwinData",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [
+          {
+            "module": "./twin-a",
+            "names": [
+              "fetchTwinData"
+            ],
+            "line": 1,
+            "startLine": 1,
+            "endLine": 1
+          }
+        ],
+        "bindings": [
+          {
+            "source": "./twin-a",
+            "localName": "fetchTwinData",
+            "importedName": "fetchTwinData",
+            "kind": "named",
+            "typeOnly": false,
+            "line": 1,
+            "column": 9
+          }
+        ]
+      },
+      "typescript/twins/twin-a.ts": {
+        "defs": [
+          {
+            "name": "fetchTwinData",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/twins/twin-b.ts": {
+        "defs": [
+          {
+            "name": "fetchTwinData",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [],
+        "edges": [],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/unimported.ts": {
+        "defs": [
+          {
+            "name": "useOrphan",
+            "type": "function",
+            "line": 1,
+            "endLine": 3,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "orphanHelper",
+            "type": "call",
+            "line": 2,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "useOrphan",
+            "callerLine": 1,
+            "name": "orphanHelper",
+            "kind": "call",
+            "resolved": {
+              "path": "typescript/orphan-def.ts",
+              "line": 1
+            }
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      },
+      "typescript/value-type-collision.ts": {
+        "defs": [
+          {
+            "name": "Result",
+            "type": "interface",
+            "line": 1,
+            "endLine": 3,
+            "column": 17,
+            "visibility": "public"
+          },
+          {
+            "name": "ok",
+            "type": "property",
+            "line": 2,
+            "endLine": 2,
+            "column": 4,
+            "parent": {
+              "name": "Result",
+              "line": 1
+            }
+          },
+          {
+            "name": "Result",
+            "type": "function",
+            "line": 5,
+            "endLine": 7,
+            "column": 16,
+            "visibility": "public"
+          },
+          {
+            "name": "makeResult",
+            "type": "function",
+            "line": 9,
+            "endLine": 11,
+            "column": 16,
+            "visibility": "public"
+          }
+        ],
+        "refs": [
+          {
+            "name": "Result",
+            "type": "type",
+            "line": 5,
+            "column": 37
+          },
+          {
+            "name": "Result",
+            "type": "type",
+            "line": 9,
+            "column": 30
+          },
+          {
+            "name": "Result",
+            "type": "call",
+            "line": 10,
+            "column": 11
+          }
+        ],
+        "edges": [
+          {
+            "caller": "Result",
+            "callerLine": 5,
+            "name": "Result",
+            "kind": "type",
+            "resolved": null
+          },
+          {
+            "caller": "makeResult",
+            "callerLine": 9,
+            "name": "Result",
+            "kind": "type",
+            "resolved": null
+          },
+          {
+            "caller": "makeResult",
+            "callerLine": 9,
+            "name": "Result",
+            "kind": "call",
+            "resolved": null
+          }
+        ],
+        "imports": [],
+        "bindings": []
+      }
+    }
+  }
+}

@@ -398,7 +398,7 @@ export class RetrievalPipeline {
     const rawLower = (conversationContext ?? "").toLowerCase();
     const explicitMention = rawLower
       ? allKeys.some((k) => {
-          const suffix = k.split("__").pop()!.toLowerCase();
+          const suffix = (k.split("__").pop() ?? "").toLowerCase();
           return suffix.length > 0 && rawLower.includes(suffix);
         })
       : false;
@@ -480,7 +480,7 @@ export class RetrievalPipeline {
 
     if (turn > 1) {
       for (const tk of afterPromo) {
-        const rank = rankMap.get(tk) ?? scored!.length;
+        const rank = rankMap.get(tk) ?? scored.length;
         if (rank >= k3) {
           state.consecutiveLowRank[tk] = (state.consecutiveLowRank[tk] ?? 0) + 1;
           if ((state.consecutiveLowRank[tk] ?? 0) >= 2) demoCand.push(tk);

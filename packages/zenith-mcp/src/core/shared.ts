@@ -157,8 +157,12 @@ export class BM25Index {
             const tfMap = new Map<string, number>();
             for (const token of tokens) tfMap.set(token, (tfMap.get(token) || 0) + 1);
             for (const [term, count] of tfMap) {
-                if (!this._postingLists.has(term)) this._postingLists.set(term, new Map());
-                this._postingLists.get(term)!.set(doc.id, count);
+                let posting = this._postingLists.get(term);
+                if (posting === undefined) {
+                    posting = new Map();
+                    this._postingLists.set(term, posting);
+                }
+                posting.set(doc.id, count);
                 this._termTotalFreqs.set(term, (this._termTotalFreqs.get(term) || 0) + count);
             }
         }
@@ -170,7 +174,10 @@ export class BM25Index {
             this._idfCache.set(term, Math.log((this._totalDocs - df + 0.5) / (df + 0.5) + 1));
         }
         for (const [term, posting] of this._postingLists) {
-            const totalTf = this._termTotalFreqs.get(term)!;
+            // Every term in _postingLists was written to _termTotalFreqs in the
+            // same loop above, so this is always defined; 0 is the correct sum
+            // identity and routes to the degenerate guard on the next line.
+            const totalTf = this._termTotalFreqs.get(term) ?? 0;
             const nDocs = posting.size;
             if (totalTf === 0 || nDocs <= 1) {
                 this._termEntropy.set(term, 0);
@@ -209,9 +216,11 @@ export class BM25Index {
             const weight = termWeights.get(term);
             if (weight === undefined) continue;
             const w = weight * qtf;
-            const posting = this._postingLists.get(term)!;
+            const posting = this._postingLists.get(term);
+            if (posting === undefined) continue;
             for (const [docId, tf] of posting) {
-                const dl = this._docLengths.get(docId)!;
+                const dl = this._docLengths.get(docId);
+                if (dl === undefined) continue;
                 const K = k1 * (1 - b + b * (dl / avgdl));
                 const tfComponent = 1 / (1 + Math.exp(-k1 * (tf - K / 2) / K));
                 scores.set(docId, (scores.get(docId) || 0) + w * tfComponent);

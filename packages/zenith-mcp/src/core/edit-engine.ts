@@ -98,7 +98,8 @@ function findMatch(content: string, oldText: string, nearLine: number | undefine
     for (let i = searchStart; i <= searchEnd - strippedOld.length; i++) {
         let isMatch = true;
         for (let j = 0; j < strippedOld.length; j++) {
-            if (contentLines[i + j]!.trim() !== strippedOld[j]) { // nosemgrep
+            const contentLine = contentLines[i + j];
+            if (contentLine === undefined || contentLine.trim() !== strippedOld[j]) {
                 isMatch = false;
                 break;
             }
@@ -129,9 +130,11 @@ function findOccurrence(haystack: string, needle: string, nearLine: number | und
     }
 
     if (occurrences.length === 0) return -1;
-    if (occurrences.length === 1) return occurrences[0]!;
+    const [firstOccurrence] = occurrences;
+    if (firstOccurrence === undefined) return -1;
+    if (occurrences.length === 1) return firstOccurrence;
 
-    let best = occurrences[0]!;
+    let best = firstOccurrence;
     let bestDist = Infinity;
     for (const idx of occurrences) {
         const lineNum = haystack.slice(0, idx).split('\n').length;
@@ -157,7 +160,9 @@ function mapTrimmedIndex(original: string, trimmed: string, trimmedIdx: number):
     const origLines = normalizedOrig.split('\n');
     let origIdx = 0;
     for (let i = 0; i < lineNum; i++) {
-        origIdx += origLines[i]!.length + 1; // nosemgrep
+        const line = origLines[i];
+        if (line === undefined) break;
+        origIdx += line.length + 1;
     }
 
     // Map the column: the trimmed column maps to the same column in the original
@@ -180,12 +185,15 @@ function findOriginalEnd(content: string, startIdx: number, numLines: number): n
 function generateDiagnostic(content: string, oldText: string, editIndex: number, isBatch: boolean | undefined): string {
     const tag = isBatch ? `Edit #${editIndex + 1}: ` : '';
     const oldLines = normalizeLineEndings(oldText).split('\n');
-    const firstOldLine = oldLines[0]!.trim();
+    const firstOldLine = (oldLines[0] ?? '').trim();
     const lines = content.split('\n');
 
     for (let i = 0; i < lines.length; i++) {
-        if (lines[i]!.trim().includes(firstOldLine) || // nosemgrep
-            (lines[i]!.trim().length > 5 && firstOldLine.includes(lines[i]!.trim()))) { // nosemgrep
+        const line = lines[i];
+        if (line === undefined) continue;
+        const trimmedLine = line.trim();
+        if (trimmedLine.includes(firstOldLine) ||
+            (trimmedLine.length > 5 && firstOldLine.includes(trimmedLine))) {
             return `${tag}oldContent not found. Near line ${i + 1}.`;
         }
     }
@@ -194,7 +202,8 @@ function generateDiagnostic(content: string, oldText: string, editIndex: number,
         const trimmed = oldLine.trim();
         if (!trimmed) continue;
         for (let i = 0; i < lines.length; i++) {
-            if (lines[i]!.includes(trimmed)) { // nosemgrep
+            const line = lines[i];
+            if (line !== undefined && line.includes(trimmed)) {
                 return `${tag}oldContent not found. Near line ${i + 1}.`;
             }
         }
@@ -267,32 +276,35 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             // to filter false-positive candidates.
             const startInputLines = normalizeLineEndings(edit.block_start).split('\n');
             const endInputLines = normalizeLineEndings(edit.block_end).split('\n');
-            const anchorStart = startInputLines[0]!.trim();
-            const anchorEnd = endInputLines[endInputLines.length - 1]!.trim();
+            const anchorStart = (startInputLines[0] ?? '').trim();
+            const anchorEnd = (endInputLines[endInputLines.length - 1] ?? '').trim();
 
             // Collect intermediate lines for verification (all lines between
             // the first line of block_start and the last line of block_end).
             // These must appear in order within the candidate range.
             const verifyLines: string[] = [];
             for (let v = 1; v < startInputLines.length; v++) {
-                const trimmed = startInputLines[v]!.trim();
+                const trimmed = (startInputLines[v] ?? '').trim();
                 if (trimmed) verifyLines.push(trimmed);
             }
             for (let v = 0; v < endInputLines.length - 1; v++) {
-                const trimmed = endInputLines[v]!.trim();
+                const trimmed = (endInputLines[v] ?? '').trim();
                 if (trimmed) verifyLines.push(trimmed);
             }
 
             const candidates: Array<{ start: number; end: number }> = [];
             for (let s = 0; s < lines.length; s++) {
-                if (lines[s]!.trim() !== anchorStart) continue;
+                const lineS = lines[s];
+                if (lineS === undefined || lineS.trim() !== anchorStart) continue;
                 for (let e = s; e < lines.length; e++) {
-                    if (lines[e]!.trim() !== anchorEnd) continue;
+                    const lineE = lines[e];
+                    if (lineE === undefined || lineE.trim() !== anchorEnd) continue;
                     // Verify intermediate lines exist in order within [s, e]
                     if (verifyLines.length > 0) {
                         let vi = 0;
                         for (let k = s + 1; k < e && vi < verifyLines.length; k++) {
-                            if (lines[k]!.trim() === verifyLines[vi]) vi++;
+                            const lineK = lines[k];
+                            if (lineK !== undefined && lineK.trim() === verifyLines[vi]) vi++;
                         }
                         if (vi < verifyLines.length) continue; // intermediate verification failed
                     }
@@ -308,12 +320,13 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
 
             let chosen: { start: number; end: number } | undefined;
             if (candidates.length === 1) {
-                chosen = candidates[0]!;
+                chosen = candidates[0];
             } else {
                 // Check disambiguations map (from stashRestore corrections)
                 const dis = disambiguations?.get(i);
                 if (dis?.startLine !== undefined) {
-                    chosen = candidates.find(c => c.start === dis.startLine! - 1);
+                    const targetStartLine = dis.startLine;
+                    chosen = candidates.find(c => c.start === targetStartLine - 1);
                     if (!chosen) {
                         errors.push({ i, msg: `${tag}no match at line ${dis.startLine}.` });
                         continue;
@@ -326,13 +339,18 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                         candidates.sort((a, b) =>
                             Math.abs(a.start - (nearLine - 1)) - Math.abs(b.start - (nearLine - 1))
                         );
-                        chosen = candidates[0]!;
+                        chosen = candidates[0];
                     } else {
                         const locs = candidates.map(c => `lines ${c.start + 1}-${c.end + 1}`).join(', ');
                         errors.push({ i, msg: `${tag}Ambiguous: ${locs}. Provide startLine or nearLine.` });
                         continue;
                     }
                 }
+            }
+
+            if (chosen === undefined) {
+                errors.push({ i, msg: `${tag}block_start not found in file.` });
+                continue;
             }
 
             const normalizedNew = normalizeLineEndings(edit.replacement_block);
@@ -364,6 +382,12 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
                 errors.push({ i, msg: `${tag}Unsupported file type.` });
                 continue;
             }
+            if (edit.symbol === undefined || edit.newText === undefined) {
+                errors.push({ i, msg: `${tag}symbol mode requires symbol and newText.` });
+                continue;
+            }
+            const editSymbol = edit.symbol;
+            const editNewText = edit.newText;
             const findSymbolOpts: { kindFilter: string; nearLine?: number } = { kindFilter: 'def' };
             if (nearLine !== undefined) findSymbolOpts.nearLine = nearLine;
             // DB-backed read: locate the symbol via the indexed
@@ -373,7 +397,7 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             // can be located for the file (e.g. file outside any known
             // project) — that's the same user-facing surface as the
             // prior "symbol queries not available" branch.
-            const symbolMatches = await loadSymbolInFile(filePath, edit.symbol!, findSymbolOpts);
+            const symbolMatches = await loadSymbolInFile(filePath, editSymbol, findSymbolOpts);
             if (symbolMatches === null) {
                 errors.push({ i, msg: `${tag}Symbol queries not available for ${langName}. Use block or content mode instead.` });
                 continue;
@@ -407,14 +431,14 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             }
             const lines = workingContent.split('\n');
             const originalText = lines.slice(startLine - 1, endLine).join('\n');
-            const normalizedNew = normalizeLineEndings(edit.newText!);
+            const normalizedNew = normalizeLineEndings(editNewText);
             const symAddedLines = normalizedNew.split('\n');
             const symRemovedCount = endLine - (startLine - 1);
             lines.splice(startLine - 1, symRemovedCount, ...symAddedLines);
             lineShifts.push({ start: startLine, delta: symAddedLines.length - symRemovedCount, removed: symRemovedCount });
             workingContent = lines.join('\n');
             pendingSnapshots.push({
-                symbol: edit.symbol!,
+                symbol: editSymbol,
                 originalText,
                 line: startLine,
                 filePath: filePath,
@@ -426,12 +450,18 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
         if (edit.mode === 'content') {
             const dis = disambiguations?.get(i);
             const nearLine = dis?.nearLine ?? edit.nearLine;
-            const match = findMatch(workingContent, edit.oldContent!, nearLine);
-            if (!match) {
-                errors.push({ i, msg: generateDiagnostic(workingContent, edit.oldContent!, i, isBatch) });
+            if (edit.oldContent === undefined || edit.newContent === undefined) {
+                errors.push({ i, msg: `${tag}content mode requires oldContent and newContent.` });
                 continue;
             }
-            const normalizedNew = normalizeLineEndings(edit.newContent!);
+            const editOldContent = edit.oldContent;
+            const editNewContent = edit.newContent;
+            const match = findMatch(workingContent, editOldContent, nearLine);
+            if (!match) {
+                errors.push({ i, msg: generateDiagnostic(workingContent, editOldContent, i, isBatch) });
+                continue;
+            }
+            const normalizedNew = normalizeLineEndings(editNewContent);
             // Finding N1: content-mode mutates `workingContent` via string
             // splicing (no `lines.splice`), but the replacement can still
             // change the line count — and the ledger must record every
@@ -450,8 +480,8 @@ async function applyEditList(content: string, edits: Edit[], { filePath, isBatch
             if (match.strategy === 'indent-stripped') {
                 const matchedLines = match.matchedText.split('\n');
                 const newLines = normalizedNew.split('\n');
-                const originalIndent = matchedLines[0]!.match(/^\s*/)?.[0] || '';
-                const oldIndent = normalizeLineEndings(edit.oldContent!).split('\n')[0]!.match(/^\s*/)?.[0] || '';
+                const originalIndent = (matchedLines[0] ?? '').match(/^\s*/)?.[0] || '';
+                const oldIndent = (normalizeLineEndings(editOldContent).split('\n')[0] ?? '').match(/^\s*/)?.[0] || '';
                 const reindentedNew = newLines.map((line, j) => {
                     if (j === 0) return originalIndent + line.trimStart();
                     const lineIndent = line.match(/^\s*/)?.[0] || '';

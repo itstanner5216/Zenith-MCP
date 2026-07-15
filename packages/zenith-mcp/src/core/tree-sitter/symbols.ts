@@ -307,11 +307,12 @@ export function selectDefinitionNode(nameNode: Node): DefinitionNodeSelection | 
         }
         cur = cur.parent;
     }
-    if (candidates.length === 0) return null;
-
-    // candidates is non-empty (just checked); the `!` is erased at compile
-    // time and preserves runtime exactly.
-    const primary = candidates[0]!;
+    // A definition selection requires at least one DEF_TYPES ancestor. The
+    // length-guarded destructure makes that invariant executable code: `primary`
+    // is `undefined` exactly when `candidates` is empty, in which case the
+    // caller falls back to its own span source.
+    const [primary] = candidates;
+    if (primary === undefined) return null;
     let span: Node = primary;
 
     // Wrapper handling: only the IMMEDIATE AST parent can promote the span.

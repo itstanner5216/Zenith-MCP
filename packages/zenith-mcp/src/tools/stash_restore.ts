@@ -112,12 +112,15 @@ export function register(server: ToolServer, ctx: ToolContext) {
             }
             // --- Edit apply ---
             if (entry.type === 'edit') {
+                const editFilePath = entry.filePath;
+                if (editFilePath === null)
+                    throw new Error(`Stash #${args.stashId} has no file path.`);
                 if (!args.dryRun) {
-                    const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath!);
+                    const canRetry = consumeAttempt(ctx, args.stashId, editFilePath);
                     if (!canRetry)
                         throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
                 }
-                const validPath = await ctx.validatePath(entry.filePath!);
+                const validPath = await ctx.validatePath(editFilePath);
                 const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
                 const edits = entry.payload.edits;
                 const corrections = args.corrections || [];

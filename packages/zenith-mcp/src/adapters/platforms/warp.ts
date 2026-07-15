@@ -80,7 +80,12 @@ class WarpAdapter extends MCPConfigAdapter {
   }
 
   writeConfig(data: Record<string, any>) {
-    const p = this.configPath()!;
+    const p: string | null = this.configPath();
+    if (p === null) {
+      throw new Error(
+        `${this.displayName}: unable to resolve MCP config path on this platform`,
+      );
+    }
 
     if (this._isDirMode()) {
       mkdirSync(p, { recursive: true });
@@ -98,7 +103,12 @@ class WarpAdapter extends MCPConfigAdapter {
 
   registerServer(name: string, config: Record<string, any>) {
     if (this._isDirMode()) {
-      const p = this.configPath()!;
+      const p: string | null = this.configPath();
+      if (p === null) {
+        throw new Error(
+          `${this.displayName}: unable to resolve MCP config path on this platform`,
+        );
+      }
       mkdirSync(p, { recursive: true });
       const dest = join(p, `${name}.json`);
       this.backup(dest);

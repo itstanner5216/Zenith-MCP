@@ -300,13 +300,23 @@ export function findProjectBoundary(
     }
 
     const compute = (): BoundaryResult | null => {
+        // Junk evidence is no evidence (finding P2-4b, 2026-07-15): the junk
+        // filter must run on the FOUND root before clamping, not only on the
+        // clamped result. A `.git` sitting at the home directory (dotfiles
+        // repos), tmp, or an OS dir is exactly the evidence isJunkRoot exists
+        // to reject — letting clampToAllowed shrink such a root into a
+        // granted subdirectory would launder junk into a plausible-looking
+        // "detected project" (home/.git + allowed ~/x ⇒ fake git root at
+        // ~/x). Junk found-roots fall through to the next detection rung; the
+        // post-clamp check stays as well, so a clamp can never move a
+        // legitimate root INTO junk territory either.
         const gitRoot = findGitRoot(resolved);
-        if (gitRoot) {
+        if (gitRoot && !isJunkRoot(gitRoot)) {
             const clamped = clampToAllowed(gitRoot, resolved, opts?.allowedDirectories);
             if (!isJunkRoot(clamped)) return { root: clamped, method: 'git' };
         }
         const markerRoot = findMarkerRoot(resolved);
-        if (markerRoot) {
+        if (markerRoot && !isJunkRoot(markerRoot)) {
             const clamped = clampToAllowed(markerRoot, resolved, opts?.allowedDirectories);
             if (!isJunkRoot(clamped)) return { root: clamped, method: 'marker' };
         }

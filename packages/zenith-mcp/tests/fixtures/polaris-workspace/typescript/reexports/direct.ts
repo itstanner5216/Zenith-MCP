@@ -1,0 +1,1 @@
+export { originFn } from './base';

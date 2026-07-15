@@ -12,11 +12,13 @@ export class SessionStateManager {
   }
 
   getOrCreateSession(sessionId: string): Set<string> {
-    if (!this._sessions.has(sessionId)) {
-      this._sessions.set(sessionId, new Set(this._config.anchorTools));
+    let session = this._sessions.get(sessionId);
+    if (session === undefined) {
+      session = new Set(this._config.anchorTools);
+      this._sessions.set(sessionId, session);
     }
     // Return a copy — callers cannot mutate internal state
-    return new Set(this._sessions.get(sessionId)!);
+    return new Set(session);
   }
 
   getActiveTools(sessionId: string): Set<string> {

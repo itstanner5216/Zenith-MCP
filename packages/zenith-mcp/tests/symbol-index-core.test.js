@@ -309,3 +309,124 @@ describe('symbol-index — pruneOldSessions', () => {
         expect(remaining[0].session_id).toBe('session-A');
     });
 });
+
+// -----------------------------------------------------------------------------
+// POLARIS Task 1.2 — honest capped walks, complete-walk deletion purge,
+// deterministic cap membership, and the source-byte safety bound.
+// -----------------------------------------------------------------------------
+
+describe('indexDirectory coverage (POLARIS Task 1.2)', () => {
+    let dir;
+    let db;
+
+    beforeEach(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'symidx-cov-'));
+        db = openMemoryDb();
+        initSymbolSchema(db);
+    });
+
+    afterEach(() => {
+        try { closeDb(db); } catch {}
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('a complete scan reports complete and still purges truly deleted files', async () => {
+        const { indexDirectory } = await importSymbolIndex();
+        fs.writeFileSync(path.join(dir, 'stay.ts'), 'export function stayFn(): number {\n    return 1;\n}\n');
+        fs.writeFileSync(path.join(dir, 'gone.ts'), 'export function goneFn(): number {\n    return 2;\n}\n');
+
+        const first = await indexDirectory(db, dir, dir);
+        expect(first).toEqual({ visited: 2, complete: true, stopReason: null });
+        expect(queryRaw(db, 'SELECT COUNT(*) AS n FROM files')[0].n).toBe(2);
+
+        fs.rmSync(path.join(dir, 'gone.ts'));
+        const second = await indexDirectory(db, dir, dir);
+        expect(second).toEqual({ visited: 1, complete: true, stopReason: null });
+        // Genuine deletion purge is preserved on complete walks.
+        expect(queryRaw(db, 'SELECT path FROM files ORDER BY path').map(r => r.path)).toEqual(['stay.ts']);
+        expect(queryRaw(db, "SELECT COUNT(*) AS n FROM symbols WHERE file_path = 'gone.ts'")[0].n).toBe(0);
+    });
+
+    it('cap membership is deterministic: the sorted-first files are indexed regardless of creation order', async () => {
+        const { indexDirectory } = await importSymbolIndex();
+        // Create in reverse-alphabetical order so readdir/creation order and
+        // sorted order disagree.
+        for (const name of ['zeta.ts', 'midd.ts', 'alfa.ts']) {
+            fs.writeFileSync(path.join(dir, name), `export function fn_${name.slice(0, 4)}(): number {\n    return 1;\n}\n`);
+        }
+        const coverage = await indexDirectory(db, dir, dir, { maxFiles: 2 });
+        expect(coverage).toEqual({ visited: 2, complete: false, stopReason: 'max_files' });
+        expect(queryRaw(db, 'SELECT path FROM files ORDER BY path').map(r => r.path)).toEqual(['alfa.ts', 'midd.ts']);
+    });
+
+    it('an exactly-at-cap walk is complete, not truncated', async () => {
+        const { indexDirectory } = await importSymbolIndex();
+        fs.writeFileSync(path.join(dir, 'a.ts'), 'export const a = 1;\n');
+        fs.writeFileSync(path.join(dir, 'b.ts'), 'export const b = 2;\n');
+        const coverage = await indexDirectory(db, dir, dir, { maxFiles: 2 });
+        expect(coverage).toEqual({ visited: 2, complete: true, stopReason: null });
+    });
+});
+
+describe('source-byte safety bound (POLARIS Task 1.2)', () => {
+    let dir;
+    let db;
+
+    beforeEach(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'symidx-big-'));
+        db = openMemoryDb();
+        initSymbolSchema(db);
+    });
+
+    afterEach(() => {
+        try { closeDb(db); } catch {}
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    });
+
+    it('an over-limit file is typed too_large: sentinel recorded, never parsed, prior facts kept', async () => {
+        const { indexFile, ensureFreshFromContent, PROVISIONAL_MAX_SOURCE_BYTES, TOO_LARGE_SENTINEL_PREFIX } = await importSymbolIndex();
+
+        // Start with a small, real version so prior facts exist.
+        const abs = path.join(dir, 'grown.ts');
+        const smallContent = 'export function grownFn(): number {\n    return 1;\n}\n';
+        fs.writeFileSync(abs, smallContent);
+        expect(await indexFile(db, dir, abs)).toBe('indexed');
+        const factsBefore = queryRaw(db, "SELECT COUNT(*) AS n FROM symbols WHERE file_path = 'grown.ts'")[0].n;
+        expect(factsBefore).toBeGreaterThan(0);
+
+        // Grow it past the bound via the content-addressed path (no giant
+        // disk write needed) — one valid statement plus filler comments.
+        const filler = '// ' + 'x'.repeat(1024) + '\n';
+        const bigContent = smallContent + filler.repeat(Math.ceil(PROVISIONAL_MAX_SOURCE_BYTES / filler.length) + 1);
+        expect(Buffer.byteLength(bigContent, 'utf8')).toBeGreaterThan(PROVISIONAL_MAX_SOURCE_BYTES);
+
+        const result = await ensureFreshFromContent(db, dir, abs, bigContent);
+        expect(result).toBe(0); // no facts were (re)indexed
+
+        // Typed sentinel recorded in files.hash; versioned; carries the content hash.
+        const hash = queryRaw(db, "SELECT hash FROM files WHERE path = 'grown.ts'")[0].hash;
+        expect(hash.startsWith(TOO_LARGE_SENTINEL_PREFIX)).toBe(true);
+
+        // Prior facts were NOT purged — a skip is not evidence of emptiness.
+        const factsAfter = queryRaw(db, "SELECT COUNT(*) AS n FROM symbols WHERE file_path = 'grown.ts'")[0].n;
+        expect(factsAfter).toBe(factsBefore);
+
+        // Shrinking back under the bound heals through the normal path.
+        const healed = await ensureFreshFromContent(db, dir, abs, smallContent + '// changed\n');
+        expect(healed).toBe(1);
+        const healedHash = queryRaw(db, "SELECT hash FROM files WHERE path = 'grown.ts'")[0].hash;
+        expect(healedHash.startsWith(TOO_LARGE_SENTINEL_PREFIX)).toBe(false);
+    });
+
+    it('a brand-new over-limit file records the sentinel with zero fact rows', async () => {
+        const { indexFile, PROVISIONAL_MAX_SOURCE_BYTES, TOO_LARGE_SENTINEL_PREFIX } = await importSymbolIndex();
+        const abs = path.join(dir, 'huge.ts');
+        const filler = '// ' + 'y'.repeat(1024) + '\n';
+        const bigContent = filler.repeat(Math.ceil(PROVISIONAL_MAX_SOURCE_BYTES / filler.length) + 1);
+
+        expect(await indexFile(db, dir, abs, bigContent)).toBe('too_large');
+        const hash = queryRaw(db, "SELECT hash FROM files WHERE path = 'huge.ts'")[0].hash;
+        expect(hash.startsWith(TOO_LARGE_SENTINEL_PREFIX)).toBe(true);
+        expect(queryRaw(db, "SELECT COUNT(*) AS n FROM symbols WHERE file_path = 'huge.ts'")[0].n).toBe(0);
+    });
+});

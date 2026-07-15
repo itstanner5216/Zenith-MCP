@@ -21,7 +21,12 @@ class GptmeAdapter extends MCPConfigAdapter {
   }
 
   writeConfig(data: Record<string, unknown>) {
-    const p = this.configPath()!;
+    const p: string | null = this.configPath();
+    if (p === null) {
+      throw new Error(
+        `${this.displayName}: unable to resolve MCP config path on this platform`,
+      );
+    }
     mkdirSync(dirname(p), { recursive: true });
     this.backup(p);
     writeToml(p, data);

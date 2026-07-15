@@ -1,16 +1,22 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { getDb } from './symbol-index.js';
+import { getDb, createProjectIndexAddress, createGlobalIndexAddress } from './symbol-index.js';
+import type { IndexAddress } from './symbol-index.js';
 import { ProjectRegistry } from './project-registry.js';
 import type { ProjectManifest } from './project-registry.js';
 import { normalizePath } from './path-utils.js';
 import {
     DbConnection,
     openDb,
+    closeDb,
     initStashSchema,
+    initSymbolSchema,
     initObservationSchema,
     recordProjectObservation,
+    getLegacyGlobalFilePaths,
+    rewriteLegacyGlobalRows,
+    getAllProjectRootPaths,
 } from './db-adapter.js';
 import type { ProjectEntry } from '../config/schema.js';
 import { expandTilde, CONFIG_PATH } from '../config/schema.js';
@@ -42,6 +48,119 @@ function getGlobalDb(): DbConnection {
     fs.mkdirSync(ZENITH_HOME, { recursive: true });
     _globalDb = openDb(GLOBAL_DB_PATH);
     return _globalDb;
+}
+
+/**
+ * The ONE production accessor for the global database connection
+ * (POLARIS Task 1.4): every subsystem that needs the global store — stash,
+ * config backups, observations, and the intelligence path — shares this
+ * private connection. No second code path may open GLOBAL_DB_PATH, and the
+ * path constant itself is never exported.
+ */
+export function getGlobalDbConnection(): DbConnection {
+    return getGlobalDb();
+}
+
+/** Close and forget the shared global connection (tests / clean shutdown). */
+export function closeGlobalDb(): void {
+    if (_globalDb) {
+        try { closeDb(_globalDb); } catch { /* already closed */ }
+        _globalDb = null;
+        _globalSymbolState = null;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global symbol-store initialization (POLARIS Task 1.4, Decision 21)
+// ---------------------------------------------------------------------------
+
+type LegacyGlobalRowsOutcome = 'none' | 'migrated' | 'quarantined';
+
+let _globalSymbolState: { legacyGlobalRows: LegacyGlobalRowsOutcome } | null = null;
+
+/**
+ * Initialize the global store for symbol facts, once per process:
+ *   1. future-schema inspection happens FIRST (inside initSymbolSchema — a
+ *      newer database is refused with zero physical change);
+ *   2. symbol and stash schemas initialize idempotently side by side;
+ *   3. unprefixed legacy symbol rows take one of three explicit paths:
+ *      none → proceed; exactly one provable current-allowed root registered
+ *      in project_roots that contains every legacy key, with a collision-free
+ *      mapping → one transactional rewrite onto `g/<hash>/` keys; anything
+ *      else → rows are preserved untouched, excluded from scoped reads by
+ *      the g/ prefix discipline, and reported as quarantined
+ *      (`legacy_global_scope_ambiguous`).
+ */
+function ensureGlobalSymbolStore(conn: DbConnection, allowedDirs: readonly string[]): LegacyGlobalRowsOutcome {
+    if (_globalSymbolState) return _globalSymbolState.legacyGlobalRows;
+
+    initSymbolSchema(conn);   // includes the FUTURE_SCHEMA refusal, read-only, first
+    ensureStashTables(conn);
+
+    let outcome: LegacyGlobalRowsOutcome = 'none';
+    const legacyKeys = getLegacyGlobalFilePaths(conn);
+    if (legacyKeys.length > 0) {
+        outcome = 'quarantined';
+        // Candidate roots: project_roots entries that are CURRENT allowed
+        // roots and syntactically contain every legacy key (relative,
+        // non-escaping). Exactly one candidate authorizes the rewrite.
+        const allowedResolved = new Set(allowedDirs.map((d) => {
+            const resolved = path.resolve(d);
+            try { return fs.realpathSync(resolved); } catch { return resolved; }
+        }));
+        const keysContained = legacyKeys.every((k) =>
+            !path.isAbsolute(k) && !k.split('/').includes('..') && !k.split(path.sep).includes('..'));
+        if (keysContained) {
+            const candidates: string[] = [];
+            try {
+                for (const row of getAllProjectRootPaths(conn)) {
+                    const resolved = path.resolve(row.root_path);
+                    let canonical = resolved;
+                    try { canonical = fs.realpathSync(resolved); } catch { /* gone — not current */ }
+                    if (allowedResolved.has(canonical)) candidates.push(canonical);
+                }
+            } catch { /* project_roots unreadable — stay quarantined */ }
+            if (candidates.length === 1 && candidates[0] !== undefined) {
+                const root = candidates[0];
+                const address = createGlobalIndexAddress(conn, root);
+                const mapping: Array<{ oldKey: string; newKey: string }> = [];
+                const targets = new Set<string>();
+                let collision = false;
+                for (const oldKey of legacyKeys) {
+                    const newKey = address.toStoreKey(path.join(root, oldKey));
+                    if (newKey === null || targets.has(newKey)) { collision = true; break; }
+                    targets.add(newKey);
+                    mapping.push({ oldKey, newKey });
+                }
+                if (!collision) {
+                    try {
+                        rewriteLegacyGlobalRows(conn, mapping);
+                        outcome = 'migrated';
+                    } catch (e) {
+                        // Collision or FK inconsistency — the transaction rolled
+                        // back; rows stay preserved and quarantined.
+                        console.error(`[ProjectContext] legacy global rewrite refused: ${e instanceof Error ? e.message : String(e)}`);
+                        outcome = 'quarantined';
+                    }
+                }
+            }
+        }
+        if (outcome === 'quarantined') {
+            console.error(`[ProjectContext] ${legacyKeys.length} legacy global symbol row(s) preserved but quarantined (legacy_global_scope_ambiguous)`);
+        }
+    }
+
+    _globalSymbolState = { legacyGlobalRows: outcome };
+    return outcome;
+}
+
+/** The store handle AstIntelligence sessions route through (Task 1.4). */
+export interface IntelligenceStore {
+    address: IndexAddress;
+    /** Legacy unprefixed rows in the global store: none, migrated, or quarantined. */
+    legacyGlobalRows: LegacyGlobalRowsOutcome;
+    /** Coverage issue name when quarantined rows exist (Decision 21). */
+    issue: 'legacy_global_scope_ambiguous' | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +307,63 @@ export class ProjectContext {
         const conn = getGlobalDb();
         ensureStashTables(conn);
         return { db: conn, root: null, isGlobal: true };
+    }
+
+    /**
+     * The AstIntelligence store route (POLARIS Task 1.4). Obeys the same
+     * anti-litter materialization gate as getStashDb: only EXPLICIT and
+     * REGISTRY bindings may touch a project `.mcp/symbols.db`; a
+     * DETECTED-but-unpromoted root routes to the GLOBAL store, scoped to the
+     * longest allowed root containing the anchor — the intelligence path
+     * never materializes a project database anywhere. Promotion upgrades
+     * routing on the next store request.
+     *
+     * Global mode initializes symbol + stash schemas side by side (once per
+     * process; future-schema inspection first) and resolves the legacy
+     * unprefixed-row question exactly once (none / migrated / quarantined).
+     */
+    getIntelligenceStore(anchor?: string): IntelligenceStore {
+        const root = this.getRoot(anchor);
+        if (root && (this._tier === 'explicit' || this._tier === 'registry')) {
+            const conn = getDb(root); // existing project DB route (initSymbolSchema inside)
+            return {
+                address: createProjectIndexAddress(conn, root),
+                legacyGlobalRows: 'none',
+                issue: null,
+            };
+        }
+
+        // Global route: the longest allowed root containing the anchor owns
+        // the scope (Decision 20); with no containing allowed root, the
+        // anchor's own directory is the scope surrogate (never-refuse), and
+        // with no anchor at all, the first allowed dir or the home directory.
+        const allowedDirs = this._ctx.getAllowedDirectories();
+        let scopeRoot: string | null = null;
+        if (anchor) {
+            const resolvedAnchor = path.resolve(anchor);
+            let best: string | null = null;
+            for (const dir of allowedDirs) {
+                const resolved = path.resolve(dir);
+                if (resolvedAnchor === resolved || resolvedAnchor.startsWith(resolved + path.sep)) {
+                    if (!best || resolved.length > best.length) best = resolved;
+                }
+            }
+            scopeRoot = best ?? (fs.existsSync(resolvedAnchor) && fs.statSync(resolvedAnchor).isDirectory()
+                ? resolvedAnchor
+                : path.dirname(resolvedAnchor));
+        } else {
+            scopeRoot = allowedDirs.length > 0 && allowedDirs[0] !== undefined
+                ? path.resolve(allowedDirs[0])
+                : os.homedir();
+        }
+
+        const conn = getGlobalDb();
+        const legacyGlobalRows = ensureGlobalSymbolStore(conn, allowedDirs);
+        return {
+            address: createGlobalIndexAddress(conn, scopeRoot),
+            legacyGlobalRows,
+            issue: legacyGlobalRows === 'quarantined' ? 'legacy_global_scope_ambiguous' : null,
+        };
     }
 
     /**

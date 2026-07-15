@@ -19,7 +19,9 @@ import {
     updateSymbolExtras,
     insertSymbolStructure,
     getSymbolStructure,
+    readSymbolStructure,
     findSymbolStructuresByName,
+    execRaw,
     insertAnchor,
     getAnchorsForFile,
     insertImport,
@@ -199,8 +201,9 @@ describe('findSymbolStructuresByName', () => {
         const id = addSymbol(db, { name: 'compute', type: 'function', filePath: 'src/bar.ts' });
         insertSymbolStructure(db, { symbolId: id, paramsJson: '[]', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
 
-        const rows = findSymbolStructuresByName(db, 'compute');
+        const { rows, corrupt } = findSymbolStructuresByName(db, 'compute');
         expect(rows).toHaveLength(1);
+        expect(corrupt).toHaveLength(0);
         expect(rows[0].file_path).toBe('src/bar.ts');
     });
 
@@ -208,12 +211,62 @@ describe('findSymbolStructuresByName', () => {
         const id = addSymbol(db, { name: 'Widget', type: 'class', line: 1, endLine: 20, filePath: 'src/bar.ts' });
         insertSymbolStructure(db, { symbolId: id, paramsJson: '[]', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
 
-        expect(findSymbolStructuresByName(db, 'Widget', 'class')).toHaveLength(1);
-        expect(findSymbolStructuresByName(db, 'Widget', 'function')).toHaveLength(0);
+        expect(findSymbolStructuresByName(db, 'Widget', 'class').rows).toHaveLength(1);
+        expect(findSymbolStructuresByName(db, 'Widget', 'function').rows).toHaveLength(0);
     });
 
-    it('returns empty array when name not found', () => {
-        expect(findSymbolStructuresByName(db, 'nonExistentSymbol')).toHaveLength(0);
+    it('returns empty rows when name not found', () => {
+        const result = findSymbolStructuresByName(db, 'nonExistentSymbol');
+        expect(result.rows).toHaveLength(0);
+        expect(result.corrupt).toHaveLength(0);
+    });
+
+    // POLARIS Task 1.1 — corrupt structure JSON is a typed, loud condition,
+    // never an empty shape.
+    it('reports corrupt JSON rows in `corrupt` with row/file/line/detail', () => {
+        const okId = addSymbol(db, { name: 'twin', type: 'function', filePath: 'src/bar.ts', line: 3, endLine: 5 });
+        insertSymbolStructure(db, { symbolId: okId, paramsJson: '["x"]', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
+        const badId = addSymbol(db, { name: 'twin', type: 'function', filePath: 'src/bar.ts', line: 10, endLine: 12 });
+        insertSymbolStructure(db, { symbolId: badId, paramsJson: '{not json', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
+
+        const { rows, corrupt } = findSymbolStructuresByName(db, 'twin');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].symbol_id).toBe(okId);
+        expect(corrupt).toHaveLength(1);
+        expect(corrupt[0].rowId).toBe(badId);
+        expect(corrupt[0].filePath).toBe('src/bar.ts');
+        expect(corrupt[0].line).toBe(10);
+        expect(corrupt[0].detail).toContain('params_json');
+    });
+
+    it('valid-JSON-wrong-shape (non-array) is corruption too, not data', () => {
+        const id = addSymbol(db, { name: 'shapely', type: 'function', filePath: 'src/bar.ts' });
+        insertSymbolStructure(db, { symbolId: id, paramsJson: '{"a":1}', returnText: null, decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
+        const { rows, corrupt } = findSymbolStructuresByName(db, 'shapely');
+        expect(rows).toHaveLength(0);
+        expect(corrupt).toHaveLength(1);
+        expect(corrupt[0].detail).toContain('not a JSON array');
+    });
+
+    it('readSymbolStructure returns the typed ok | missing | corrupt result', () => {
+        const id = addSymbol(db, { name: 'typedRead', type: 'function', filePath: 'src/bar.ts' });
+        insertSymbolStructure(db, { symbolId: id, paramsJson: '["n"]', returnText: 'number', decoratorsJson: '[]', modifiersJson: '[]', genericsText: null, parentKind: null, parentName: null });
+
+        const ok = readSymbolStructure(db, id);
+        expect(ok.status).toBe('ok');
+        expect(ok.structure.params).toEqual(['n']);
+
+        expect(readSymbolStructure(db, 999999).status).toBe('missing');
+
+        execRaw(db, `UPDATE symbol_structures SET modifiers_json = '[broken' WHERE symbol_id = ${id}`);
+        const corrupt = readSymbolStructure(db, id);
+        expect(corrupt.status).toBe('corrupt');
+        expect(corrupt.corruption.rowId).toBe(id);
+        expect(corrupt.corruption.detail).toContain('modifiers_json');
+
+        // The compat surface throws loudly on corruption — it can never be
+        // observed as [] or null.
+        expect(() => getSymbolStructure(db, id)).toThrow(/STRUCTURE_CORRUPT/);
     });
 });
 

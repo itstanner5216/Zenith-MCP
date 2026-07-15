@@ -92,8 +92,12 @@ function _applyFamilyCap(tokens: Record<string, number>): Record<string, number>
     const families: Map<string, string[]> = new Map();
     for (const tok of Object.keys(result)) {
       const family = tok.split(":")[0] + ":";
-      if (!families.has(family)) families.set(family, []);
-      families.get(family)!.push(tok);
+      let members = families.get(family);
+      if (members === undefined) {
+        members = [];
+        families.set(family, members);
+      }
+      members.push(tok);
     }
 
     const currentTotal = Object.values(result).reduce((s, v) => s + v, 0);
@@ -127,7 +131,7 @@ export function buildTokens(input: {
 
   // Manifests
   for (const filepath of input.foundFiles) {
-    const basename = filepath.split("/").pop()!;
+    const basename = filepath.split("/").pop() ?? "";
     if (MANIFEST_LANGUAGE_MAP[basename] !== undefined) {
       raw[`manifest:${basename}`] = TOKEN_WEIGHTS["manifest:"];
       for (const lang of MANIFEST_LANGUAGE_MAP[basename]) {
@@ -138,7 +142,7 @@ export function buildTokens(input: {
 
   // Lockfiles
   for (const filepath of input.foundFiles) {
-    const basename = filepath.split("/").pop()!;
+    const basename = filepath.split("/").pop() ?? "";
     if (LOCKFILE_NAMES.has(basename)) {
       raw[`lock:${basename}`] = TOKEN_WEIGHTS["lock:"];
     }
@@ -156,7 +160,7 @@ export function buildTokens(input: {
 
   // Containers
   for (const f of input.foundFiles) {
-    const basename = f.split("/").pop()!;
+    const basename = f.split("/").pop() ?? "";
     if (CONTAINER_FILES.has(basename)) {
       raw[`container:${basename}`] = TOKEN_WEIGHTS["container:"];
     }
@@ -164,7 +168,7 @@ export function buildTokens(input: {
 
   // Infra
   for (const f of input.foundFiles) {
-    const basename = f.split("/").pop()!;
+    const basename = f.split("/").pop() ?? "";
     if (INFRA_FILES.has(basename)) {
       raw[`infra:${basename}`] = TOKEN_WEIGHTS["infra:"];
     }
@@ -172,7 +176,7 @@ export function buildTokens(input: {
 
   // DB
   for (const f of input.foundFiles) {
-    const basename = f.split("/").pop()!;
+    const basename = f.split("/").pop() ?? "";
     if (DB_FILES.has(basename)) {
       raw[`db:${basename}`] = TOKEN_WEIGHTS["db:"];
     }

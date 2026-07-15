@@ -20,7 +20,12 @@ class AntigravityAdapter extends MCPConfigAdapter {
   }
 
   writeConfig(data: Record<string, any>) {
-    const p = this.configPath()!;
+    const p: string | null = this.configPath();
+    if (p === null) {
+      throw new Error(
+        `${this.displayName}: unable to resolve MCP config path on this platform`,
+      );
+    }
     this.backup(p);
     mkdirSync(join(p, ".."), { recursive: true });
     writeFileSync(p, JSON.stringify(data, null, 2) + "\n", "utf-8");

@@ -11,20 +11,26 @@
 //     grandparent named "Outer" (#16/#6); link iff exactly one survives. Parent
 //     lookups are memoized for the pass to avoid an N+1 (#61).
 //
-// Concurrency: ON DELETE SET NULL on edges.callee_symbol_id means if a callee
-// file is re-indexed, stale resolutions auto-null. A fresh resolve pass re-reads
-// those nulls and re-resolves them — the healing semantics are preserved.
+// Atomicity (POLARIS Task 1.3): resolution is part of the affected-name
+// protocol that runs INSIDE persistParsedFile's outer transaction — replace
+// facts, clear every stale target for the changed definition names, and
+// re-resolve the affected names before commit. No cleared-but-owed state can
+// ever commit; a fault at any statement leaves the entire old state or the
+// entire new state. (The old design cleared via ON DELETE SET NULL and owed
+// re-resolution to "the next sweep" — a later same-byte freshness check
+// never triggers that sweep, which was defect G7's second half.)
 //
-// Trigger: resolveAllEdgeTargets(conn) is called once per indexDirectory batch,
-// after all files are persisted — ONE pass over the whole DB (review #18,
-// "Performance Is Correctness": the old per-file loop was an N+1). The single-
-// file resolveEdgeTargets(conn, filePath) remains for callers that resolve one
-// file's edges. NOTE: single-file indexFile() deliberately does NOT resolve —
-// it is too expensive for interactive edits; the batch pass heals afterwards.
+// resolveEdgesForNames is the affected-name entry the persist path uses.
+// resolveAllEdgeTargets remains as the full-database entry for tests,
+// backfills, and clean-rebuild oracles — production persistence no longer
+// needs it.
 // ---------------------------------------------------------------------------
 
 import type { DbConnection } from '../db-adapter.js';
-import { runTransaction, getUnresolvedEdges, getAllUnresolvedEdges, findDefsByName, findSymbolParent, updateEdgeCalleeSymbol } from '../db-adapter.js';
+import {
+    runTransaction, getUnresolvedEdges, getAllUnresolvedEdges, getUnresolvedEdgesByNames,
+    findDefsByName, findSymbolParent, updateEdgeCalleeSymbol,
+} from '../db-adapter.js';
 
 /** An unresolved edge tagged with the file its caller (container def) lives in. */
 interface PendingEdge {
@@ -173,10 +179,33 @@ function resolveNameGroup(conn: DbConnection, name: string, edges: PendingEdge[]
 }
 
 /**
+ * Affected-name resolution (POLARIS Task 1.3): resolve every unresolved edge
+ * whose referenced name is in `names`, and nothing else. This is the entry
+ * the persist path calls INSIDE its outer transaction — runTransaction is
+ * SAVEPOINT-aware, so this nests correctly and commits/rolls back with the
+ * file replacement it belongs to. Work scales with the edit's blast radius,
+ * not the database size.
+ */
+export function resolveEdgesForNames(conn: DbConnection, names: readonly string[]): void {
+    if (names.length === 0) return;
+    const unresolved = getUnresolvedEdgesByNames(conn, names);
+    if (unresolved.length === 0) return;
+
+    const named = unresolved.map((e) => ({ name: e.referenced_name, edge: { id: e.id, callerFilePath: e.caller_file_path } }));
+    const byName = groupByName(named);
+
+    const parentMemo = new Map<number, ParentRow>();
+    runTransaction(conn, () => {
+        for (const [name, edges] of byName) {
+            resolveNameGroup(conn, name, edges, parentMemo);
+        }
+    });
+}
+
+/**
  * Resolve unresolved edges whose caller (container def) lives in `filePath`.
  * All such edges share one caller file, so candidates are still fetched once
- * per name. Retained for callers that resolve a single file's edges; the batch
- * pass (resolveAllEdgeTargets) is preferred for whole-directory indexing.
+ * per name. Retained for callers that resolve a single file's edges.
  */
 export function resolveEdgeTargets(conn: DbConnection, filePath: string): void {
     const unresolved = getUnresolvedEdges(conn, filePath);
@@ -196,15 +225,14 @@ export function resolveEdgeTargets(conn: DbConnection, filePath: string): void {
 }
 
 /**
- * Whole-DB resolution in ONE pass (review #18). Fetches every unresolved edge
- * once, groups by referenced name, fetches each distinct name's candidate set
- * ONCE, and resolves per edge against the edge's caller file. Replaces the
- * per-file loop in symbol-index.ts that re-ran resolution (and re-queried) for
- * every file — an N+1 the "Performance Is Correctness" constraint forbids.
+ * Whole-DB resolution in ONE pass. Fetches every unresolved edge once, groups
+ * by referenced name, fetches each distinct name's candidate set ONCE, and
+ * resolves per edge against the edge's caller file.
  *
- * Healing: a re-indexed callee nulls stale rows via ON DELETE SET NULL; a fresh
- * call here re-reads those nulls and re-resolves them, so the self-healing
- * sweep semantics are unchanged.
+ * Role since POLARIS Task 1.3: the TEST/BACKFILL entry — the clean-rebuild
+ * oracle ("null every target, resolve from scratch") and historical-database
+ * backfills use it. Production persistence resolves affected names inside
+ * its own transaction (resolveEdgesForNames) and does not call this.
  */
 export function resolveAllEdgeTargets(conn: DbConnection): void {
     const unresolved = getAllUnresolvedEdges(conn);

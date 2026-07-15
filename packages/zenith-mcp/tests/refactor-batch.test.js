@@ -465,3 +465,44 @@ describe('refactor_batch restore mode', () => {
         await fs.writeFile(path.join(tmpRepo, 'a.js'), origContent, 'utf-8');
     });
 });
+
+// -----------------------------------------------------------------------------
+// POLARIS Task 1.1 — corrupt structure JSON on the refactor path gets exactly
+// one forced-rebuild correction, then proceeds; it is never treated as absent
+// facts.
+// -----------------------------------------------------------------------------
+
+describe('corrupt structure rows on the loadDiff path', () => {
+    it('a corrupt row is repaired by one forced rebuild and the load succeeds', async () => {
+        const db = getDb(tmpRepo);
+        const handler = server.tool.handler;
+
+        // Prime the index (any loadDiff indexes the repo first).
+        await handler({ mode: 'loadDiff', selection: [{ symbol: 'validateCard' }] });
+
+        // Corrupt every validateCard structure row behind the adapter's back —
+        // the write-path bug this defends against.
+        const { execRaw, queryRaw } = await import('../dist/core/db-adapter.js');
+        execRaw(db, `UPDATE symbol_structures SET params_json = '{corrupt!'
+            WHERE symbol_id IN (SELECT id FROM symbols WHERE name = 'validateCard' AND kind = 'def')`);
+        const corruptedCount = queryRaw(db, `SELECT COUNT(*) AS n FROM symbol_structures ss
+            JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = 'validateCard' AND ss.params_json = '{corrupt!'`)[0].n;
+        expect(corruptedCount).toBeGreaterThan(0); // precondition: corruption seeded
+
+        // The load must succeed — the correction force-rebuilds the affected
+        // files' facts once (delete + reindex; the freshness path is hash-gated
+        // and the bytes on disk never changed), replacing the corrupt rows.
+        const res = await handler({ mode: 'loadDiff', selection: [{ symbol: 'validateCard' }] });
+        expect(res.content[0].text.length).toBeGreaterThan(0);
+        expect(res.content[0].text).not.toContain('STRUCTURE_CORRUPT');
+
+        // And the rows are actually repaired in the store, not just tolerated.
+        const stillCorrupt = queryRaw(db, `SELECT COUNT(*) AS n FROM symbol_structures ss
+            JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = 'validateCard' AND ss.params_json = '{corrupt!'`)[0].n;
+        expect(stillCorrupt).toBe(0);
+        // The rebuild restored real structure rows for every definition.
+        const repaired = queryRaw(db, `SELECT COUNT(*) AS n FROM symbol_structures ss
+            JOIN symbols s ON s.id = ss.symbol_id WHERE s.name = 'validateCard' AND s.kind = 'def'`)[0].n;
+        expect(repaired).toBe(corruptedCount);
+    });
+});

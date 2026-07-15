@@ -145,15 +145,15 @@ The acceptance client is a purpose-built reference harness, not a current MCP to
 
 ## Verified implementation ground
 
-Ground is the current `d7f086b68f4bf7355376d21432e652fd4dc2aa0a` checkout. The following claims were re-read in this checkout; the prior judgment's Node-26 harness results are accepted as supplied evidence but were not rerun during this synthesis.
+Ground is the `d7f086b68f4bf7355376d21432e652fd4dc2aa0a` checkout as amended by the 2026-07-14 detection rebuild (re-pin `git rev-parse HEAD` at Wave 0 — the worktree's git metadata is outside the tree, so no pin is verifiable from within it). The following claims were re-read in this checkout; the prior judgment's Node-26 harness results are accepted as supplied evidence but were not rerun during this synthesis. A 2026-07-14 independent verification pass subsequently re-confirmed every receipt below against source (line-exact in nearly all cases) and empirically reproduced G5 same-line dedup loss, G7 stale-positive persistence, G8 capped-walk purge, G12 upsert cascade, and silent future-schema acceptance as live harnesses against the built dist. One addendum: `getFileFacts` also returns a line-keyed `referenceEdges` field beyond the families listed below; it belongs to the raw-edge row of the fact ledger and is already covered by that ledger row.
 
 - `core/indexing/extract.ts:50-239` performs one parse and emits symbols, parent links, structures, anchors, statement imports, binding imports, injections, local scopes, and raw name edges. Its `name:kind:line` key at line 78 still drops repeated same-line references.
 - `core/indexing/persist.ts:18-95` writes one file in a transaction and is the sole persistent fact path.
-- `core/db-adapter.ts:95-335` is schema v4, but base DDL/ad-hoc mutations run before the schema version is read at line 186. `files` still uses `INSERT OR REPLACE` at lines 441-446.
-- `core/indexing/resolve.ts:4-16,144-170,209-224` resolves a unique same-file definition or globally unique name and only scans null `callee_symbol_id` rows. It proves neither import/export reachability nor recovery after a competitor appears.
+- `core/db-adapter.ts` is schema v4, but base DDL/ad-hoc mutations run before the schema version is read (`normalizeSchemaVersionTable` at ~line 186), and a version newer than the ladder is silently accepted — the migration blocks are all `currentVersion < N` guards with no upper-bound refusal, so a v99 database re-initializes without any error or signal (empirically confirmed 2026-07-14). The defect Task 1.1 fixes is therefore twofold: the pre-read DDL window and the missing FUTURE_SCHEMA rejection. `files` still uses `INSERT OR REPLACE` in `upsertFile` (~line 445); empirically, re-upserting a file cascade-deletes its child symbol rows (benign today only because `persist.ts` deletes children first — latent for any future file-keyed derived state).
+- `core/indexing/resolve.ts` (resolveNameGroup 114-173: same-file unique 153-160, globally unique 165-168; resolveAllEdgeTargets 209-225) resolves a unique same-file definition or globally unique name and only scans null `callee_symbol_id` rows. It proves neither import/export reachability nor recovery after a competitor appears — empirically confirmed 2026-07-14: after a competing same-name definition lands in a second file, the previously resolved edge still points at the original target through repeated resolver passes. Note this file is `core/indexing/resolve.ts`; no `core/tree-sitter/resolve.ts` exists (a sibling plan cites the wrong path).
 - `core/symbol-index.ts:196-239` indexes supplied content bytes correctly; `245-301` silently truncates a walk and then purges every unvisited row; `358-381` runs the resolver only after a hash miss. Same-byte freshness cannot heal a committed clear.
 - `core/indexed-symbols.ts:79-193` correctly centralizes several DB-backed reads, but qualified containment is reconstructed by line ranges instead of persisted parent IDs and no global `ProjectContext` route exists.
-- `core/project-context.ts:96-105,239-301,400-402` routes any unregistered allowed path to the global store, while that global store currently initializes stash tables only.
+- `core/project-context.ts` was rebuilt on 2026-07-14 and is now the single routing authority with automatic detection INSIDE the class: resolution is explicit binding -> config-file registry (`~/.zenith-mcp/config`) -> boundary detection (pure-fs git/marker walk in `core/detection/boundaries.ts` plus caller-cwd evidence in `core/detection/process-tree.ts`, both private — `tests/detection-encapsulation.test.js` fails the suite if any other module imports them) -> global fallback. Detection is signal, promotion is explicit (anti-litter): only registered/promoted roots materialize `.mcp/symbols.db`, gated in `getStashDb`/`getWorkingRoot`. The global store still initializes stash tables only — the global symbol schema remains Task 1.4 work. The dead Gen-2 ladder (`utils/project-scope.ts`, `utils/process-tree.ts`) was deleted the same day (recovered copies are parked in `recovered-project-scoping/` at the repo root and must never be imported by production code); `docs/ARCHITECTURE.md` §5.8/§12 and `docs/Developers-Guide.md` were corrected to match. Remaining dual-routing seams — `tools/edit_file.ts` (`findRepoRoot` beside `getProjectContext`), `core/compression.ts`, `core/indexed-symbols.ts` — are expected and die with the fleet rebuild; nothing new may route through them.
 - `tools/edit_file.ts:54-108` demonstrates that Zenith's existing edit lifecycle has a viable pre-bytes/post-freshness seam. This is repository evidence for the lifecycle contract only; POLARIS does not integrate with, preserve, or use the current tool as an acceptance oracle.
 - `core/tree-sitter.ts:1-47` is the sanctioned parse-only barrel and already exports `checkSyntaxErrors`; it does not expose fact extractors.
 - `core/compression.ts:1-126` is raw-fact transport into one `compressFile` call. POLARIS must not add shaping, ranking, budgeting, formatting, or post-processing there.
@@ -165,6 +165,9 @@ Ground is the current `d7f086b68f4bf7355376d21432e652fd4dc2aa0a` checkout. The f
 - Large-scale latency/RSS, 1,000-edit clean equivalence, 512-file SCC, CAS contention, and p99 cap values are unmeasured until Waves 0 and 7 run their harnesses.
 - The permission-sensitive three-test exception recorded by the judgment still needs a permission-faithful host.
 - No assertion in this plan depends on current tool output parity. The only current-tool reference is evidence that a before/after lifecycle seam has existed; the reference client supplies the actual acceptance proof.
+- `Language.md`, the research survey the mission names as invaluable, is not present anywhere in this worktree (verified 2026-07-14). The dossier's citations of it are to an external copy. Restore it to `docs/concepts/` or record its canonical location before any implementation decision leans on it; no POLARIS contract depends on its contents.
+- This checkout is a git worktree whose metadata lives outside it (`.git` -> `/home/tanner/Projects/Zenith-MCP/.git/worktrees/import-extension`), so the ground commit pin cannot be verified from inside the tree. Task 0.1 re-pins the actual `git rev-parse HEAD` at execution time and records it in the baseline fixture; a mismatch with the dossier pin is a stop-and-reverify event, not a silent proceed.
+- The repository pins `engines.node ^26.3.0`; probe/qualification results gathered on any other Node major (e.g. a sandbox v22 with experimental `node:sqlite`) are soft evidence only. Wave 0 probes and Wave 7 measurements are release evidence only when run on a matching engine.
 
 ## Product boundary
 
@@ -417,7 +420,7 @@ export type ResolutionAnswer =
       };
 ```
 
-All public lines are 1-based. Columns are 0-based UTF-8 byte columns, matching tree-sitter and current persisted columns. Byte offsets are 0-based and ranges are half-open. A v4 fact without byte precision uses only the `precision:'line'` arm; no composer invents byte offsets from line spans. A position supplied as line/column is converted against the exact fresh bytes before any v5/v6 occurrence lookup.
+All public lines are 1-based. Columns are 0-based UTF-16 code-unit columns, matching web-tree-sitter's JS-string positions and every persisted v4 column. *(Amended 2026-07-15, Wave 2 review finding F2: this line previously claimed "UTF-8 byte columns"; an implementation probe proved persisted v4 columns are UTF-16 code units — a def after a `é` prefix persists column 22, where bytes would give 23. The unit that ships is the unit the substrate actually produces; Wave 3's `ExactSourceRange.startByte` carries byte precision separately, and its line/column-to-byte converter must be defined against UTF-16 units.)* Byte offsets are 0-based and ranges are half-open. A v4 fact without byte precision uses only the `precision:'line'` arm; no composer invents byte offsets from line spans. A position supplied as line/column is converted against the exact fresh bytes before any v5/v6 occurrence lookup.
 
 `resolved` has no weak basis variant. A compile-time constructor test must prove that a candidate carrying `heuristic_name`, `legacy_callee_id` (internal only), `text_occurrence`, or a text handle cannot satisfy the resolved branch or a proven relation endpoint.
 
@@ -1084,7 +1087,7 @@ Define but do not fake the real-DB rehearsal: it takes a user-supplied copy, nev
 - `packages/zenith-mcp/tests/polaris-performance.test.js`
 - `packages/zenith-mcp/tests/polaris-query-plan.test.js`
 
-Probe Node's SQLite recursive CTE with a `depth < 64` cycle guard; symbol/stash schema cohabitation in a temporary fake home; worktree root discovery; WAL reader visibility during an uncommitted writer; and global two-root isolation. Record raw v4 indexing and comparable lookup p50/p95/p99 on the fixture workspace, this repository, and a generated 5,000-file corpus (five warm-ups, 100 measured operations, seed and machine fingerprint printed). Encode release formulas now. Future table plans report `not_yet_available`; they do not pass with fabricated timings.
+Probe Node's SQLite recursive CTE with a `depth < 64` cycle guard; symbol/stash schema cohabitation in a temporary fake home; worktree root discovery; WAL reader visibility during an uncommitted writer; global two-root isolation; and `PRAGMA data_version` semantics — assert on file-backed DBs that it increments when a second connection commits, and does NOT change on the same connection's own commits, rollbacks, or savepoint releases. Decision 16's fact epoch is the pair (data_version, connection-local outer-commit generation); both halves must be probed, because `data_version` alone is blind to same-connection writes and the generation counter alone is blind to external ones. Record raw v4 indexing and comparable lookup p50/p95/p99 on the fixture workspace, this repository, and a generated 5,000-file corpus (five warm-ups, 100 measured operations, seed and machine fingerprint printed). Encode release formulas now. Future table plans report `not_yet_available`; they do not pass with fabricated timings.
 
 #### Task 0.4 — Boundary and source-ownership guards
 
@@ -1105,6 +1108,7 @@ Wave 1 is the only place this plan touches current tool files, and only for repo
 **Closed allowlist — modify:**
 
 - `packages/zenith-mcp/src/core/db-adapter.ts`
+- `packages/zenith-mcp/src/core/indexing/persist.ts`
 - `packages/zenith-mcp/src/tools/refactor_batch.ts`
 - `packages/zenith-mcp/tests/db-adapter-v1-tables.test.js`
 - `packages/zenith-mcp/tests/review-schema-resolution.test.js`
@@ -1113,6 +1117,19 @@ Wave 1 is the only place this plan touches current tool files, and only for repo
 - `packages/zenith-mcp/tests/polaris-current-failures.test.js`
 - `packages/zenith-mcp/tests/polaris-db-atomicity.test.js`
 - `packages/zenith-mcp/tests/polaris-schema-migration.test.js`
+
+> **Amendment (2026-07-15, discovered during implementation):**
+> `core/indexing/persist.ts` was added to this allowlist. The old
+> `INSERT OR REPLACE INTO files` cascade was not merely a latent hazard — it
+> was the DE-FACTO clearing mechanism for the file-FK'd fact tables
+> (`imports`, `import_bindings`, `injections`), which `persistParsedFile`
+> never deleted explicitly. Replacing the upsert with `ON CONFLICT DO UPDATE`
+> therefore requires the explicit replacement transaction to delete those
+> children itself (named set-oriented deletes in `db-adapter.ts`, called
+> inside the same `persistParsedFile` transaction), exactly as this plan's
+> repaired-v4 model already stated: “preserving child rows until the explicit
+> replacement transaction deletes them.” Caught by the Task 0.2 atomicity
+> oracle (V1→V2 transition no longer equaled a straight-V2 build).
 
 Move read-only schema-version inspection before every DDL/normalization/ad-hoc ALTER. Reject a greater version with zero physical change. Replace file `INSERT OR REPLACE` with update-style conflict handling. Make structure reads a typed `ok | missing | corrupt` result carrying row/file/error; refactor paths must fail loudly with one reindex correction on corrupt data, never treat corruption as an empty shape. Convert the matching `it.fails` cases.
 
@@ -1126,11 +1143,21 @@ Move read-only schema-version inspection before every DDL/normalization/ad-hoc A
 - `packages/zenith-mcp/src/core/symbol-index.ts`
 - `packages/zenith-mcp/tests/indexing-extract-spans.test.js`
 - `packages/zenith-mcp/tests/symbol-index-core.test.js`
+- `packages/zenith-mcp/tests/typed-edge-anchor-persistence.test.js`
 - `packages/zenith-mcp/tests/polaris-current-failures.test.js`
 
 Change repaired-v4 reference dedup to `(name,kind,line,column)` while preserving definition compatibility keys; do not add pretend byte precision to the v4 row. Return `IndexCoverage { visited, complete, stopReason }` from directory indexing. Enforce the provisional source-byte limit before parsing both disk and supplied content, record the versioned too-large sentinel/coverage issue, and never replace fresh prior facts with an empty parse. Purge unvisited rows only on a complete walk; preserve genuine deletion purge when complete. Sort discovered paths before batches so cap membership is deterministic.
 
 **Acceptance:** two same-line calls persist separately; maxFiles=1 preserves every unvisited row and reports incomplete; a complete scan deletes a truly removed file; a generated over-limit file returns typed coverage without parsing, purging prior facts, or exceeding the RSS gate.
+
+> **Amendment (2026-07-15, discovered during implementation):**
+> `packages/zenith-mcp/tests/typed-edge-anchor-persistence.test.js` was added
+> to this task's allowlist. Its edge expectations had pinned the G5-lossy
+> behavior as truth (one `caller → Widget` type edge for a line that
+> contains two type references — parameter and return type). The dedup
+> repair legitimately surfaces the second occurrence; the pinned
+> expectation is corrected to the true edge set, and its aggregate
+> `referenceCount` moves from the halved value to the real one.
 
 #### Task 1.3 — Atomic affected-name resolution
 
@@ -1164,6 +1191,7 @@ Fault after every statement. Compare incremental output after each transition wi
 - `packages/zenith-mcp/src/core/symbol-index.ts`
 - `packages/zenith-mcp/src/core/indexing/persist.ts`
 - `packages/zenith-mcp/src/core/db-adapter.ts`
+- `packages/zenith-mcp/src/config/backup.ts`
 - `packages/zenith-mcp/tests/project-context.test.js`
 - `packages/zenith-mcp/tests/symbol-index-core.test.js`
 - `packages/zenith-mcp/tests/rev2-ensure-fresh-from-content.test.js`
@@ -1171,7 +1199,9 @@ Fault after every statement. Compare incremental output after each transition wi
 
 Implement `IndexAddress` and `ProjectContext.getIntelligenceStore`. Thread the encoded key through index, freshness, persistence, purge, and adapter calls without changing project-mode visible paths. Initialize symbol schema beside stash in global mode. Implement the three-way legacy-row branch and transaction described above, including v4 path-bearing tables and file-backed rollback tests. Do not expose the global DB path or add another root resolver.
 
-**Acceptance:** two roots' `src/same.ts` coexist; each scoped read sees only its row; stash rows survive symbol initialization/migration; project keys remain repo-relative; ambiguous legacy rows remain untouched and invisible to scoped reads with a typed issue.
+The accessor consults the rebuilt detection-aware `ProjectContext` and obeys its anti-litter materialization policy: a DETECTED-but-unpromoted root never causes the intelligence path to materialize a project `.mcp/symbols.db`; such anchors route to the global store (scoped by the longest containing allowed root) until the project is explicitly registered/promoted, at which point routing upgrades on the next session open. Route `config/backup.ts`'s private global-DB opener through the same private global connection used by `getIntelligenceStore` so exactly one code path opens the global store. Either give `project_roots` a real reader in this task's adapter surface or record it as a write-only compatibility table in its DDL doc comment — a silent write-only table is not an acceptable end state. `findRepoRoot`/`getDb` remain internal primitives for legacy version/stash callers and tests; nothing new routes through them.
+
+**Acceptance:** two roots' `src/same.ts` coexist; each scoped read sees only its row; stash rows survive symbol initialization/migration; project keys remain repo-relative; ambiguous legacy rows remain untouched and invisible to scoped reads with a typed issue; a detected-but-unpromoted root materializes no project DB through the intelligence path; exactly one production code path opens the global DB.
 
 #### Task 1.5 — Remove production non-null assertions
 
@@ -1187,12 +1217,28 @@ Implement `IndexAddress` and `ProjectContext.getIntelligenceStore`. Thread the e
 - `packages/zenith-mcp/src/retrieval/telemetry/tokens.ts`
 - `packages/zenith-mcp/src/tools/refactor_batch.ts`
 - `packages/zenith-mcp/src/tools/stash_restore.ts`
+- `packages/zenith-mcp/src/config/loader.ts`
+- `packages/zenith-mcp/src/core/tree-sitter/symbols.ts`
+- `packages/zenith-mcp/src/adapters/platforms/antigravity.ts`
+- `packages/zenith-mcp/src/adapters/platforms/claude-desktop.ts`
+- `packages/zenith-mcp/src/adapters/platforms/cline.ts`
+- `packages/zenith-mcp/src/adapters/platforms/codex-cli.ts`
+- `packages/zenith-mcp/src/adapters/platforms/codex-desktop.ts`
+- `packages/zenith-mcp/src/adapters/platforms/continue-dev.ts`
+- `packages/zenith-mcp/src/adapters/platforms/gemini-cli.ts`
+- `packages/zenith-mcp/src/adapters/platforms/github-copilot.ts`
+- `packages/zenith-mcp/src/adapters/platforms/gptme.ts`
+- `packages/zenith-mcp/src/adapters/platforms/raycast.ts`
+- `packages/zenith-mcp/src/adapters/platforms/roo-code.ts`
+- `packages/zenith-mcp/src/adapters/platforms/warp.ts`
 
 **Closed allowlist — create:**
 
 - `packages/zenith-mcp/tests/polaris-no-non-null.test.js`
 
 Replace each assertion with an explicit invariant guard or mathematically correct default; array/typed-array accumulators use the correct `INF/-INF` semantics, never convenient zero. Build a TypeScript-AST test that rejects `NonNullExpression` anywhere under `src/**/*.ts` so the gate is syntax-aware rather than regex-based.
+
+The verified 2026-07-14 inventory this allowlist must clear: the ten files above the divider; twelve `adapters/platforms/*.ts` files sharing the identical `this.configPath()!;` pattern (fix once, apply twelve times — a guard that throws a typed configuration error when `configPath()` returns null); `config/loader.ts`; and `core/tree-sitter/symbols.ts` (`candidates[0]!` behind a "non-empty, just checked" comment — replace with an explicit length-guarded destructure so the invariant is code, not comment). `core/tree-sitter/injections.ts` greps as a match but is a false positive: its `!` characters are tree-sitter `#set!` predicate names in comments — the AST-based gate handles this correctly; a regex gate would not. If implementation discovers an asserting production file not listed here, stop and amend this allowlist rather than leaving the global gate red.
 
 **Acceptance:** global source scan finds zero TypeScript non-null assertion nodes; full existing behavior suite remains green.
 
@@ -1398,7 +1444,7 @@ Implement read-only bulk FactView, deterministic project/config inputs, generic 
 - `packages/zenith-mcp/package.json`
 - `pnpm-lock.yaml`
 
-Move the already pinned TypeScript version to runtime dependencies. Implement only config parsing and `resolveModuleName`, plus the exact lexical/module/export/member/prelude receipt domains above. Patch/spies must prove no `Program`, checker, emit, server, process, or network call. Differential module-resolution fixtures compare domain members and outcomes with the official resolver, not merely final paths.
+Move TypeScript from devDependencies to runtime dependencies and pin it exactly in the same change (the current spec is caret-ranged `^6.0.3`; strip the caret to the resolved lockfile version). Receipt domains hash `resolveModuleName` outcomes and failed-lookup lists, so a resolver minor-bump would silently change domain digests across machines; the pinned version participates in the `module` receipt key via configHash, and any deliberate TypeScript upgrade is a receipt-domain-version event, not a routine dependency bump. Implement only config parsing and `resolveModuleName`, plus the exact lexical/module/export/member/prelude receipt domains above. Patch/spies must prove no `Program`, checker, emit, server, process, or network call. Differential module-resolution fixtures compare domain members and outcomes with the official resolver, not merely final paths.
 
 #### Task 4.3 — `python@1` and `go@1`
 
@@ -1666,8 +1712,9 @@ The report records machine fingerprint, commit, seeds, sample counts, raw distri
 **Closed allowlist — modify:**
 
 - `docs/ARCHITECTURE.md`
+- `docs/Developers-Guide.md`
 
-Document the public domain algebra, fact ledger, freshness/store route, structural-versus-binding truth, immutable snapshots, advisory lifecycle, and TOON seam. State prominently that the current tool fleet is neither integrated nor normative and will be rebuilt as clients after this release. Give future builders one rule: if a desired factual question is expressible by the seven-query algebra, use it; if a new persisted fact domain is introduced, extend the ledger/projections and their exhaustive tests before any client consumes it. Do not document SQLite IDs, private storage keys, or internal profile helpers as public API.
+Document the public domain algebra, fact ledger, freshness/store route, structural-versus-binding truth, immutable snapshots, advisory lifecycle, and TOON seam. ARCHITECTURE §5.8/§12 and the Developers-Guide module table were already corrected to the config-registry + internal-detection reality on 2026-07-14; update them again here so the final documents describe the shipped AstIntelligence store route, and keep the rule visible: automatic detection lives INSIDE `ProjectContext` — never a second resolver. State prominently that the current tool fleet is neither integrated nor normative and will be rebuilt as clients after this release. Give future builders one rule: if a desired factual question is expressible by the seven-query algebra, use it; if a new persisted fact domain is introduced, extend the ledger/projections and their exhaustive tests before any client consumes it. Do not document SQLite IDs, private storage keys, or internal profile helpers as public API.
 
 #### Task 7.4 — Run the final release gate and write the evidence record
 

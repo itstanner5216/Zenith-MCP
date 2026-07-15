@@ -457,3 +457,49 @@ describe('indexing extract — local scope parent is the innermost enclosing def
         }
     });
 });
+
+// -----------------------------------------------------------------------------
+// POLARIS Task 1.2 — reference dedup carries the column: same-line repeated
+// occurrences are distinct facts at the EXTRACTOR level (G5), while definition
+// keys keep their line-scoped compatibility dedup.
+// -----------------------------------------------------------------------------
+
+describe('same-line reference occurrences (POLARIS Task 1.2)', () => {
+    it('two same-line calls extract as two ref rows with distinct columns', async () => {
+        const { extractParsedFile } = await import('../dist/core/indexing/extract.js');
+        const source = [
+            'export function twice(n: number): number {',
+            '    return once(n) + once(n);',
+            '}',
+            '',
+            'export function once(n: number): number {',
+            '    return n;',
+            '}',
+            '',
+        ].join('\n');
+        const record = await extractParsedFile(source, 'typescript', 'twice.ts', 'test-hash');
+        expect(record).not.toBeNull();
+
+        const onceRefs = record.symbols.filter((s) => s.kind === 'ref' && s.name === 'once' && s.line === 2);
+        expect(onceRefs).toHaveLength(2);
+        const columns = onceRefs.map((r) => r.column).sort((a, b) => a - b);
+        expect(columns[0]).not.toBe(columns[1]);
+
+        // Both occurrences produce edges from the containing def.
+        const onceEdges = record.edges.filter((e) => e.referencedName === 'once');
+        expect(onceEdges).toHaveLength(2);
+        expect(onceEdges.every((e) => e.containerDefKey.startsWith('twice:'))).toBe(true);
+    });
+
+    it('definition dedup stays line-scoped (grammar double-captures do not double defs)', async () => {
+        const { extractParsedFile } = await import('../dist/core/indexing/extract.js');
+        // An exported const arrow function is a construct grammars commonly
+        // capture under more than one definition pattern; the def must still
+        // appear exactly once.
+        const source = 'export const tie = (n: number): number => n * 2;\n';
+        const record = await extractParsedFile(source, 'typescript', 'tie.ts', 'test-hash');
+        expect(record).not.toBeNull();
+        const tieDefs = record.symbols.filter((s) => s.kind === 'def' && s.name === 'tie');
+        expect(tieDefs).toHaveLength(1);
+    });
+});
