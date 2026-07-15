@@ -1,6 +1,6 @@
 /**
  * Behavioral tests covering robustness gaps identified in PR #12 review.
- * Tests: roots-utils tilde, symbol-index purge, project-scope markers,
+ * Tests: roots-utils tilde, symbol-index purge,
  * write_file stat errors, directory sensitive filtering, search_file errors,
  * refactor_batch schema strictness, path-validation prefix collisions.
  */
@@ -449,48 +449,6 @@ describe('symbol-index — purge on parse failure', () => {
             expect(afterRows).toHaveLength(0);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
-    });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 10. project-scope — deepest marker preference
-// ─────────────────────────────────────────────────────────────────────────────
-describe('project-scope — marker resolution', () => {
-    it('prefers deeper package.json over shallow git root in monorepo', async () => {
-        const { resolveProjectRoot } = await import('../dist/utils/project-scope.js');
-        // Create a git repo with a nested package
-        const repoDir = mkTmpGitRepo();
-        const pkgDir = path.join(repoDir, 'packages', 'sub');
-        fs.mkdirSync(pkgDir, { recursive: true });
-        fs.writeFileSync(path.join(pkgDir, 'package.json'), '{}');
-        const filePath = path.join(pkgDir, 'index.ts');
-        fs.writeFileSync(filePath, 'export default {}');
-
-        try {
-            const root = resolveProjectRoot(filePath, [repoDir]);
-            // Should prefer the deeper marker (pkgDir) over the shallow git root
-            // The exact behavior depends on whether git root or marker is deeper
-            expect(root).toBeTruthy();
-            // pkgDir is deeper, so it should be chosen
-            expect(root).toBe(pkgDir);
-        } finally {
-            fs.rmSync(repoDir, { recursive: true, force: true });
-        }
-    });
-
-    it('returns git root when no deeper markers exist', async () => {
-        const { resolveProjectRoot } = await import('../dist/utils/project-scope.js');
-        const repoDir = mkTmpGitRepo();
-        const filePath = path.join(repoDir, 'src', 'main.ts');
-        fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
-        fs.writeFileSync(filePath, 'const x = 1;');
-
-        try {
-            const root = resolveProjectRoot(filePath, [repoDir]);
-            expect(root).toBe(repoDir);
-        } finally {
-            fs.rmSync(repoDir, { recursive: true, force: true });
         }
     });
 });

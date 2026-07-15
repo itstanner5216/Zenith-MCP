@@ -42,6 +42,7 @@ const LEGACY_ADVANCED_KEYS = new Set([
   "refactor_max_context",
   "refactor_version_ttl_hours",
   "session_ttl_ms",
+  "auto_promote_sessions",
   "default_excludes",
   "sensitive_patterns",
 ]);

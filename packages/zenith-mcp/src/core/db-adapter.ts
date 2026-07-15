@@ -1033,6 +1033,79 @@ export function getAllProjectRootPaths(conn: DbConnection): { root_path: string;
 }
 
 // ---------------------------------------------------------------------------
+// Project Observations — detection telemetry for promotion decisions.
+// Lives in the GLOBAL DB. Detection records what it saw; promotion policy
+// (ProjectContext) reads the distinct-session count. This is the
+// instrumentation that justifies (or refutes) each auto-promotion.
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates table: project_observations(root_path PK, method, first_seen,
+ * last_seen, session_count, last_session_id)
+ */
+export function initObservationSchema(conn: DbConnection): void {
+    handle(conn).exec(`
+        CREATE TABLE IF NOT EXISTS project_observations (
+            root_path TEXT PRIMARY KEY,
+            method TEXT NOT NULL,
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            session_count INTEGER NOT NULL DEFAULT 1,
+            last_session_id TEXT NOT NULL
+        );
+    `);
+}
+
+/**
+ * Record a detection of an unregistered project root and return the number
+ * of DISTINCT sessions it has now been observed in. The distinct-session
+ * approximation: the counter only increments when the recording session
+ * differs from the last one recorded — repeat observations within one
+ * session are idempotent.
+ */
+export function recordProjectObservation(
+    conn: DbConnection,
+    entry: { rootPath: string; method: string; sessionId: string; now?: number }
+): number {
+    const now = entry.now ?? Date.now();
+    const existing = prepareOrCache(
+        conn,
+        'SELECT session_count, last_session_id FROM project_observations WHERE root_path = ?'
+    ).get(entry.rootPath) as { session_count: number; last_session_id: string } | undefined;
+
+    if (!existing) {
+        prepareOrCache(
+            conn,
+            'INSERT INTO project_observations (root_path, method, first_seen, last_seen, session_count, last_session_id) VALUES (?, ?, ?, ?, 1, ?)'
+        ).run(entry.rootPath, entry.method, now, now, entry.sessionId);
+        return 1;
+    }
+
+    const count = existing.last_session_id === entry.sessionId
+        ? existing.session_count
+        : existing.session_count + 1;
+    prepareOrCache(
+        conn,
+        'UPDATE project_observations SET method = ?, last_seen = ?, session_count = ?, last_session_id = ? WHERE root_path = ?'
+    ).run(entry.method, now, count, entry.sessionId, entry.rootPath);
+    return count;
+}
+
+/**
+ * SQL: SELECT * FROM project_observations ORDER BY last_seen DESC
+ */
+export function listProjectObservations(conn: DbConnection): {
+    root_path: string; method: string; first_seen: number;
+    last_seen: number; session_count: number; last_session_id: string;
+}[] {
+    return prepareOrCache(conn, 'SELECT * FROM project_observations ORDER BY last_seen DESC')
+        .all() as {
+            root_path: string; method: string; first_seen: number;
+            last_seen: number; session_count: number; last_session_id: string;
+        }[];
+}
+
+// ---------------------------------------------------------------------------
 // Transaction Support
 // ---------------------------------------------------------------------------
 

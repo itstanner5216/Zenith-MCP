@@ -48,6 +48,14 @@ export interface ZenithConfig {
     session_ttl_ms: number;
     default_excludes: string;
     sensitive_patterns: string;
+    /**
+     * Auto-promotion threshold: when a DETECTED (unregistered) project has
+     * been observed in this many distinct sessions, promote it in-memory to
+     * registry tier (enables its project-scoped .mcp DB) and notify.
+     * 0 (default) = off: detection only notifies with promotion instructions;
+     * the config file stays the sole persistent source of truth either way.
+     */
+    auto_promote_sessions: number;
   };
 }
 
@@ -85,6 +93,7 @@ export const DEFAULT_CONFIG: ZenithConfig = {
     refactor_max_context: 30,
     refactor_version_ttl_hours: 24,
     session_ttl_ms: 1_800_000,
+    auto_promote_sessions: 0,
     default_excludes: DEFAULT_EXCLUDES_STR,
     sensitive_patterns: DEFAULT_SENSITIVE_STR,
   },
@@ -243,6 +252,7 @@ export function configToRaw(config: ZenithConfig): RawConfig {
   entries.push(kv("refactor_max_context", config.advanced.refactor_max_context, String(config.advanced.refactor_max_context)));
   entries.push(kv("refactor_version_ttl_hours", config.advanced.refactor_version_ttl_hours, String(config.advanced.refactor_version_ttl_hours)));
   entries.push(kv("session_ttl_ms", config.advanced.session_ttl_ms, String(config.advanced.session_ttl_ms)));
+  entries.push(kv("auto_promote_sessions", config.advanced.auto_promote_sessions, String(config.advanced.auto_promote_sessions)));
   entries.push(kv("default_excludes", config.advanced.default_excludes, config.advanced.default_excludes));
   entries.push(kv("sensitive_patterns", config.advanced.sensitive_patterns, config.advanced.sensitive_patterns));
 
@@ -436,6 +446,11 @@ export function rawToConfig(raw: RawConfig): ZenithConfig {
         case "session_ttl_ms": {
           const n = parseInt(raw_val, 10);
           if (!isNaN(n)) config.advanced.session_ttl_ms = n;
+          break;
+        }
+        case "auto_promote_sessions": {
+          const n = parseInt(raw_val, 10);
+          if (!isNaN(n) && n >= 0) config.advanced.auto_promote_sessions = n;
           break;
         }
         case "default_excludes":

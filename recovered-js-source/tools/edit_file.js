@@ -5,33 +5,13 @@ import { randomBytes } from 'crypto';
 import { normalizeLineEndings, createMinimalDiff } from '../core/lib.js';
 import { stashEdits } from '../core/stash.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
-import { getDb, snapshotSymbol, getSessionId, findRepoRoot, ensureFreshFromContent } from '../core/symbol-index.js';
-import { getProjectContext } from '../core/project-context.js';
-import type { ToolContext, ToolServer } from './types.js';
+import { findRepoRoot, getDb, snapshotSymbol, getSessionId } from '../core/symbol-index.js';
 
-type EditOperation = {
-    mode: "block" | "content" | "symbol";
-    block_start?: string;
-    block_end?: string;
-    replacement_block?: string;
-    oldContent?: string;
-    newContent?: string;
-    symbol?: string;
-    newText?: string;
-    nearLine?: number;
-};
-
-type EditFileArgs = {
-    path: string;
-    edits: EditOperation[];
-    dryRun?: boolean;
-};
-
-export function register(server: ToolServer, ctx: ToolContext): void {
+export function register(server, ctx) {
     server.registerTool("edit_file", {
         title: "Edit File",
         description: "Edit a text file.",
-        inputSchema: z.object({
+        inputSchema: {
             path: z.string().describe("File to edit."),
             edits: z.array(z.object({
                 mode: z.enum(["block", "content", "symbol"]),
@@ -45,66 +25,52 @@ export function register(server: ToolServer, ctx: ToolContext): void {
                 nearLine: z.number().optional().describe("Approx line number."),
             })),
             dryRun: z.boolean().default(false).describe("Preview without writing."),
-        }),
+        },
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
-    }, async (args: EditFileArgs) => {
+    }, async (args) => {
         const validPath = await ctx.validatePath(args.path);
-        if (!args.edits?.length)
-            throw new Error('No edits provided.');
+        if (!args.edits?.length) throw new Error('No edits provided.');
+
         const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
         const isBatch = args.edits.length > 1;
+
         const { workingContent, errors, pendingSnapshots } = await applyEditList(originalContent, args.edits, {
             filePath: validPath,
             isBatch,
         });
+
         if (errors.length > 0) {
             const failedIndices = errors.map(e => e.i);
             const stashId = stashEdits(ctx, validPath, args.edits, failedIndices);
             const failMsg = errors.map(e => e.msg).join('\n');
             throw new Error(`${errors.length} failed. stash:${stashId}\n${failMsg}`);
         }
+
         if (args.dryRun) {
             return { content: [{ type: 'text', text: createMinimalDiff(originalContent, workingContent, validPath) }] };
         }
+
         const tempPath = `${validPath}.${randomBytes(16).toString('hex')}.tmp`;
         try {
             await fs.writeFile(tempPath, workingContent, 'utf-8');
             await fs.rename(tempPath, validPath);
-        }
-        catch (error) {
-            try {
-                await fs.unlink(tempPath);
-            }
-            catch { }
+        } catch (error) {
+            try { await fs.unlink(tempPath); } catch {}
             throw error;
         }
-        // Keep the symbol index fresh from the bytes we just wrote (C+): index the
-        // edited content directly — no disk re-read, and no stale window before the
-        // next read/compression. Best-effort and mirrors the snapshot block below:
-        // an indexing failure must never fail a successful edit.
-        try {
-            const repoRoot = findRepoRoot(validPath);
-            if (repoRoot) {
-                await ctx.validatePath(repoRoot);
-                await ensureFreshFromContent(getDb(repoRoot), repoRoot, validPath, workingContent);
-            }
-        }
-        catch { /* index refresh is best-effort; never fail an edit because of it */ }
+
         if (pendingSnapshots.length > 0) {
             try {
-                const pc = getProjectContext(ctx);
-                const repoRoot = pc.getWorkingRoot(validPath); // never null — never refuse
+                const repoRoot = findRepoRoot(validPath) || path.dirname(validPath);
                 const db = getDb(repoRoot);
                 const sessionId = ctx.sessionId || getSessionId();
                 const relPath = path.relative(repoRoot, validPath);
                 for (const snap of pendingSnapshots) {
-                    if (snap.symbol !== undefined) {
-                        snapshotSymbol(db, snap.symbol, relPath, snap.originalText, sessionId, snap.line);
-                    }
+                    snapshotSymbol(db, snap.symbol, relPath, snap.originalText, sessionId, snap.line);
                 }
-            }
-            catch { /* versioning is best-effort; never fail an edit because of it */ }
+            } catch { /* versioning is best-effort; never fail an edit because of it */ }
         }
+
         const warning = await syntaxWarn(validPath, workingContent);
         return { content: [{ type: 'text', text: `Applied.${warning}` }] };
     });

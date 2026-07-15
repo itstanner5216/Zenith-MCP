@@ -22,7 +22,7 @@ import fs from "fs/promises";
 import path from "path";
 import { normalizePath, expandHome } from './path-utils.js';
 import { onRootsChanged, getProjectContext } from './project-context.js';
-import { getValidRootDirectories, parseRootUriPath } from './roots-utils.js';
+import { getValidRootDirectories } from './roots-utils.js';
 import { type ToolServer, type ToolContext } from '../tools/types.js';
 import { type FilesystemContext } from './lib.js';
 
@@ -153,11 +153,44 @@ export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): 
   }
 
   // ── Register only the tools that are enabled in config ───────────────
+  // Every handler is wrapped with the caller-environment ping: a server-side,
+  // model-free detection signal (process-tree cwds, TTL-cached, upgrade-from-
+  // global only). Tool schemas are untouched — the model carries ZERO
+  // responsibility for project detection, by design.
+  const pingedServer = withCallerEnvironmentPing(toolServer, ctx);
   for (const entry of TOOL_REGISTRY) {
     if (syncedConfig.tools[entry.name]) {
-      entry.register(toolServer, ctx);
+      entry.register(pingedServer, ctx);
     }
   }
+}
+
+/**
+ * Wrap a ToolServer so every tool call pings ProjectContext with caller
+ * environment evidence before the real handler runs. The walk is throttled
+ * (TTL cache inside the process-tree reader) and the ping is a no-op unless
+ * the session is currently in global fallback — path evidence, registry
+ * matches, and explicit bindings always outrank environment inference.
+ *
+ * The ping must NEVER break a tool call: detection failures are swallowed.
+ */
+export function withCallerEnvironmentPing(toolServer: ToolServer, ctx: ToolContext): ToolServer {
+  return {
+    registerTool<TArgs>(
+      name: string,
+      registration: Parameters<ToolServer['registerTool']>[1],
+      handler: (args: TArgs) => ReturnType<Parameters<ToolServer['registerTool']>[2]>
+    ): void {
+      toolServer.registerTool<TArgs>(name, registration, (args: TArgs) => {
+        try {
+          getProjectContext(ctx).pingCallerEnvironment();
+        } catch {
+          // Detection is best-effort by contract — never fail a tool call.
+        }
+        return handler(args);
+      });
+    },
+  };
 }
 
 /**
@@ -180,19 +213,16 @@ export async function updateAllowedDirectoriesFromRoots(
     const merged = [...new Set([...existingDirs, ...validatedRootDirs])];
     ctx.setAllowedDirectories(merged);
 
-    // Seed ProjectRegistry with root names from MCP roots for better detection.
-    // Uses registerSessionRoot (non-sticky, non-persisting) — does NOT block auto-switching.
-    const pc = getProjectContext(ctx);
-    for (const root of requestedRoots) {
-      if (root.name) {
-        const resolvedPath = await parseRootUriPath(root.uri);
-        if (resolvedPath && validatedRootDirs.includes(resolvedPath)) {
-          pc.registerSessionRoot(resolvedPath, root.name);
-        }
-      }
-    }
-
+    // Refresh FIRST (it resets non-explicit bindings), THEN apply session-root
+    // hints so they aren't immediately wiped by the refresh (review finding
+    // P3-10). registerSessionRoot binds via registry match or boundary
+    // detection — non-sticky, never blocks auto-switching. The dirs were
+    // already validated and resolved above — no re-parse needed.
     onRootsChanged(ctx);
+    const pc = getProjectContext(ctx);
+    for (const dir of validatedRootDirs) {
+      pc.registerSessionRoot(dir);
+    }
     console.error(`Updated allowed directories from MCP roots: ${merged.length} total directories (${validatedRootDirs.length} from roots)`);
   } else {
     console.error("No valid root directories provided by client");
