@@ -2705,8 +2705,11 @@ export function queryV4Occurrences(
             where.push('s.name < ?');
             params.push(upperBound);
         }
-        // substr is the exactness guarantee; the range only enables the
-        // (kind, name) index, so successor mistakes can at worst over-scan.
+        // The range arms exist ONLY to enable the (kind, name) index. substr
+        // re-filters conjunctively, so it rescues a too-LOOSE bound; a
+        // too-TIGHT bound would narrow the result silently before substr ever
+        // runs. What guards that direction is the substr-vs-range equivalence
+        // suite (exhaustive scalar sweep + SQLite ground truth), not substr.
         where.push('substr(s.name, 1, length(?)) = ?');
         params.push(prefix, prefix);
     }
