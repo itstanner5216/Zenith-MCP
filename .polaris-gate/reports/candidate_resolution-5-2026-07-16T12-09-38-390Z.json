@@ -1,0 +1,80 @@
+{
+  "lane": "candidate/resolution-5",
+  "scratchBranch": "gate/candidate_resolution-5-2026-07-16T12-09-38-390Z",
+  "integrationHead": "3affe01",
+  "laneHead": "0442c96",
+  "startedAt": "2026-07-16T12:09:38.398Z",
+  "verdicts": {
+    "merge": {
+      "ok": true
+    },
+    "rebuild": {
+      "ok": true
+    },
+    "signatures": {
+      "ok": false,
+      "newlyGreen": 6,
+      "unchangedFailing": 11,
+      "mutated": 0,
+      "newlyFailing": 4
+    }
+  },
+  "delta": {
+    "newlyGreen": [
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=1)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=2)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=3)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages full canonical answer: concat of all pages equals one-shot (line 1315)",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts rejects heuristic_name as a ResolvedLocatedSymbol even when its handle is a persisted fact",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles paginates relation facts exactly once with the array-shaped fact stream"
+    ],
+    "unchangedFailing": [
+      "polaris-audit-occurrences-differential.test.js::queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact metamorphic concat != one-shot when two facts share the page key",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) before the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) after the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral NUMBER (\\p{N}) adjacent is misclassified as a boundary",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts keeps same-name incoming edge targets equal to a clean rebuild after a target body edit",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts enumerates keyset-tied occurrence rows exactly once across one-row pages",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts orders adapter rows by SQLite BINARY UTF-8 bytes for adversarial paths and names",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts does not advance the fact commit generation for a rolled-back inner savepoint",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles enforces realpath validation before a symlink can import outside bytes",
+      "polaris-independent-session-freshness.test.js::independent session factory and freshness oracles canonical source-domain identity ignores filesystem creation order but changes with source bytes"
+    ],
+    "mutatedFailing": [],
+    "vanishedBaseline": [],
+    "newlyFailing": [
+      {
+        "key": "polaris-a10-epoch-voiding.test.js::A10 — savepoint rollbacks and the fact commit generation a rolled-back inner savepoint inside an otherwise read-only outer commit does not bump",
+        "sig": "AssertionError: expected 5 to be 4 // Object.is equality"
+      },
+      {
+        "key": "polaris-a10-epoch-voiding.test.js::A10 — savepoint rollbacks and the fact commit generation nested double-rollback with nothing surviving does not bump",
+        "sig": "AssertionError: expected 5 to be 4 // Object.is equality"
+      },
+      {
+        "key": "polaris-a10-epoch-voiding.test.js::A10 — savepoint rollbacks and the fact commit generation two disjoint rolled-back savepoints in one outer accumulate voids correctly (no bump)",
+        "sig": "AssertionError: expected 5 to be 4 // Object.is equality"
+      },
+      {
+        "key": "polaris-a10-epoch-voiding.test.js::A10 — savepoint rollbacks and the fact commit generation voided state resets between outer transactions",
+        "sig": "AssertionError: expected 5 to be 4 // Object.is equality"
+      }
+    ]
+  },
+  "diffSurface": [
+    "packages/zenith-mcp/src/core/db-adapter.ts         |  22 +-",
+    " .../src/core/intelligence/questions/file.ts        | 300 +++++++++++++++------",
+    " packages/zenith-mcp/src/core/intelligence/types.ts |  58 +++-",
+    " ...laris-resolution5-a15-frontier-identity.test.js | 196 ++++++++++++++",
+    " ...aris-resolution5-a21-identity-timestamp.test.js | 162 +++++++++++",
+    " .../polaris-resolution5-a7-fact-projection.test.js | 289 ++++++++++++++++++++",
+    " 6 files changed, 932 insertions(+), 95 deletions(-)"
+  ],
+  "baseSuite": {
+    "totalPassed": 1777,
+    "totalFailed": 15,
+    "auditOraclesStillGreen": true
+  },
+  "finishedAt": "2026-07-16T12:10:43.209Z"
+}

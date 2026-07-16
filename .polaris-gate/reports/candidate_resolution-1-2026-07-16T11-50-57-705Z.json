@@ -1,0 +1,74 @@
+{
+  "lane": "candidate/resolution-1",
+  "scratchBranch": "gate/candidate_resolution-1-2026-07-16T11-50-57-705Z",
+  "integrationHead": "62491f0",
+  "laneHead": "d851cc8",
+  "startedAt": "2026-07-16T11:50:57.720Z",
+  "verdicts": {
+    "merge": {
+      "ok": true
+    },
+    "rebuild": {
+      "ok": true
+    },
+    "signatures": {
+      "ok": false,
+      "newlyGreen": 4,
+      "unchangedFailing": 12,
+      "mutated": 0,
+      "newlyFailing": 1
+    }
+  },
+  "delta": {
+    "newlyGreen": [
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts keeps same-name incoming edge targets equal to a clean rebuild after a target body edit",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts enumerates keyset-tied occurrence rows exactly once across one-row pages",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts orders adapter rows by SQLite BINARY UTF-8 bytes for adversarial paths and names",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts does not advance the fact commit generation for a rolled-back inner savepoint"
+    ],
+    "unchangedFailing": [
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=1)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=2)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=3)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages full canonical answer: concat of all pages equals one-shot (line 1315)",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) before the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) after the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral NUMBER (\\p{N}) adjacent is misclassified as a boundary",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts rejects heuristic_name as a ResolvedLocatedSymbol even when its handle is a persisted fact",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles paginates relation facts exactly once with the array-shaped fact stream",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles enforces realpath validation before a symlink can import outside bytes",
+      "polaris-independent-session-freshness.test.js::independent session factory and freshness oracles canonical source-domain identity ignores filesystem creation order but changes with source bytes"
+    ],
+    "mutatedFailing": [],
+    "newlyFailing": [
+      {
+        "key": "polaris-audit-occurrences-differential.test.js::queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact metamorphic concat != one-shot when two facts share the page key",
+        "note": "baseline failure disappeared without passing (renamed/deleted test?)"
+      }
+    ]
+  },
+  "diffSurface": [
+    ".../lead_a10-epoch-2026-07-16T09-21-00-862Z.json   |  59 ++++",
+    " _tmp_16_4f823e26b1b11278d11726336e4c18b6           |   0",
+    " _tmp_16_e0694f38e0b94e20d10ec8afdf960422           |   0",
+    " _tmp_3_1ff119a4827d8e1bad0d85d9ad0f25e8            |   0",
+    " _tmp_3_dfeb470cb03dd3cf4c00b17a4aa69876            |   0",
+    " packages/zenith-mcp/src/core/db-adapter.ts         | 243 +++++++++++++----",
+    " packages/zenith-mcp/src/core/indexing/persist.ts   |  26 +-",
+    " .../zenith-mcp/src/core/intelligence/evidence.ts   |   7 +-",
+    " .../zenith-mcp/src/core/intelligence/session.ts    |   7 +-",
+    " .../polaris-audit-occurrences-differential.test.js |  47 +++-",
+    " ...laris-independent-adversarial-contracts.test.js | 114 ++++++++",
+    " .../tests/polaris-independent-v4-oracles.test.js   |  13 +-",
+    " .../polaris-resolution-a18-null-spans.test.js      | 297 +++++++++++++++++++++",
+    " packages/zenith-mcp/tests/polaris-v4-reads.test.js |   2 +",
+    " 14 files changed, 734 insertions(+), 81 deletions(-)"
+  ],
+  "baseSuite": {
+    "totalPassed": 1768,
+    "totalFailed": 12,
+    "auditOraclesStillGreen": true
+  },
+  "finishedAt": "2026-07-16T11:53:57.470Z"
+}
