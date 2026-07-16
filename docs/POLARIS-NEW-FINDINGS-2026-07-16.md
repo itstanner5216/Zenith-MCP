@@ -145,3 +145,22 @@ exhaustive switches on UnavailabilityReason (res-2 to enumerate by grep
 pre-merge); existing pins asserting complete-for-unreadable flip as
 expected-value changes, itemized at the merge gate. No collision with
 res-5's pending type amendments (disjoint types).
+
+---
+
+## N8 — Cross-lane seam A9×A11: content-key ordering (FIXED AT MERGE GATE)
+
+resolution-3 forked before resolution-1's A9 fix existed; its A11 content
+phase added `contentKeys.sort` under JS relational (UTF-16) order while
+merged A9 makes canonical order UTF-8 bytes — the digest sort three lines
+below orders the SAME keys differently. Composed, processing order and
+digest order disagreed for non-ASCII store keys. Same species as N6:
+two independently-correct lanes composing into an inconsistency.
+
+Lead fix at the merge gate (integration-next): the sort switched to
+Buffer.compare UTF-8, with a discriminating pin appended to
+polaris-independent-content-receipts.test.js (BMP U+FF61 vs astral
+U+10000 keys, trigger on the byte-canonically-last file; proven RED under
+the JS sort by compiled-dist mutation, GREEN restored). Both lanes' own
+tests were blind to it (ASCII fixtures only). Lead decision — pending
+owner; disclosed here per the audit-repair ledger protocol.

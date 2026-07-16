@@ -242,3 +242,59 @@ describe('independent content-freshness receipt and ordering oracles', () => {
         expect(single.status).toBe('opened');
     });
 });
+
+describe('canonical order is UTF-8 byte order, not UTF-16 (A9 × A11 merge seam, ledger N8)', () => {
+    it('processes content keys in SQLite BINARY order when UTF-16 ordering disagrees', async () => {
+        // 'a\uFF61.ts' encodes EF BD A1 (UTF-8) but sorts AFTER the astral
+        // 'a\u{10000}.ts' under UTF-16 (FF61 > D800 lead surrogate), while
+        // UTF-8 bytes order it FIRST (EF < F0). A UTF-16-ordered engine
+        // attempts the astral file first and fails with updated=[]; the
+        // byte-ordered engine commits the BMP file before failing.
+        const bmpName = 'a\uFF61.ts';
+        const astralName = 'a\u{10000}.ts';
+        const root = makeProject({
+            [bmpName]: 'export function bmpOld(): number { return 1; }\n',
+            [astralName]: 'export function astralOld(): number { return 2; }\n',
+        });
+        const ctx = mkCtx(root);
+        await warmDisk(ctx, root, path.join(root, bmpName));
+
+        const conn = mods.si.getDb(root);
+        mods.db.execRaw(conn, `
+            CREATE TEMP TRIGGER polaris_receipts_fail_astral
+            BEFORE INSERT ON symbols
+            WHEN NEW.file_path = '${astralName}'
+            BEGIN
+                SELECT RAISE(ABORT, 'POLARIS_RECEIPTS_FAIL_ASTRAL');
+            END
+        `);
+
+        let result;
+        try {
+            // Request order deliberately UTF-16-ascending (astral first) so a
+            // request-ordered engine ALSO fails the discriminator.
+            result = await openContent(ctx, root, path.join(root, bmpName), [
+                { path: path.join(root, astralName), content: 'export function astralNew(): number { return 20; }\n' },
+                { path: path.join(root, bmpName), content: 'export function bmpNew(): number { return 10; }\n' },
+            ]);
+        } finally {
+            mods.db.execRaw(conn, 'DROP TRIGGER IF EXISTS polaris_receipts_fail_astral');
+        }
+
+        expect(result.status).toBe('failed');
+        if (result.status !== 'failed') return;
+        // Discriminator: byte order commits the BMP file first.
+        expect(result.updated).toEqual([bmpName]);
+        expect(result.unchanged).toEqual([]);
+        expect(result.failedPath).toBe(astralName);
+
+        // Independent raw-SQL controls: BMP file committed its new program,
+        // astral file rolled back to disk facts.
+        const defs = (filePath) => mods.db.queryRaw(conn,
+            "SELECT name FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY name",
+            filePath).map((row) => row.name);
+        expect(defs(bmpName)).toContain('bmpNew');
+        expect(defs(astralName)).toContain('astralOld');
+        expect(defs(astralName)).not.toContain('astralNew');
+    });
+});

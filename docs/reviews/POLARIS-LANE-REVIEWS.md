@@ -274,3 +274,20 @@ zero existing tests edited, zero regressions.
 - The report's stale plan-line citation (763–767 → actual 775–786) was
   self-corrected by the lane against text, not line numbers — the right
   instinct given the plan doc's drift.
+
+---
+
+## resolution-3 — FINAL VERDICT: ACCEPT (merged)
+
+FIX-REPORT delivered (copilot session-state) and reconciled 1:1 against the
+independent verifier's earlier findings: identical numbers (17/1754 →
+15/1762 in-lane), identical mechanics, RED-first proofs for all five
+(A17 validatePath guard-only routing, A1 mandatory .mcp exclude both
+branches, A11 four-sub-bug receipt fix, A12 incomplete_walk, A16
+typedStoreFailure two-seam classifier). Alternatives ranked per finding;
+the A17×A12 interaction explicitly de-risked; the one team-test
+correction was previously adjudicated STRONGER under N3. Constraints
+clean (no OFFSET, no non-null assertions, TOON untouched, no public type
+changes). Merged into integration-next with one lead seam fix recorded as
+N8 (A9×A11 content-key ordering + discriminating pin). Post-merge:
+1790 passed / 7 failed / 2 skipped; A17+A1 signatures closed exactly.

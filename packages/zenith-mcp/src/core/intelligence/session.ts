@@ -776,7 +776,10 @@ export async function openAstSessionWithDeps(
         }
         // Canonical store-key order: a partial commit is deterministic and the
         // updated/unchanged receipt names exactly the attempted prefix.
-        contentKeys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        // A9 discipline (merge-seam fix, ledger N8): canonical string order is
+        // UTF-8 byte order (SQLite BINARY), matching the digest sort below —
+        // JS relational ordering diverges on [U+E000,U+FFFF] vs astral keys.
+        contentKeys.sort((a, b) => Buffer.compare(Buffer.from(a.key, 'utf8'), Buffer.from(b.key, 'utf8')));
         for (let i = 0; i < contentKeys.length; i++) {
             const entry = contentKeys[i];
             if (entry === undefined) continue;
