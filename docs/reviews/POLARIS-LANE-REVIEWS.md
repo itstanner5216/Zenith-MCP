@@ -125,3 +125,73 @@ contract or facade changes, zero TOON proximity.
 5. Out of scope here: the A19-shaped work appearing in the integration
    worktree belongs to a different (path-confused) agent — see ledger N4;
    it will be reviewed as its own delivery.
+
+---
+
+## Lane: resolution-5 — A2 / A6 / A7 / A15 / A21 (contracts cluster)
+
+**Verdict: ACCEPT AS PROPOSED AMENDMENTS — every fix requires the owner's
+explicit approval before merge** (all five change public types, payloads, or
+answer values; the lane itself framed them exactly that way and self-adopted
+nothing — the correct governance posture, applied lane-side without
+prompting).
+
+### Gate result (authoritative)
+
+- Candidate: `candidate/resolution-5` (0442c96), assembled in a scratch
+  worktree from the lane's uncommitted diff + 3 new pinning suites; merged
+  onto corrected integration HEAD 05838f9.
+- Suite: **1,773 passed / 11 failed / 2 skipped.** Newly green: exactly the
+  6 predicted baseline signatures (A2 compile-oracle + A6 ×5 paging/facade).
+  Foreign failures 11/11 unchanged; zero mutations; zero new failures;
+  **zero existing tests edited by this lane** (no N3 adjudication needed).
+- Gate history, disclosed: the first run STOPped on 4 failures that were
+  the lead's own leaked A10 proof suite on integration HEAD (ledger N5,
+  lead process error, now removed) — not a resolution-5 defect. Clean
+  rerun above. Res1's published numbers predate the leak and stand.
+
+### Per-amendment recommendation (lead decision — pending owner)
+
+1. **A2 (`ResolvedCandidateBasis`) — approve; nearest to a non-amendment.**
+   Plan line 441 *verbatim* mandates this exclusion; the implementation had
+   failed to encode it. Grep-verified zero `resolved` constructors at v4 →
+   pure compile-time tightening. Their alternative 2 (stricter
+   `ProvenLocatedSymbol` split) is worth remembering at Wave 5, not now.
+2. **A6 (atomic object-section position; `identity.facts: null`) —
+   approve.** Adopts the `location.ts` house pattern; `consumed +=
+   factCount` reconciles returned/total; unknown object sections fail loud.
+   Two accepted semantics noted: atomic emission may overshoot the page
+   limit when budget remains (Decision 24 says page maxima aren't
+   truncation), and non-carrying pages are asymmetric (`identity: null` vs
+   `relations` empty arrays) — forced by the shapes, element-level
+   exactly-once holds either way.
+3. **A7 (faithful projections; `ImportFact.origin`; multi-domain sections)
+   — approve.** Largest surface, but every field maps 1:1 to a persisted
+   column (verified in diff); orphans/unmatched bindings surface explicitly
+   instead of vanishing; byteRange kept discrete rather than fabricating
+   `precision:'byte'` (plan-conformant); the never-requested
+   `import_binding` coverage domain is a real conservation fix.
+4. **A15 (real frontier identity) — approve.** PK-joined LEFT JOIN can't
+   multiply rows; `locateTarget` mints real fact keys with full null-guards
+   (returns null, never fabricates); byte-identity oracle proves candidate
+   keys equal the target's own declaration keys; `compareCandidates` reused
+   (Rule 17). Coherence: candidates stay `heuristic_name`, which their own
+   A2 fix compile-bans from the resolved arm. One question filed for the
+   A14 lane's collision check: unkeyable *ancestors* are skipped from
+   `parentChain` (shorter-but-real chain) — defensible, adjacent territory.
+5. **A21 (drop `lastIndexedAt`) — approve.** Plan line 732 is unambiguous;
+   residual references are one doc comment + their negative-assertion test.
+
+### Merge notes
+
+- **`questions/file.ts` three-way collision incoming:** resolution-5 (A6/A7
+  assembly+paging), resolution-2 (in-flight, same file), and the
+  path-confused agent's A19 (`parseJsonStringArray`, same file). Merge
+  order within file.ts should be: res5 first (largest, structural), then
+  A19 (3-line local change, trivial rebase), then res2 adjudicated against
+  both.
+- Work is uncommitted in the lane worktree (same risk as res1);
+  `candidate/resolution-5` (0442c96) is the durable artifact.
+- RED-first was proven mechanically (12/13 new assertions fail with source
+  reverted; the 13th is a count-invariant that holds vacuously — honest
+  disclosure by the lane).
