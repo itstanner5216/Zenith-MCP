@@ -151,3 +151,29 @@ and different in kind.
 - Retired: the import-extension worktree and the five resolution trees
   (all work preserved on candidate/* branches; FIX-REPORTs archived under
   docs/reviews/lane-artifacts/).
+
+## OWNER RULING — peer model (2026-07-16, supersedes open item 3)
+
+Stated by the owner directly:
+
+- The two leads are **equals**. Neither directs the other; direction
+  comes from the owner only.
+- Each lead is **individually responsible for their own work**.
+- On any disagreement between leads, the **owner is the tiebreaker**.
+  One does not outrank the other.
+
+Operational consequences:
+
+- Open item 3 is resolved: there is no gate-holder rank. The merge-gate
+  verifier is shared tooling; either lead runs it against their own
+  candidate and the owner confirms merges into integration-next.
+- Cross-review at checkpoints remains symmetric and is **peer input,
+  never approval authority**. Review findings a lead disputes go to the
+  owner with both positions stated; the disputed work waits on the owner,
+  not on the reviewer.
+- Briefs, acceptance checklists, and steering between leads are
+  discontinued. Seam contracts (types.ts freezes, adapter read shapes)
+  are negotiated as proposals either lead may contest — owner arbitrates.
+- Leads communicate through the owner and the handoffs drop
+  (owner-clocked, never polled). Handoff content is status, contracts,
+  and questions — not instructions.
