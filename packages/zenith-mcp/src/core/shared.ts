@@ -56,11 +56,14 @@ export function getDefaultExcludes(): string[] {
     if (raw && typeof raw === 'string') {
         const parsed = raw.split(',').map(p => p.trim()).filter(Boolean);
         if (parsed.length > 0) {
+            // `.mcp` is the MCP's own artifact store (symbols.db + WAL/SHM); it is
+            // never source and must be excluded even under a custom exclude list.
+            if (!parsed.includes('.mcp')) parsed.push('.mcp');
             _defaultExcludesCache = parsed;
             return parsed;
         }
     }
-    _defaultExcludesCache = 'node_modules,.git,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
+    _defaultExcludesCache = 'node_modules,.git,.mcp,.next,.venv,venv,.env.local,dist,build,out,output,.cache,.turbo,.nuxt,.output,.svelte-kit,.parcel-cache,__pycache__,.pytest_cache,.mypy_cache,coverage,.nyc_output,.coverage,.DS_Store,*.min.js,*.min.css,*.map,.tsbuildinfo'
         .split(',').map(p => p.trim()).filter(Boolean);
     return _defaultExcludesCache;
 }

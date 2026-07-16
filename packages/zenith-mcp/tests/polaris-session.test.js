@@ -266,10 +266,13 @@ describe('content mode', () => {
         const alpha = path.join(root, 'src', 'alpha.ts');
         const beta = path.join(root, 'src', 'deep', 'beta.ts');
         const notes = path.join(root, 'notes.txt');
-        const alphaBytes = fs.readFileSync(alpha, 'utf8'); // unchanged — no write
+        const alphaBytes = fs.readFileSync(alpha, 'utf8'); // byte-identical — no write
 
-        // Arm a fault on symbol INSERT: alpha (byte-identical) passes without
-        // writing; beta (changed bytes) hits the trigger and fails.
+        // A11: content files are processed in CANONICAL STORE-KEY order
+        // (notes.txt < src/alpha.ts < src/deep/beta.ts), not caller order.
+        // Arm a fault on symbol INSERT: notes.txt (non-indexable) and the
+        // byte-identical alpha both return 0 (no reindex, no INSERT) and are
+        // 'unchanged'; beta (changed bytes) reindexes, hits the trigger, fails.
         const conn = mods.pc.getGlobalDbConnection();
         const trigger = mods.helpers.armFault(conn, { table: 'symbols', op: 'INSERT' });
         const result = await mods.session.openAstSessionWithDeps(ctx, {
@@ -280,7 +283,7 @@ describe('content mode', () => {
                 files: [
                     { path: alpha, content: alphaBytes },
                     { path: beta, content: 'export function betaFn(): number {\n    return 99;\n}\n' },
-                    { path: notes, content: 'never reached\n' },
+                    { path: notes, content: 'plain notes v2\n' },
                 ],
             },
         });
@@ -289,11 +292,16 @@ describe('content mode', () => {
         expect(result.status).toBe('failed');
         expect(result.failure.code).toBe('FRESHNESS_FAILED');
         expect(result.failure.retryable).toBe(true);
-        expect(result.updated.length).toBe(1);
-        expect(result.updated[0].endsWith('src/alpha.ts')).toBe(true);
+        // A11: the 0|1 reindex result is honored — nothing was reindexed, so
+        // 'updated' is empty; both attempted already-fresh files are 'unchanged'
+        // in canonical order; the failed file is named ONLY in failedPath and
+        // never enters 'unchanged'.
+        expect(result.updated).toEqual([]);
+        expect(result.unchanged.length).toBe(2);
+        expect(result.unchanged[0].endsWith('notes.txt')).toBe(true);
+        expect(result.unchanged[1].endsWith('src/alpha.ts')).toBe(true);
         expect(result.failedPath.endsWith('src/deep/beta.ts')).toBe(true);
-        expect(result.unchanged.length).toBe(2); // beta (failed) + notes (never reached)
-        expect(result.unchanged[1].endsWith('notes.txt')).toBe(true);
+        expect(result.unchanged.some((p) => p.endsWith('beta.ts'))).toBe(false);
     });
 });
 
