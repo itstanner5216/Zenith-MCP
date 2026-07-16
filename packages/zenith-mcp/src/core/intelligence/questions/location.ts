@@ -61,6 +61,7 @@ import {
     injectionFactOf,
     locatedSymbolOf,
     occurrenceFactOf,
+    publicPathOf,
     scopeFactOf,
     storeCorrupt,
 } from './file.js';
@@ -171,6 +172,7 @@ export function composeLocationModel(
         at: { startLine: at.startLine, endLine: at.endLine, column: at.column },
         include,
     }, limit);
+    const publicPath = publicPathOf(entry.address, storeKey);
 
     let resumeAfter = -1;
     if (q.page?.after !== undefined) {
@@ -241,7 +243,7 @@ export function composeLocationModel(
                     b.line - a.line || a.endLine - b.endLine || b.column - a.column
                     || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
             for (const d of containing) {
-                enclosing.push({ ...locatedSymbolOf(d, storeKey), candidateBasis: 'parent_containment' });
+                enclosing.push({ ...locatedSymbolOf(d, publicPath), candidateBasis: 'parent_containment' });
             }
             for (const row of assembly.scopes) {
                 const fact = scopeFactOf(row, assembly);
@@ -267,7 +269,7 @@ export function composeLocationModel(
                 positioned.push({
                     line: sym.line, column: sym.column,
                     rank: FAMILY_RANK.occurrence, seq: seq++,
-                    item: { kind: 'occurrence', fact: occurrenceFactOf(sym, storeKey) },
+                    item: { kind: 'occurrence', fact: occurrenceFactOf(sym, publicPath) },
                 });
             }
             for (const sym of assembly.references) {
@@ -278,7 +280,7 @@ export function composeLocationModel(
                 positioned.push({
                     line: sym.line, column: sym.column,
                     rank: FAMILY_RANK.occurrence, seq: seq++,
-                    item: { kind: 'occurrence', fact: occurrenceFactOf(sym, storeKey) },
+                    item: { kind: 'occurrence', fact: occurrenceFactOf(sym, publicPath) },
                 });
             }
         }
@@ -338,7 +340,7 @@ export function composeLocationModel(
     };
 
     const model: LocationModel = {
-        path: storeKey,
+        path: publicPath,
         at: q.at,
         enclosing, // served whole on every page; only `facts` is paged
         facts: kept,

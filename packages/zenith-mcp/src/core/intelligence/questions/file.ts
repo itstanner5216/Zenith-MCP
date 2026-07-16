@@ -43,6 +43,15 @@ export function storeCorrupt(detail: string): never {
     throw new Error(`STORE_CORRUPT: ${detail}`);
 }
 
+/** Decode an internal store key to the allowed-root-relative public path (A5). */
+export function publicPathOf(address: { fromStoreKey(storeKey: string): string | null }, storeKey: string): string {
+    // A non-decodable key on a public path is store corruption, never a silent
+    // re-leak of the internal key (fail loud per the typed-failure discipline).
+    const publicPath = address.fromStoreKey(storeKey);
+    if (publicPath === null) storeCorrupt(`store key does not decode to a public path`);
+    return publicPath;
+}
+
 function requirePresent<T>(value: T | null | undefined, detail: string): T {
     if (value === null || value === undefined) storeCorrupt(detail);
     return value;
@@ -58,7 +67,10 @@ export function parseJsonStringArray(text: string | null, context: string): stri
         storeCorrupt(`${context}: unparseable JSON list`);
     }
     if (!Array.isArray(parsed)) storeCorrupt(`${context}: JSON list is not an array`);
-    return parsed.map((v) => typeof v === 'string' ? v : JSON.stringify(v));
+    return parsed.map((v) => {
+        if (typeof v !== 'string') storeCorrupt(`${context}: JSON list member is not a string`);
+        return v;
+    });
 }
 
 /** Parse a persisted [{name,line,column}] scope-member list into faithful
@@ -192,7 +204,10 @@ export function assembleFile(entry: SessionEntry, storeKey: string): FileAssembl
             chain.push(parent);
             cursor = parent.row.parentInternalId;
         }
-        const qualifiedName = s.role === 'declaration'
+        // A14: a depth-capped or missing-parent walk (cursor !== null at exit)
+        // cannot assert a complete qualified name — claim it only at the root.
+        const ancestryComplete = cursor === null;
+        const qualifiedName = s.role === 'declaration' && ancestryComplete
             ? [...chain.map((p) => p.name).reverse(), s.name].join('.')
             : null;
         const nearest = chain[0];
@@ -230,10 +245,10 @@ export function assembleFile(entry: SessionEntry, storeKey: string): FileAssembl
 // Public-fact projections (shared by every composer)
 // ---------------------------------------------------------------------------
 
-export function occurrenceFactOf(sym: AssembledSymbol, storeKey: string): OccurrenceFact {
+export function occurrenceFactOf(sym: AssembledSymbol, publicPath: string): OccurrenceFact {
     return {
         handle: sym.handle,
-        path: storeKey,
+        path: publicPath,
         role: sym.role,
         name: sym.name,
         qualifiedName: sym.qualifiedName,
@@ -248,10 +263,10 @@ export function occurrenceFactOf(sym: AssembledSymbol, storeKey: string): Occurr
     };
 }
 
-export function locatedSymbolOf(sym: AssembledSymbol, storeKey: string): LocatedSymbol {
+export function locatedSymbolOf(sym: AssembledSymbol, publicPath: string): LocatedSymbol {
     return {
         handle: sym.handle,
-        path: storeKey,
+        path: publicPath,
         name: sym.name,
         qualifiedName: sym.qualifiedName ?? sym.name,
         kind: sym.kind,
@@ -448,6 +463,8 @@ export function frontierOf(entry: SessionEntry, assembly: FileAssembly): Relatio
             .filter((r) => r.depth > 0)
             .sort((a, b) => a.depth - b.depth);
         // Computed ancestors: real persisted parent fact keys, innermost-first.
+        // (res-5 A15: keys stay RAW store-key identity — byte-identical to
+        // assembleSymbol minting; res-2 A5 decode applies to PUBLIC fields only.)
         const parentChain: string[] = [];
         for (const ancestor of chain) {
             const ancestorKey = keyOf(ancestor);
@@ -455,8 +472,13 @@ export function frontierOf(entry: SessionEntry, assembly: FileAssembly): Relatio
         }
         return {
             handle: factHandleOf(key),
-            path: self.filePath,
+            // N6 closure (A5×A15): the public candidate path decodes the
+            // store key; hard-fails STORE_CORRUPT rather than re-leaking.
+            path: publicPathOf(entry.address, self.filePath),
             name: self.name,
+            // N11 (pending owner): the candidate type's qualifiedName is
+            // non-nullable, so a truncated walk still joins here — applying
+            // A14's claim-strip at this site needs a one-field type amendment.
             qualifiedName: [...chain.map((r) => r.name ?? 'unknown').reverse(), self.name].join('.'),
             kind: self.kind,
             range: lineRangeOf(self.line, self.column, self.endLine ?? self.line),
@@ -511,7 +533,7 @@ export function frontierOf(entry: SessionEntry, assembly: FileAssembly): Relatio
                 },
             ));
         return {
-            source: locatedSymbolOf(g.source, assembly.storeKey),
+            source: locatedSymbolOf(g.source, publicPathOf(entry.address, assembly.storeKey)),
             referencedName: g.referencedName,
             referenceKind: g.referenceKind,
             count: g.count,
@@ -589,6 +611,7 @@ export function composeFileModel(
         PROVISIONAL_LIMITS.pageMaxima.fileFacts,
     ));
     const queryDigest = entry.queryDigest('fileModel', { path: storeKey, sections: ordered }, limit);
+    const publicPath = publicPathOf(entry.address, storeKey);
 
     // Continuation: position into the canonical (section, fact) sequence.
     let resumeAfter = -1;
@@ -621,6 +644,11 @@ export function composeFileModel(
     // unsupported files get typed unavailable sections; unreadable files get
     // empty facts under an incomplete_facts issue (we know nothing and say so).
     const assembly = member.status === 'present' ? assembleFile(entry, storeKey) : null;
+    // A14: a declaration whose parent walk truncated cannot state a qualified
+    // name (null); surface that as an incomplete-facts caveat on the answer.
+    if (assembly !== null && assembly.declarations.some((d) => d.qualifiedName === null)) {
+        issues.add('incomplete_facts');
+    }
 
     const sections: BuiltSection[] = [];
     const push = (result: FileSectionResult, factCount: number): void => {
@@ -641,38 +669,31 @@ export function composeFileModel(
             continue;
         }
         if (assembly === null) {
-            // unreadable, or present in the domain but absent from the store
-            issues.add('incomplete_facts');
-            for (const domain of domains) coverage.complete(domain);
-            switch (section) {
-                case 'identity':
-                    push({
-                        section: 'identity', status: 'partial',
-                        facts: {
-                            path: storeKey,
-                            language: entry.languageOf(storeKey),
-                            sourceHash: '',
-                            oversized: false,
-                        },
-                    }, 1);
-                    break;
-                case 'relations':
-                    push({ section: 'relations', status: 'partial', facts: { explicit: [], frontier: [] } }, 0);
-                    break;
-                case 'coverage':
-                    break; // emitted last from the builder
-                default:
-                    push({ section, status: 'partial', facts: [] } as FileSectionResult, 0);
+            // A8 (N7 Option A): present in the domain but absent/unreadable in
+            // the store — no facts exist, so every requested domain is
+            // unavailable, never falsely complete (also removes the raw
+            // storeKey identity fallback that leaked here pre-merge).
+            for (const domain of domains) coverage.unavailable(domain, 'source_unreadable');
+            if (section !== 'coverage') {
+                push({ section, status: 'unavailable', reason: 'source_unreadable' } as FileSectionResult, 0);
             }
             continue;
         }
 
+        // A8 (N7 Option A): an oversized source preserves stale prior rows;
+        // withhold parse-dependent content as unavailable instead of projecting
+        // it complete. Identity (path/language/hash) is still known and honest.
+        if (assembly.oversized && section !== 'identity' && section !== 'coverage') {
+            for (const domain of domains) coverage.unavailable(domain, 'source_file_too_large');
+            push({ section, status: 'unavailable', reason: 'source_file_too_large' } as FileSectionResult, 0);
+            continue;
+        }
         for (const domain of domains) coverage.complete(domain);
         if (assembly.oversized) issues.add('source_file_too_large');
         switch (section) {
             case 'identity': {
                 const facts: FileIdentityFacts = {
-                    path: storeKey,
+                    path: publicPath,
                     language: entry.languageOf(storeKey),
                     sourceHash: assembly.sourceHash,
                     oversized: assembly.oversized,
@@ -681,12 +702,12 @@ export function composeFileModel(
                 break;
             }
             case 'declarations': {
-                const facts = assembly.declarations.map((s) => occurrenceFactOf(s, storeKey));
+                const facts = assembly.declarations.map((s) => occurrenceFactOf(s, publicPath));
                 push({ section, status: 'complete', facts }, facts.length);
                 break;
             }
             case 'references': {
-                const facts = assembly.references.map((s) => occurrenceFactOf(s, storeKey));
+                const facts = assembly.references.map((s) => occurrenceFactOf(s, publicPath));
                 push({ section, status: 'complete', facts }, facts.length);
                 break;
             }
@@ -813,7 +834,7 @@ export function composeFileModel(
     };
 
     const model: FileModel = {
-        path: storeKey,
+        path: publicPath,
         sections: paged,
         page,
         coverage: cov,

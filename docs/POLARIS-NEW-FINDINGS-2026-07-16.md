@@ -205,3 +205,30 @@ Owner clarifications superseding the first version of this entry:
    reliable end result directly; building the extra mechanism does not
    strengthen the implementation. Recorded so the idea is not
    reintroduced later as a presumed gap.
+
+---
+
+## N11 — Residual: candidate-site qualifiedName cannot claim-strip (PENDING OWNER)
+
+Discovered at the res-2 stitch: A14's claim-strip (qualifiedName null when
+the parent walk truncated) is implemented for declaration facts per the
+approved amendment, but locateTarget's heuristic candidates carry a
+NON-NULLABLE qualifiedName in the frozen candidate type, so a truncated
+walk still joins a dotted name there (truncation IS detectable —
+parentInternalId is in the ancestry row). The lead attempted the same
+approved mechanism at this site; tsc correctly rejected it as a new
+public type change, and it was reverted rather than adopted unilaterally.
+Fix if owner wants it: one-field amendment (candidate qualifiedName:
+string | null), then the identical mechanism applies. Mitigation today:
+candidates are explicitly heuristic_name basis (never proof-bearing), and
+the code site carries an N11 comment.
+
+## Program close (2026-07-16)
+
+All 21 audit findings fixed and merged. Final board on integration-next:
+1817 passed / 0 failed / 2 skipped. Train: res-1 (A3/A4/A9/A10/A18) →
+res-4 (A13/A20) → res-3 (A1/A11/A12/A16/A17, +N8 seam fix) → res-5
+(A2/A6/A7/A15/A21, owner-approved amendments) → res-2 (A19/A5/A8/A14,
+N7 Option A, N6 seam closed at stitch). Every merge shrank the failure
+set by exactly its predicted signatures; zero mutations; zero new
+failures anywhere in the train.

@@ -303,3 +303,21 @@ oracle, A6 x5 paging/facade), 13 new lane tests green, zero mutations.
 Post-merge: 1809 passed / 1 failed / 2 skipped — the sole remaining
 failure is A5 (res-2, in flight). N6 (A5×A15 frontier candidate paths)
 remains open by design and resolves at the res-2 stitch.
+
+---
+
+## resolution-2 — FINAL VERDICT: ACCEPT (merged; program-closing lane)
+
+A19 (reject-as-corruption), A5 (publicPathOf hard-fail decode at every
+public projection — owner-refined per N6, corruption test keys derived
+from codec never payload), A8 (N7 Option A: source_unreadable /
+source_file_too_large, single-member assemblies unavailable, additive —
+zero flipped pins as enumerated), A14 (claim-strip + incomplete_facts
+coverage half). Gate deliverables both delivered (empty switch
+enumeration; zero pin flips). Written against pre-res-5 file.ts; the
+lead performed the semantic stitch onto res-5's rework at the gate:
+res-2's A8 semantics over res-5's plural SECTION_DOMAINS, publicPathOf
+extended to res-5's locateTarget candidates (closing N6), internal fact
+keys kept raw (preserving A15 byte-identity). One residual recorded as
+N11 (candidate qualifiedName type). Post-merge: 1817/0/2 — the audit
+program closes at 21/21.
