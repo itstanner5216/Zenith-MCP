@@ -87,7 +87,19 @@ export interface LocatedSymbol {
 }
 
 export type ProvableSymbolHandle = Exclude<SymbolHandle, { kind: 'text' }>;
-export type ResolvedLocatedSymbol = LocatedSymbol & { handle: ProvableSymbolHandle };
+/**
+ * Only proof-bearing candidate bases may inhabit a resolved target. Plan
+ * §Locked decisions line 441: "resolved has no weak basis variant. A
+ * compile-time constructor test must prove that a candidate carrying
+ * heuristic_name, legacy_callee_id (internal only), text_occurrence, or a
+ * text handle cannot satisfy the resolved branch or a proven relation
+ * endpoint." legacy_callee_id is internal-only and never in CandidateBasis.
+ */
+export type ResolvedCandidateBasis = Exclude<CandidateBasis, 'heuristic_name' | 'text_occurrence'>;
+export type ResolvedLocatedSymbol = LocatedSymbol & {
+    handle: ProvableSymbolHandle;
+    candidateBasis: ResolvedCandidateBasis;
+};
 
 export type ResolutionAnswer =
     | {
@@ -473,25 +485,39 @@ export interface OccurrenceFact {
     ownerSource: LocatedSymbol['parentChainSource'];
     evidence: EvidenceGrade;
     tainted: boolean;
+    /** Persisted declared visibility (e.g. public/private); null when the
+     * language/row carries none. Never inferred. */
+    visibility: string | null;
 }
 
 // ---------------------------------------------------------------------------
 // Task 2.1 integration — the seven answer payloads
 // ---------------------------------------------------------------------------
 
-/** File identity facts (ledger row: file identity/language/hashes/coverage). */
+/** File identity facts (ledger row: file identity/language/hashes/coverage).
+ * Persistence mechanics (row IDs, storage keys, timestamps) never cross the
+ * facade — plan §Authoritative fact ledger line 732 — so no lastIndexedAt. */
 export interface FileIdentityFacts {
     path: string;
     language: string | null;
     sourceHash: string;                 // exact stored content hash or versioned sentinel
     oversized: boolean;                 // hash is the too-large sentinel
-    lastIndexedAt: number;
+}
+
+/** One persisted scope member (parameter or local) — plan §Authoritative
+ * fact ledger "Parent symbols, local/exact scopes". v4 rows carry
+ * line/column precision. */
+export interface ScopeMemberFact {
+    name: string;
+    range: SourceRange;
 }
 
 export interface ScopeFact {
     kind: string;
     range: SourceRange;
     ownerStableKey: string | null;
+    parameters: readonly ScopeMemberFact[];
+    locals: readonly ScopeMemberFact[];
 }
 
 export interface ImportBindingFact {
@@ -502,7 +528,16 @@ export interface ImportBindingFact {
     range: SourceRange;
 }
 
+/**
+ * `origin:'statement'` projects a persisted import statement and its bindings.
+ * `origin:'binding_only'` projects persisted import_binding rows that match no
+ * statement span — surfaced faithfully rather than silently dropped (plan
+ * §Authoritative fact ledger; import_binding losslessProjection is
+ * `fileModel.imports[].bindings`). A binding_only group invents no statement:
+ * `importedNames` is empty and `range` covers only its own bindings' lines.
+ */
 export interface ImportFact {
+    origin: 'statement' | 'binding_only';
     module: string;
     importedNames: readonly string[];
     range: SourceRange;
@@ -517,14 +552,21 @@ export interface AnchorFact {
 
 export interface InjectionFact {
     language: string;
+    hostLanguage: string | null;
     range: SourceRange;
+    /** Exact persisted byte span when present; never invented from lines. */
+    byteRange: { startByte: number; endByte: number } | null;
 }
 
 export interface StructureFact {
-    ownerStableKey: string;
+    ownerStableKey: string | null;
     parameters: readonly string[];
     modifiers: readonly string[];
     declaredReturnType: string | null;
+    decorators: readonly string[];
+    generics: string | null;
+    parentKind: string | null;
+    parentName: string | null;
     extendsNames: readonly string[];
 }
 
@@ -554,9 +596,15 @@ export interface RelationFacts {
  * Exactly one tagged result per requested FileSection — omission is not a
  * state. A section that cannot be served at the current schema/evidence level
  * is present with status 'unavailable' and a typed reason.
+ *
+ * Object-shaped enumerable sections occupy one stable cursor position and are
+ * emitted whole on exactly one page (plan Decision 24). On pages that do not
+ * carry that position the section is still present but empty: `relations`
+ * carries `{explicit:[],frontier:[]}` and `identity` carries `facts:null`.
+ * A null identity means only "not on this page" — never unavailable.
  */
 export type FileSectionResult =
-    | { section: 'identity'; status: 'complete' | 'partial'; facts: FileIdentityFacts }
+    | { section: 'identity'; status: 'complete' | 'partial'; facts: FileIdentityFacts | null }
     | { section: 'declarations'; status: 'complete' | 'partial'; facts: readonly OccurrenceFact[] }
     | { section: 'references'; status: 'complete' | 'partial'; facts: readonly OccurrenceFact[] }
     | { section: 'scopes'; status: 'complete' | 'partial'; facts: readonly ScopeFact[] }

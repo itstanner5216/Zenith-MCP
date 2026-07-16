@@ -2169,7 +2169,9 @@ export interface V4ParentAncestryRow {
     parentInternalId: number | null;
     name: string | null;
     kind: string | null;
+    role: 'declaration' | 'reference' | null;
     filePath: string | null;
+    hash: string | null;
     line: number | null;
     endLine: number | null;
     column: number | null;
@@ -2517,6 +2519,10 @@ export function readV4CompleteFileFactBundle(
  * `depth < 64` guard, so a cyclic seed can produce depths 0 through 64 and
  * always terminates. Statement count: 0 for no seeds, otherwise exactly 1.
  *
+ * Each row also carries its file's stored hash and its declaration/reference
+ * role so a caller can mint the row's real persisted fact key (no fabricated
+ * source hash or assumed role). A left join keeps a hashless row visible.
+ *
  * SQL: WITH RECURSIVE requested(seed_internal_id) AS (VALUES ...),
  * ancestry AS (seed rows UNION ALL parent PK joins WHERE depth < ?).
  */
@@ -2530,18 +2536,24 @@ export function readV4ParentAncestry(
     const sql = `
         WITH RECURSIVE requested(seed_internal_id) AS (VALUES ${values}),
         ancestry(
-            seed_internal_id, internal_id, parent_internal_id, name, kind,
-            file_path, line, end_line, column, depth
+            seed_internal_id, internal_id, parent_internal_id, name, kind, role,
+            file_path, hash, line, end_line, column, depth
         ) AS (
             SELECT r.seed_internal_id, s.id, s.parent_symbol_id, s.name, s.type,
-                   s.file_path, s.line, s.end_line, s.column, 0
+                   CASE WHEN s.kind = 'def' THEN 'declaration'
+                        WHEN s.kind = 'ref' THEN 'reference' END,
+                   s.file_path, f.hash, s.line, s.end_line, s.column, 0
             FROM requested r
             JOIN symbols s ON s.id = r.seed_internal_id
+            LEFT JOIN files f ON f.path = s.file_path
             UNION ALL
             SELECT a.seed_internal_id, p.id, p.parent_symbol_id, p.name, p.type,
-                   p.file_path, p.line, p.end_line, p.column, a.depth + 1
+                   CASE WHEN p.kind = 'def' THEN 'declaration'
+                        WHEN p.kind = 'ref' THEN 'reference' END,
+                   p.file_path, pf.hash, p.line, p.end_line, p.column, a.depth + 1
             FROM ancestry a
             JOIN symbols p ON p.id = a.parent_internal_id
+            LEFT JOIN files pf ON pf.path = p.file_path
             WHERE a.depth < ?
         )
         SELECT seed_internal_id AS seedInternalId,
@@ -2549,7 +2561,9 @@ export function readV4ParentAncestry(
                parent_internal_id AS parentInternalId,
                name,
                kind,
+               role,
                file_path AS filePath,
+               hash,
                line,
                end_line AS endLine,
                column,

@@ -20,9 +20,9 @@ import type {
     AnchorFact, ContinuationCursor, CoverageIssue, FactCoverage, FactDomain,
     FileIdentityFacts, FileModel, FileModelQuestion, FileSection,
     FileSectionResult, ImportBindingFact, ImportFact, InjectionFact,
-    LocatedSymbol, OccurrenceFact, PageInfo, ProvenRelation, QueryResult,
-    RelationFrontier, ScopeFact, SourceRange, StructureFact, StructuralProofStep,
-    SymbolHandle, UnavailabilityReason,
+    LocatedSymbol, NonEmpty, OccurrenceFact, PageInfo, ProvenRelation, QueryResult,
+    RelationFrontier, ScopeFact, ScopeMemberFact, SourceRange, StructureFact,
+    StructuralProofStep, SymbolHandle, UnavailabilityReason,
 } from '../types.js';
 import type { SessionEntry } from '../session.js';
 import type {
@@ -32,7 +32,7 @@ import type {
 } from '../../db-adapter.js';
 import { LOCKED_BOUNDS, PROVISIONAL_LIMITS } from '../limits.js';
 import {
-    canonicalJsonStringify, coverageBuilder, factKey,
+    canonicalJsonStringify, compareCandidates, coverageBuilder, factKey,
 } from '../evidence.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,31 @@ export function parseJsonStringArray(text: string | null, context: string): stri
     }
     if (!Array.isArray(parsed)) storeCorrupt(`${context}: JSON list is not an array`);
     return parsed.map((v) => typeof v === 'string' ? v : JSON.stringify(v));
+}
+
+/** Parse a persisted [{name,line,column}] scope-member list into faithful
+ * facts. NULL/empty is a legitimate absent list; malformed text is corruption. */
+export function parseScopeMembers(text: string | null, context: string): ScopeMemberFact[] {
+    if (text === null || text === '') return [];
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        storeCorrupt(`${context}: unparseable JSON member list`);
+    }
+    if (!Array.isArray(parsed)) storeCorrupt(`${context}: JSON member list is not an array`);
+    return parsed.map((entry) => {
+        if (entry === null || typeof entry !== 'object') {
+            storeCorrupt(`${context}: scope member is not an object`);
+        }
+        const record = entry as { name?: unknown; line?: unknown; column?: unknown };
+        const name = typeof record.name === 'string'
+            ? record.name : storeCorrupt(`${context}: scope member has no name`);
+        const line = typeof record.line === 'number'
+            ? record.line : storeCorrupt(`${context}: scope member ${name} has no line`);
+        const column = typeof record.column === 'number' ? record.column : null;
+        return { name, range: lineRangeOf(line, column, line) };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +124,6 @@ export interface FileAssembly {
     storeKey: string;
     sourceHash: string;
     oversized: boolean;
-    lastIndexedAt: number;
     symbols: AssembledSymbol[];
     declarations: AssembledSymbol[];
     references: AssembledSymbol[];
@@ -188,7 +212,6 @@ export function assembleFile(entry: SessionEntry, storeKey: string): FileAssembl
         storeKey,
         sourceHash,
         oversized: sourceHash.startsWith(TOO_LARGE_HASH_PREFIX),
-        lastIndexedAt: fileRow.lastIndexed ?? 0,
         symbols,
         declarations: symbols.filter((s) => s.role === 'declaration'),
         references: symbols.filter((s) => s.role === 'reference'),
@@ -221,6 +244,7 @@ export function occurrenceFactOf(sym: AssembledSymbol, storeKey: string): Occurr
         ownerSource: sym.ownerSource,
         evidence: 'structural',
         tainted: false,
+        visibility: sym.row.visibility,
     };
 }
 
@@ -246,6 +270,8 @@ export function scopeFactOf(row: V4ScopeFactRow, assembly: FileAssembly): ScopeF
         kind: row.scopeKind ?? 'unknown',
         range: lineRangeOf(startLine, null, endLine),
         ownerStableKey: owner?.key ?? null,
+        parameters: parseScopeMembers(row.parametersJson, `scope ${row.internalId} params in ${assembly.storeKey}`),
+        locals: parseScopeMembers(row.localsJson, `scope ${row.internalId} locals in ${assembly.storeKey}`),
     };
 }
 
@@ -254,7 +280,14 @@ export function importFactsOf(assembly: FileAssembly): ImportFact[] {
     // one module is imported through several statements. Deterministic:
     // bindings and imports both arrive in canonical position order.
     const claimed = new Set<V4ImportBindingFactRow>();
-    return assembly.imports.map((imp) => {
+    const bindingFactOf = (b: V4ImportBindingFactRow): ImportBindingFact => ({
+        importedName: b.importedName ?? b.localName,
+        localName: b.localName,
+        bindingKind: b.importKind,
+        typeOnly: b.isTypeOnly,
+        range: lineRangeOf(b.line, b.column, b.line),
+    });
+    const statements: ImportFact[] = assembly.imports.map((imp) => {
         const module = imp.module ?? '';
         const startLine = imp.startLine ?? imp.line ?? 1;
         const endLine = imp.endLine ?? startLine;
@@ -263,21 +296,42 @@ export function importFactsOf(assembly: FileAssembly): ImportFact[] {
                 && b.line >= startLine && b.line <= endLine)
             .map((b) => {
                 claimed.add(b);
-                return {
-                    importedName: b.importedName ?? b.localName,
-                    localName: b.localName,
-                    bindingKind: b.importKind,
-                    typeOnly: b.isTypeOnly,
-                    range: lineRangeOf(b.line, b.column, b.line),
-                };
+                return bindingFactOf(b);
             });
         return {
+            origin: 'statement',
             module,
             importedNames: parseJsonStringArray(imp.importedNamesJson, `imports ${module} in ${assembly.storeKey}`),
             range: lineRangeOf(startLine, null, endLine),
             bindings,
         };
     });
+    // Bindings matching no statement span are surfaced faithfully, grouped by
+    // source in canonical order, rather than silently dropped (plan
+    // §Authoritative fact ledger; import_binding is fileModel.imports[].bindings).
+    const bindingOnly = new Map<string, V4ImportBindingFactRow[]>();
+    for (const b of assembly.importBindings) {
+        if (claimed.has(b)) continue;
+        const rows = bindingOnly.get(b.source);
+        if (rows === undefined) bindingOnly.set(b.source, [b]);
+        else rows.push(b);
+    }
+    const bindingGroups: ImportFact[] = [...bindingOnly.entries()].map(([source, rows]) => {
+        let startLine = rows[0]?.line ?? 1;
+        let endLine = startLine;
+        for (const b of rows) {
+            if (b.line < startLine) startLine = b.line;
+            if (b.line > endLine) endLine = b.line;
+        }
+        return {
+            origin: 'binding_only',
+            module: source,
+            importedNames: [],
+            range: lineRangeOf(startLine, null, endLine),
+            bindings: rows.map(bindingFactOf),
+        };
+    });
+    return [...statements, ...bindingGroups];
 }
 
 export function anchorFactOf(row: V4AnchorFactRow, assembly: FileAssembly): AnchorFact {
@@ -293,18 +347,29 @@ export function injectionFactOf(row: V4InjectionFactRow, assembly: FileAssembly)
     const startLine = requirePresent(row.startLine, `injection ${row.internalId} in ${assembly.storeKey} has no start line`);
     return {
         language: row.injectedLanguage ?? 'unknown',
+        hostLanguage: row.hostLanguage,
         range: lineRangeOf(startLine, null, row.endLine ?? startLine),
+        // Faithful exact bytes when both persisted; never invented from lines.
+        byteRange: row.startByte !== null && row.endByte !== null
+            ? { startByte: row.startByte, endByte: row.endByte }
+            : null,
     };
 }
 
-export function structureFactOf(row: V4StructureFactRow, assembly: FileAssembly): StructureFact | null {
+/** Orphan structures (owner symbol row absent) are surfaced with a null owner
+ * key rather than silently dropped — plan §Authoritative fact ledger. */
+export function structureFactOf(row: V4StructureFactRow, assembly: FileAssembly): StructureFact {
     const owner = assembly.byInternalId.get(row.symbolInternalId);
-    if (owner === undefined) return null; // structure of a purged symbol row
+    const label = owner?.name ?? row.name ?? `symbol#${row.symbolInternalId}`;
     return {
-        ownerStableKey: owner.key,
-        parameters: parseJsonStringArray(row.paramsJson, `structure of ${owner.name} in ${assembly.storeKey}`),
-        modifiers: parseJsonStringArray(row.modifiersJson, `structure of ${owner.name} in ${assembly.storeKey}`),
+        ownerStableKey: owner?.key ?? null,
+        parameters: parseJsonStringArray(row.paramsJson, `structure of ${label} in ${assembly.storeKey}`),
+        modifiers: parseJsonStringArray(row.modifiersJson, `structure of ${label} in ${assembly.storeKey}`),
         declaredReturnType: row.returnText,
+        decorators: parseJsonStringArray(row.decoratorsJson, `structure of ${label} in ${assembly.storeKey}`),
+        generics: row.genericsText,
+        parentKind: row.parentKind,
+        parentName: row.parentName,
         extendsNames: [], // v4 persists no extends facts; v5 fills this
     };
 }
@@ -354,31 +419,49 @@ export function frontierOf(entry: SessionEntry, assembly: FileAssembly): Relatio
         const rows = targetsBySeed.get(id);
         const self = rows?.find((r) => r.depth === 0);
         if (rows === undefined || self === undefined) return null; // target purged since edge write
-        const name = self.name ?? 'unknown';
-        const line = self.line ?? 1;
-        const column = self.column;
+        // A candidate handle must be the target's REAL persisted fact key —
+        // same inputs assembleSymbol would use — never a fabricated hash/role.
+        // A row missing any identity input is not a resolvable fact.
+        const keyOf = (row: V4ParentAncestryRow): string | null => {
+            if (row.hash === null || row.role === null || row.filePath === null
+                || row.name === null || row.kind === null
+                || row.line === null || row.column === null) {
+                return null;
+            }
+            return factKey({
+                scopeKey: entry.basis.scopeKey,
+                path: row.filePath,
+                sourceHash: row.hash,
+                family: row.role,
+                occurrenceKey: `${row.role}:${row.name}:${row.kind}:${row.line}:${row.column}`,
+                range: lineRangeOf(row.line, row.column, row.endLine ?? row.line),
+                kind: row.kind,
+                name: row.name,
+            });
+        };
+        const key = keyOf(self);
+        if (key === null || self.name === null || self.kind === null
+            || self.line === null || self.filePath === null) {
+            return null;
+        }
         const chain = rows
             .filter((r) => r.depth > 0)
             .sort((a, b) => a.depth - b.depth);
-        const key = factKey({
-            scopeKey: entry.basis.scopeKey,
-            path: self.filePath ?? 'unknown',
-            sourceHash: 'legacy', // heuristic candidates are not proof-bearing
-            family: 'declaration',
-            occurrenceKey: `declaration:${name}:${self.kind ?? 'unknown'}:${line}:${column ?? -1}`,
-            range: lineRangeOf(line, column, self.endLine ?? line),
-            kind: self.kind ?? 'unknown',
-            name,
-        });
+        // Computed ancestors: real persisted parent fact keys, innermost-first.
+        const parentChain: string[] = [];
+        for (const ancestor of chain) {
+            const ancestorKey = keyOf(ancestor);
+            if (ancestorKey !== null) parentChain.push(ancestorKey);
+        }
         return {
             handle: factHandleOf(key),
-            path: self.filePath ?? 'unknown',
-            name,
-            qualifiedName: [...chain.map((r) => r.name ?? 'unknown').reverse(), name].join('.'),
-            kind: self.kind ?? 'unknown',
-            range: lineRangeOf(line, column, self.endLine ?? line),
+            path: self.filePath,
+            name: self.name,
+            qualifiedName: [...chain.map((r) => r.name ?? 'unknown').reverse(), self.name].join('.'),
+            kind: self.kind,
+            range: lineRangeOf(self.line, self.column, self.endLine ?? self.line),
             candidateBasis: 'heuristic_name',
-            parentChain: [],
+            parentChain,
             parentChainSource: chain.length > 0 ? 'parent_symbol_id' : 'none',
         };
     };
@@ -410,7 +493,23 @@ export function frontierOf(entry: SessionEntry, assembly: FileAssembly): Relatio
     return [...groups.values()].map((g) => {
         const candidates = [...g.targetIds]
             .map(locateTarget)
-            .filter((c): c is LocatedSymbol => c !== null);
+            .filter((c): c is LocatedSymbol => c !== null)
+            // Canonical candidate order (plan Decision 26) via the shared
+            // engine. Heuristic candidates share proofGrade/qualifier/distance,
+            // so the effective order is (sameFile desc, path, line, column,
+            // handle.stableKey) — deterministic, never insertion order.
+            .sort((a, b) => compareCandidates(
+                {
+                    symbol: a, proofGrade: 'text', qualifierVerified: false,
+                    sameFile: a.path === assembly.storeKey, nearDistance: null,
+                    line: a.range.startLine, column: a.range.startColumn ?? 0,
+                },
+                {
+                    symbol: b, proofGrade: 'text', qualifierVerified: false,
+                    sameFile: b.path === assembly.storeKey, nearDistance: null,
+                    line: b.range.startLine, column: b.range.startColumn ?? 0,
+                },
+            ));
         return {
             source: locatedSymbolOf(g.source, assembly.storeKey),
             referencedName: g.referencedName,
@@ -432,23 +531,23 @@ export const FILE_SECTION_ORDER: readonly FileSection[] = [
     'module', 'configuration', 'relations', 'bindings', 'coverage',
 ];
 
-const SECTION_DOMAIN: Readonly<Record<FileSection, FactDomain>> = {
-    identity: 'file',
-    declarations: 'declaration',
-    references: 'reference',
-    scopes: 'scope',
-    imports: 'import',
-    exports: 'export',
-    structures: 'structure',
-    signatures: 'signature',
-    anchors: 'anchor',
-    injections: 'injection',
-    diagnostics: 'diagnostic',
-    module: 'module',
-    configuration: 'configuration',
-    relations: 'relation',
-    bindings: 'binding',
-    coverage: 'file',
+const SECTION_DOMAINS: Readonly<Record<FileSection, NonEmpty<FactDomain>>> = {
+    identity: ['file'],
+    declarations: ['declaration'],
+    references: ['reference'],
+    scopes: ['scope'],
+    imports: ['import', 'import_binding'],
+    exports: ['export'],
+    structures: ['structure'],
+    signatures: ['signature'],
+    anchors: ['anchor'],
+    injections: ['injection'],
+    diagnostics: ['diagnostic'],
+    module: ['module'],
+    configuration: ['configuration'],
+    relations: ['relation'],
+    bindings: ['binding'],
+    coverage: ['file'],
 };
 
 /** Sections whose fact families do not exist at schema v4. */
@@ -514,7 +613,9 @@ export function composeFileModel(
 
     const coverage = coverageBuilder();
     const issues = new Set<CoverageIssue>();
-    for (const section of ordered) coverage.request(SECTION_DOMAIN[section]);
+    for (const section of ordered) {
+        for (const domain of SECTION_DOMAINS[section]) coverage.request(domain);
+    }
 
     // Non-present members answer honestly without fabricating certainty:
     // unsupported files get typed unavailable sections; unreadable files get
@@ -527,22 +628,22 @@ export function composeFileModel(
     };
 
     for (const section of ordered) {
-        const domain = SECTION_DOMAIN[section];
+        const domains = SECTION_DOMAINS[section];
         const v4Reason = V4_UNAVAILABLE[section];
         if (v4Reason !== undefined) {
-            coverage.unavailable(domain, v4Reason);
+            for (const domain of domains) coverage.unavailable(domain, v4Reason);
             push({ section, status: 'unavailable', reason: v4Reason }, 0);
             continue;
         }
         if (member.status === 'unsupported') {
-            coverage.unavailable(domain, 'unsupported_language');
+            for (const domain of domains) coverage.unavailable(domain, 'unsupported_language');
             push({ section, status: 'unavailable', reason: 'unsupported_language' }, 0);
             continue;
         }
         if (assembly === null) {
             // unreadable, or present in the domain but absent from the store
             issues.add('incomplete_facts');
-            coverage.complete(domain);
+            for (const domain of domains) coverage.complete(domain);
             switch (section) {
                 case 'identity':
                     push({
@@ -552,7 +653,6 @@ export function composeFileModel(
                             language: entry.languageOf(storeKey),
                             sourceHash: '',
                             oversized: false,
-                            lastIndexedAt: 0,
                         },
                     }, 1);
                     break;
@@ -567,7 +667,7 @@ export function composeFileModel(
             continue;
         }
 
-        coverage.complete(domain);
+        for (const domain of domains) coverage.complete(domain);
         if (assembly.oversized) issues.add('source_file_too_large');
         switch (section) {
             case 'identity': {
@@ -576,7 +676,6 @@ export function composeFileModel(
                     language: entry.languageOf(storeKey),
                     sourceHash: assembly.sourceHash,
                     oversized: assembly.oversized,
-                    lastIndexedAt: assembly.lastIndexedAt,
                 };
                 push({ section, status: 'complete', facts }, 1);
                 break;
@@ -603,8 +702,7 @@ export function composeFileModel(
             }
             case 'structures': {
                 const facts = assembly.structures
-                    .map((row) => structureFactOf(row, assembly))
-                    .filter((f): f is StructureFact => f !== null);
+                    .map((row) => structureFactOf(row, assembly));
                 push({ section, status: 'complete', facts }, facts.length);
                 break;
             }
@@ -635,10 +733,15 @@ export function composeFileModel(
         }
     }
 
-    // Page over the canonical fact sequence: array-shaped sections only join
-    // the position stream (object-shaped sections — relations — are served
-    // whole on every page and counted in totals but never split). Resume is
-    // by absolute position, stable under the pinned domain digest.
+    // Page over the canonical fact sequence. Every enumerable fact occupies
+    // one stable cursor position: array-shaped sections contribute one position
+    // per element; object-shaped sections (identity, relations) contribute
+    // exactly one position and are emitted WHOLE on that single page — never
+    // replayed (plan Decision 24; mirrors locationAt's one-position relation
+    // fact). On any other page the object section is present but empty. An
+    // emitted object section adds its full factCount to `consumed`, so
+    // `returned` reconciles with `total`. Resume is by absolute position,
+    // stable under the pinned domain digest.
     let consumed = 0;
     let position = 0;
     let lastEmittedPosition = resumeAfter;
@@ -646,25 +749,50 @@ export function composeFileModel(
     const paged: FileSectionResult[] = [];
     for (const built of sections) {
         const r = built.result;
-        if (r.status === 'unavailable' || !Array.isArray((r as { facts?: unknown }).facts)) {
-            paged.push(r);
+        if (r.status === 'unavailable') {
+            paged.push(r);                              // typed-unavailable: not a position
             continue;
         }
-        const facts = (r as { facts: readonly unknown[] }).facts;
-        const kept: unknown[] = [];
-        for (const fact of facts) {
-            const factPosition = position;
-            position += 1;
-            if (factPosition <= resumeAfter) continue;       // before the cursor
-            if (consumed >= limit) { truncated = true; continue; }
-            kept.push(fact);
-            consumed += 1;
-            lastEmittedPosition = factPosition;
+        const facts = (r as { facts?: unknown }).facts;
+        if (Array.isArray(facts)) {
+            const kept: unknown[] = [];
+            for (const fact of facts) {
+                const factPosition = position;
+                position += 1;
+                if (factPosition <= resumeAfter) continue;       // before the cursor
+                if (consumed >= limit) { truncated = true; continue; }
+                kept.push(fact);
+                consumed += 1;
+                lastEmittedPosition = factPosition;
+            }
+            // Plan payload rule (§Question contracts): status is coverage-derived
+            // only — paging progress lives exclusively in `page.exhausted`/`next`,
+            // so a page-cut section keeps its coverage status with facts elided.
+            paged.push({ ...r, facts: kept } as FileSectionResult);
+            continue;
         }
-        // Plan payload rule (§Question contracts): status is coverage-derived
-        // only — paging progress lives exclusively in `page.exhausted`/`next`,
-        // so a page-cut section keeps its coverage status with facts elided.
-        paged.push({ ...r, facts: kept } as FileSectionResult);
+        // Object-shaped enumerable section: one atomic cursor position.
+        const objectPosition = position;
+        position += 1;
+        let emitWhole = false;
+        if (objectPosition <= resumeAfter) {
+            // already emitted on an earlier page → present but empty
+        } else if (consumed >= limit) {
+            truncated = true;                           // deferred to a later page
+        } else {
+            emitWhole = true;
+        }
+        if (emitWhole) {
+            consumed += built.factCount;                // reconciles returned with total
+            lastEmittedPosition = objectPosition;
+            paged.push(r);                              // whole, exactly once
+        } else if (r.section === 'relations') {
+            paged.push({ ...r, facts: { explicit: [], frontier: [] } });
+        } else if (r.section === 'identity') {
+            paged.push({ ...r, facts: null });          // "not on this page", never unavailable
+        } else {
+            storeCorrupt(`fileModel object-shaped section ${r.section} has no empty projection`);
+        }
     }
 
     const totalFacts = sections.reduce((sum, s) => sum + s.factCount, 0);
