@@ -18,7 +18,11 @@ test agents' findings. Two categories: **OPEN** (real, owed, scheduled) and
    asserting "unavailable" for the remainder are pins scheduled for
    retirement, not defects.
 3. **Task 2.4 adversarial/totality/conservation/determinism suite** not started;
-   Wave 2 exit gate (x3 identical full-suite runs) not run.
+   Wave 2 exit gate (x3 identical full-suite runs) not run. Scheduled INTO 2.4
+   from composer reviews: project-mode (registry-tier) composer runs — all
+   three question suites currently exercise global-mode sessions only — and a
+   root-level non-recursive directory scopeModel probe (the group-key filter's
+   dirKey='' cell in project mode is untested).
 4. **POLARIS_REAL_DB_COPY rehearsal never executed** — env-gated test requires
    an explicit copy of a real `~/.zenith-mcp` DB; needs Tanner to provide one.
 5. **F2 plan wording amendment — DONE** (plan line ~423, dated 2026-07-15):
@@ -85,6 +89,31 @@ R8. **Status is NEVER paging-derived (fixed + pinned 2026-07-15).**
     Anyone testing against pre-fix behavior will see the flip. Pinned:
     polaris-questions-file.test.js "never infers partial", and locationAt
     equivalent.
+
+R9. **scopeModel refuses file-grain selectors** (INVALID_QUERY narrow_scope,
+    "fileModel owns files") — the frozen ScopeQuestion excludes
+    {kind:'file'} deliberately; a runtime "defensive" answer would be a
+    shadow capability freezing into the contract. NOTE: the original 2.3-B
+    brief wrongly demanded a file-selector test (lead's error, corrected at
+    review); the worker's defensive implementation was replaced with the
+    typed refusal. Pinned in polaris-questions-scope.test.js.
+
+R10. **Non-recursive directory `relations` is typed unavailable at v4.**
+    readV4EdgeResolutionStats is a prefix read (inherently recursive);
+    serving that count under a non-recursive selector would be wrong-scoped
+    data. Correct fix if wanted: a key-list overload of the edge-stats read
+    (db-adapter, one new set read) — then flip the composer arm and the pin.
+    Pinned: "non-recursive directory relations are typed unavailable".
+
+R11. **scopeModel cannot serve scopes/imports/anchors/injections/structures
+    at v4** (typed question_kind_unsupported) even though v4 persists them
+    per file: the frozen ScopeGroup carries only
+    fileCount/declarationCount/referenceCount/languages, and no set-oriented
+    COUNT aggregate exists for those families. Serving them would mean
+    per-file row pulls (forbidden N+1) or inventing fields. Correct fix if
+    wanted at v4: dedicated directory/project count aggregates in db-adapter
+    PLUS a ScopeGroup shape decision (types.ts change — contract-freeze
+    exception, routes to Tanner). Worker finding 2.3-B#2.
 
 
 6. **v4 honesty gaps in composed answers** (resolve at v5, per FACT_LEDGER

@@ -357,8 +357,8 @@ describe('fact epoch', () => {
         expect(after).toEqual(before);
 
         const answer = await result.session.scopeModel({ scope: { kind: 'project' } });
-        expect(answer.status).toBe('unavailable'); // entry protocol passed
-        expect(answer.reason).toBe('question_kind_unsupported');
+        expect(answer.status).toBe('partial'); // scopeModel composed (2.3-B); entry protocol passed
+        expect(answer.basis.scopeKey).toBe(result.session.basis.scopeKey);
         result.session.close();
     });
 
@@ -598,18 +598,23 @@ describe('ast-intelligence facade', () => {
     it('composed queries answer and uncomposed queries stay typed unavailable, all through the full entry protocol', async () => {
         const { result } = await openGlobal();
         const s = result.session;
-        // Composed by Task 2.3 so far: fileModel answers with real data.
+        // Composed by Task 2.3 so far: fileModel, locationAt, scopeModel.
         const composed = await s.fileModel('src/alpha.ts');
         expect(composed.status).toBe('partial');
-        expect(composed.data.path).toBe(s.basis.scopeKey === '' ? 'src/alpha.ts' : composed.data.path);
         expect(composed.basis.scopeKey).toBe(s.basis.scopeKey);
+        const composedLoc = await s.locationAt('src/alpha.ts', { at: { kind: 'line_column', line: 1, column: 0 } });
+        expect(composedLoc.status).toBeOneOf(['partial', 'complete']);
+        expect(composedLoc.data.path).toBeTypeOf('string');
+        expect(composedLoc.basis.scopeKey).toBe(s.basis.scopeKey);
+        const composedScope = await s.scopeModel({ scope: { kind: 'project' } });
+        expect(composedScope.status).toBeOneOf(['partial', 'complete']);
+        expect(composedScope.data.sections.length).toBeGreaterThan(0);
+        expect(composedScope.basis.scopeKey).toBe(s.basis.scopeKey);
         // Still stubbed (retired one by one as composers land):
         const answers = [
-            await s.locationAt('src/alpha.ts', { at: { kind: 'byte', byte: 0 } }),
             await s.resolveAt('src/alpha.ts', { occurrence: { at: { kind: 'byte', byte: 0 } } }),
             await s.queryOccurrences({ scope: { kind: 'project' }, role: 'any' }),
             await s.traceRelations({ start: { path: 'src/alpha.ts', at: { kind: 'byte', byte: 0 } }, direction: 'both' }),
-            await s.scopeModel({ scope: { kind: 'project' } }),
             await s.contextFor({ anchor: { path: 'src/alpha.ts', at: { kind: 'byte', byte: 0 } } }),
         ];
         for (const a of answers) {

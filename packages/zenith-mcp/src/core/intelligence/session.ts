@@ -28,7 +28,7 @@ import fs from 'node:fs/promises';
 import { minimatch } from 'minimatch';
 
 import type {
-    AstSession, ContextQuestion, CoverageIssue, FileModel, FileModelQuestion, FsContext, LocationModel,
+    AstSession, ContextQuestion, CoverageIssue, FileModel, FileModelQuestion, FsContext, LocationModel, ScopeModel,
     LocationQuestion, OccurrenceQuestion, OpenSessionRequest, OpenSessionResult,
     OperationalFailure, QueryResult, RelationQuestion, ResolveQuestion,
     ScopeQuestion, ScopeSelector, SessionBasis, CoveredAnswer, ContinuationCursor,
@@ -38,6 +38,7 @@ import { canonicalJsonStringify, domainHash } from './evidence.js';
 export { canonicalJsonStringify, domainHash } from './evidence.js';
 import { composeFileModel } from './questions/file.js';
 import { composeLocationModel } from './questions/location.js';
+import { composeScopeModel } from './questions/scope.js';
 import { getProjectContext, type IntelligenceStore } from '../project-context.js';
 import {
     ensureFreshFromContentAt, indexFileAt, type IndexAddress, type IndexFileOutcome,
@@ -599,7 +600,9 @@ class StructuralSession implements AstSession {
     resolveAt(p: string, q: ResolveQuestion) { void p; void q; return this.notComposedYet<never>(); }
     queryOccurrences(q: OccurrenceQuestion) { void q; return this.notComposedYet<never>(); }
     traceRelations(q: RelationQuestion) { void q; return this.notComposedYet<never>(); }
-    scopeModel(q: ScopeQuestion) { void q; return this.notComposedYet<never>(); }
+    scopeModel(q: ScopeQuestion) {
+        return this.answer<ScopeModel>((entry) => composeScopeModel(entry, q));
+    }
     contextFor(q: ContextQuestion) { void q; return this.notComposedYet<never>(); }
 
     close(): void {
