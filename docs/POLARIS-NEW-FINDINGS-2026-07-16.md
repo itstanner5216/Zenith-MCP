@@ -62,3 +62,17 @@ N4. **[process event, owner-acknowledged 2026-07-16] A foreign lane agent is
     runs are immune (scratch trees build from committed refs, never this
     working tree). Its finished work will be adjudicated like any lane
     delivery — on correctness, per N3.
+
+N5. **[lead process error, self-reported 2026-07-16] A10 proof suite leaked
+    onto integration HEAD.** During the res1 A10 cross-check, cleanup ran
+    with repo-root pathspecs from `packages/` — `git rm --cached` and the
+    file delete both failed silently (`2>/dev/null`), a `head -3` truncated
+    the status output that would have shown it, and the still-staged test
+    rode into commits 97bf921/3affe01. Detected by the resolution-5 gate
+    run (4 "new failures" = the leaked suite pinning A10-fixed behavior on
+    a HEAD with no A10 fix merged). Remedy: removed at HEAD; the suite
+    returns with whichever A10 candidate merges (already committed on
+    `lead/a10-epoch`, proven 8/8 against resolution-1's implementation
+    too). Res1's gate numbers predate the leak and stand. Lesson encoded:
+    candidate assembly and cross-checks now happen only in scratch
+    worktrees, never in the shared tree.
