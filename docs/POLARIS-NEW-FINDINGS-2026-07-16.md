@@ -97,3 +97,51 @@ N6. **[cross-lane seam, lead-documented 2026-07-16] A5 × A15 intersect on
     assertions in polaris-questions-file.test.js (the lead's own tests,
     asserting `startsWith('g/')` and reusing model.path as a DB key) are
     authorized for correction under N3 + plan 789.
+
+---
+
+## N7 — PROPOSED AMENDMENT (A8/A14 coverage honesty) — PENDING OWNER APPROVAL
+
+Escalated by the resolution-2 agent; lead concurs with its Option A and
+records the recommendation here for owner ruling. Lead notes this finding
+class indicts the lead's own two-state coverageBuilder design.
+
+**Problem.** FactCoverage is strictly `complete | unavailable(reason)` and
+coverageBuilder throws otherwise. No UnavailabilityReason value honestly
+describes "member present but bytes unreadable" or "member persisted as
+too-large sentinel," so single-file assemblies are forced to claim
+`complete` for domains whose facts are knowingly absent (A8), and the same
+boundary blocks A14's coverage half.
+
+**Option A (lead recommendation).** Add two UnavailabilityReason members:
+- `source_unreadable` — domain member present but bytes unreadable at
+  assembly time.
+- `source_file_too_large` — member persisted under the too-large sentinel;
+  facts intentionally absent.
+
+Scope discipline (binding if approved):
+- Constructible ONLY from member status (unreadable / too-large sentinel),
+  never as a general escape hatch.
+- Single-member assemblies (fileModel, locationAt) mark affected domains
+  `unavailable(reason)`. Multi-member aggregates (scopeModel) keep
+  `complete` + per-path CoverageIssue flags — this amendment does NOT
+  authorize whole-domain unavailability when one member of many is bad.
+- Status derivation unchanged (710 rule): unavailable domains already
+  imply `partial`.
+- A14 rider: its coverage half uses these members; its claim-stripping
+  half (no complete qualified-name/owner chains from truncated parent
+  walks) is pure code, proceeding now, no approval needed.
+
+**Option B (rejected by lead, preserved for owner).** Third FactCoverage
+state `incomplete`: conceptually purer for "facts partially present" but
+changes the coverage model consumed by every composer, coverageBuilder,
+and all status-derivation pins under the owner-ratified 710 rule —
+strictly larger blast radius for equal honesty at the surface that
+matters.
+
+**Blast radius of A.** types.ts enum +2; coverageBuilder accepts the new
+reasons (mechanical); composers construct them; compile fallout limited to
+exhaustive switches on UnavailabilityReason (res-2 to enumerate by grep
+pre-merge); existing pins asserting complete-for-unreadable flip as
+expected-value changes, itemized at the merge gate. No collision with
+res-5's pending type amendments (disjoint types).
