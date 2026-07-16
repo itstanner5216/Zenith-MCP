@@ -1,15 +1,13 @@
 #!/usr/bin/env node
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { loadDotEnvFiles } from '../core/env-loader.js';
 
-// Aggressively attempt to load .env from multiple sensible locations
-const tryLoadEnv = (path: string) => {
-    try { process.loadEnvFile(path); } catch (e) {}
-};
-
-tryLoadEnv('.env'); // 1. Try Current Working Directory
-tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../../.env')); // 2. Try the Zenith-MCP monorepo root
-tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../.env')); // 3. Try packages/zenith-mcp package root
+// Load `.env` files before this entrypoint reads `process.env`. ESM static
+// imports are evaluated before this module's body, so any env var consumed
+// at an imported module's top level will already have been read — keep
+// entrypoint-level reads (including the API-key check below) after this
+// call. The shared loader walks cwd → package root → workspace root and
+// honours the `ZENITH_ENV_FILE` override.
+const _loadedEnvFiles = loadDotEnvFiles(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // http-server.js — Native HTTP entrypoint for MCP Streamable HTTP + legacy SSE
@@ -26,7 +24,7 @@ tryLoadEnv(join(fileURLToPath(import.meta.url), '../../../.env')); // 3. Try pac
 //   GET  /health       — Simple health check
 // ---------------------------------------------------------------------------
 
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -96,7 +94,18 @@ const config = loadConfig();
 const port = cliPort ?? config.port;
 
 // ---------------------------------------------------------------------------
-// API key authentication — simple Bearer token via ZENITH_API_KEY env var
+// API key authentication — Bearer token via ZENITH_API_KEY env var.
+//
+// This is a high-entropy bearer token, not a user-chosen password. We never
+// persist it, never log it, and never expose any derived value over the
+// wire — it is only compared in-memory against the request header. The
+// correct primitive for that comparison is `timingSafeEqual` on the raw
+// bytes, with an independent length check to keep the comparison constant
+// time even when the caller-supplied token has a different length than the
+// configured key. We deliberately do NOT hash the key: any hash function
+// (including HMAC) is the wrong abstraction here — there is no value to
+// digest at rest, and hashing only invites tooling to treat the bytes as a
+// password.
 // ---------------------------------------------------------------------------
 const ZENITH_API_KEY = process.env.ZENITH_API_KEY || process.env.ZENITH_MCP_API_KEY || '';
 if (!ZENITH_API_KEY) {
@@ -106,6 +115,11 @@ if (!ZENITH_API_KEY) {
     );
     process.exit(1);
 }
+
+// Pre-encode the expected key once at startup and reuse the buffer for
+// every comparison. The value is process-lifetime immutable and never
+// handed to callers.
+const EXPECTED_API_KEY_BYTES = Buffer.from(ZENITH_API_KEY, 'utf8');
 
 const authRateLimiter = rateLimit({
     windowMs: 60_000,
@@ -306,9 +320,18 @@ app.use(express.json({ limit: '4mb' }));
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
     const authMatch = req.headers.authorization?.match(/^Bearer\s+(\S.*)$/i);
     const provided = authMatch?.[1] ?? '';
-    const providedDigest = createHash('sha256').update(provided, 'utf8').digest();
-    const expectedDigest = createHash('sha256').update(ZENITH_API_KEY, 'utf8').digest();
-    if (timingSafeEqual(providedDigest, expectedDigest)) {
+    const providedBytes = Buffer.from(provided, 'utf8');
+
+    // Constant-time equality: compare the provided bytes against the
+    // expected key when lengths match, otherwise compare the expected key
+    // against itself. This keeps timingSafeEqual on equal-length inputs
+    // (avoiding throws) and runs in constant time relative to the expected
+    // key length without any per-request allocation or copy.
+    const lengthEqual = providedBytes.length === EXPECTED_API_KEY_BYTES.length;
+    const compareBuffer = lengthEqual ? providedBytes : EXPECTED_API_KEY_BYTES;
+    const bytesEqual = timingSafeEqual(compareBuffer, EXPECTED_API_KEY_BYTES);
+
+    if (bytesEqual && lengthEqual) {
         next();
     } else {
         res.status(401).json({ error: 'Invalid or missing API key.' });
@@ -423,13 +446,25 @@ app.get('/mcp', authRateLimiter, requireApiKey, async (req, res) => {
         res.status(400).json({ error: 'Unknown or mismatched session' });
         return;
     }
+
+    // Stamp lastSeenAt now and keep it fresh while the SSE stream is open.
+    // Without this the reaper sees the open time and kills the session mid-stream.
+    entry.lastSeenAt = Date.now();
+    const keepalive = setInterval(() => {
+        const e = sessions.get(sessionId as string);
+        if (e) e.lastSeenAt = Date.now();
+    }, 30_000).unref();
+
+    res.on('close', () => clearInterval(keepalive));
+
     try {
-        entry.lastSeenAt = Date.now();
         await entry.transport.handleRequest(req, res);
     } catch (err) {
         const safeId = String(sessionId).replace(/[^\w-]/g, '').slice(0, 8);
         writeErrorLog(`[session:${safeId}] GET error:`, err);
         if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    } finally {
+        clearInterval(keepalive);
     }
 });
 
@@ -515,6 +550,11 @@ app.listen(port, host, () => {
         console.error(`  Baseline dirs:   ${baselineAllowedDirs.join(', ')}`);
     } else {
         console.error(`  No baseline dirs — sessions will rely on MCP roots from clients`);
+    }
+    if (_loadedEnvFiles.length > 0) {
+        console.error(`  Loaded env:      ${_loadedEnvFiles.join(', ')}`);
+    } else {
+        console.error(`  Loaded env:      none (set ZENITH_ENV_FILE or place .env in cwd/package/workspace root)`);
     }
     ripgrepAvailable().then(ok =>
         console.error(ok ? '  Ripgrep: available' : '  Ripgrep: not found — JS fallback for search')
