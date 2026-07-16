@@ -291,3 +291,15 @@ clean (no OFFSET, no non-null assertions, TOON untouched, no public type
 changes). Merged into integration-next with one lead seam fix recorded as
 N8 (A9×A11 content-key ordering + discriminating pin). Post-merge:
 1790 passed / 7 failed / 2 skipped; A17+A1 signatures closed exactly.
+
+---
+
+## resolution-5 — FINAL VERDICT: ACCEPT (merged under owner approval batch 2026-07-16)
+
+All five proposed amendments (A2/A6/A7/A15/A21) owner-approved in the
+2026-07-16 batch and merged clean onto integration-next (post res-1/3/4
+base): zero conflicts, 6 baseline signatures flipped exactly (A2 compile
+oracle, A6 x5 paging/facade), 13 new lane tests green, zero mutations.
+Post-merge: 1809 passed / 1 failed / 2 skipped — the sole remaining
+failure is A5 (res-2, in flight). N6 (A5×A15 frontier candidate paths)
+remains open by design and resolves at the res-2 stitch.
