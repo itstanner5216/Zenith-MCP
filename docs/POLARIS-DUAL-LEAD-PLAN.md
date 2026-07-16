@@ -135,3 +135,19 @@ and different in kind.
 3. Whether the gate stays solely with the current lead or rotates (owner
    call; recommendation: gate mechanics stay in one place, review symmetry
    provides the check on the gate-holder's own lane).
+
+## CP-0 operational layout (adopted 2026-07-16, post-audit)
+
+- Fork point: the all-green audit-close commit (1817/0/2) plus the N12
+  gitignore fix on `integration-next`.
+- `Zenith-Worktrees/integration-next` — shared base + merge gate. No lane
+  work is committed here directly; only gated merges, ledgers, receipts.
+- `Zenith-Worktrees/polaris-intel` (branch `lane/intel`) — INTEL lead.
+- `Zenith-Worktrees/polaris-store` (branch `lane/store`) — STORE lead.
+- `Zenith-Worktrees/handoffs/` — completion-status drop; owner-clocked,
+  never polled (protocol in its README).
+- Each tree carries its own real pnpm install (no cross-tree symlinks —
+  N1/N12 lessons).
+- Retired: the import-extension worktree and the five resolution trees
+  (all work preserved on candidate/* branches; FIX-REPORTs archived under
+  docs/reviews/lane-artifacts/).
