@@ -183,7 +183,9 @@ export type UnavailabilityReason =
     | 'question_requires_binding'
     | 'question_requires_position'
     | 'regex_unsupported'
-    | 'question_kind_unsupported';
+    | 'question_kind_unsupported'
+    | 'source_unreadable'
+    | 'source_file_too_large';
 
 export type OperationalFailureCode =
     | 'FUTURE_SCHEMA'

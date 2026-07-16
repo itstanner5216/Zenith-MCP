@@ -138,8 +138,9 @@ describe('fileModel — the complete section algebra', () => {
         const { session } = await openSession();
         const result = await session.fileModel('src/main.ts');
         const model = result.data;
-        const storeKey = model.path;
-        expect(storeKey.startsWith('g/')).toBe(true); // global-mode store key
+        // A5: public path is the allowed-root-relative path, never the g/ store key.
+        const publicPath = model.path;
+        expect(publicPath).toBe('src/main.ts');
 
         const identity = sectionOf(model, 'identity');
         expect(identity.status).toBe('complete');
@@ -159,7 +160,7 @@ describe('fileModel — the complete section algebra', () => {
         expect(method.namespace).toBe('unknown');
         expect(method.handle.kind).toBe('fact');
         expect(method.range.precision).toBe('line');
-        expect(method.path).toBe(storeKey);
+        expect(method.path).toBe(publicPath);
 
         const refs = sectionOf(model, 'references').facts;
         expect(refs.some((r) => r.name === 'helper')).toBe(true);
@@ -329,15 +330,43 @@ describe('fileModel — entry protocol integration', () => {
         session.close();
     });
 
+    it('does not present a complete qualified name when parent ancestry is incomplete (A14)', async () => {
+        const { session } = await openSession();
+        await session.fileModel('src/main.ts');
+        const conn = mods.pc.getGlobalDbConnection();
+        // Break 'method' ancestry: point its parent at a symbol id that does not
+        // exist, so the parent walk truncates (missing parent). File hash is
+        // unchanged, so revalidation passes and the composer assembles it.
+        mods.db.queryRaw(conn, 'PRAGMA foreign_keys = OFF');
+        mods.db.queryRaw(conn,
+            "UPDATE symbols SET parent_symbol_id = 999999 WHERE name = 'method' AND kind = 'def'");
+        mods.db.queryRaw(conn, 'PRAGMA foreign_keys = ON');
+        const model = (await session.fileModel('src/main.ts')).data;
+        const decls = sectionOf(model, 'declarations').facts;
+        const method = decls.find((d) => d.name === 'method');
+        // Honest: a truncated/missing ancestry cannot assert a qualified name.
+        expect(method.qualifiedName).toBe(null);
+        // Anti-vacuity: a genuine top-level def still carries its bare name.
+        const topFn = decls.find((d) => d.name === 'topFn');
+        expect(topFn.qualifiedName).toBe('topFn');
+        // A14 coverage half: the truncation surfaces as an incomplete-facts
+        // caveat on the answer (never a silent complete).
+        expect(model.coverage.issues).toContain('incomplete_facts');
+        session.close();
+    });
+
     it('maps persisted corruption to a typed STORE_CORRUPT failure', async () => {
         const { session } = await openSession();
-        const model = await session.fileModel('src/main.ts');
-        const storeKey = model.data.path;
+        await session.fileModel('src/main.ts');
 
         // Corrupt a structure row through the SAME connection in autocommit:
         // neither epoch half moves and no file hash changes, so revalidation
         // passes and the composer must catch this at the assembly boundary.
         const conn = mods.pc.getGlobalDbConnection();
+        // A5: DB lookup key comes from the persisted store (fixture), NOT the
+        // public payload, whose path is now the decoded root-relative path.
+        const storeKey = mods.db.queryRaw(conn,
+            "SELECT file_path AS p FROM symbols WHERE name = 'topFn' AND kind = 'def' LIMIT 1")[0].p;
         // queryRaw, not execRaw: exec() cannot bind parameters.
         mods.db.queryRaw(conn,
             `UPDATE symbol_structures SET params_json = '{corrupt!' WHERE rowid IN (
