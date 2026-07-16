@@ -180,27 +180,28 @@ delivered FIX-REPORT. Recorded by the lead as the durable receipt.
 
 ---
 
-## N10 — Owner design principle: the surface filters, it never hedges
+## N10 — Owner design principle: the surface filters, it never hedges (REVISED per owner, 2026-07-16)
 
-Owner-stated (2026-07-16), recorded verbatim in intent: the evidence
-grades, proofs, coverage receipts, and epochs are INTERNAL. The consuming
-model never sees how confidence was earned — context is not free, and it
-receives whatever crosses the tool boundary as fact. Anything below the
-confidence threshold is not shown at all (it may still feed ranking,
-compression, advisories, and other tools internally). This raises the
-stakes rather than lowering them:
+Owner-stated: grades, proofs, coverage receipts, and epochs are internal.
+Context is not free; the consuming model receives whatever crosses the
+tool boundary as fact. Below-threshold material is not shown at all,
+though it still feeds internal machinery (ranking, compression,
+advisories, other tools). This raises the stakes: miscalibration
+surfaces as confident fact or silence, never as a visible hedge. The
+plan's existing structure is the complete answer to this — unforgeable
+proof types at the resolved boundary (A2), grade/basis conservation on
+all internal flows, and coverage proofs separating absent-with-proof
+from unsearched.
 
-- The boundary launders: everything crossing it is upgraded to fact, so
-  miscalibration produces confident lies (over-grade) or silence
-  (under-grade) — never a visible hedge. Calibration is the product.
-- Therefore thresholds must be UNFORGEABLE TYPES, not scores (A2's
-  ResolvedCandidateBasis; TOON's value-blind boolean gate — same shape).
-- Therefore grade/basis conservation is mandatory on all internal flows:
-  weak facts may be used, never promoted by composition.
-- Therefore empty answers are two different facts: absent-with-coverage-
-  proof (licenses action) vs unsearched (licenses nothing). The surface
-  must never render the second as the first.
+Owner clarifications superseding the first version of this entry:
 
-Governs the presentation layer of the owner's ground-up tool rebuild and
-Wave 6 advisory surfacing (suppressedCount already counts what was not
-said). Lead recorded; owner-originated, so not pending anything.
+1. Optional mechanisms giving the model access to internal grading are
+   planned eventually. "Never sees" describes the default surface, not a
+   permanent wall.
+2. The lead's proposed corollary — surface thresholds as named rules
+   with dedicated regression pins — is REJECTED as unnecessary. Its
+   absence from the plan is deliberate, not an oversight: following the
+   plan as structured, without unnecessary deviation, produces the
+   reliable end result directly; building the extra mechanism does not
+   strengthen the implementation. Recorded so the idea is not
+   reintroduced later as a presumed gap.
