@@ -420,23 +420,7 @@ export type ResolutionAnswer =
       };
 ```
 
-All public lines are 1-based. Columns are 0-based UTF-8 byte columns, matching tree-sitter and current persisted columns. Byte offsets are 0-based and ranges are half-open. A v4 fact without byte precision uses only the `precision:'line'` arm; no composer invents byte offsets from line spans. A position supplied as line/column is converted against the exact fresh bytes before any v5/v6 occurrence lookup.
-
-> **PROPOSED AMENDMENT — PENDING TANNER APPROVAL (not part of this plan).**
-> *Provenance: raised 2026-07-15 by Wave-2 adversarial review finding F2;
-> improperly written into the line above as adopted the same day by the
-> implementation lead; demoted back to proposed 2026-07-16. The plan line
-> above stands until the owner rules.*
-> Proposal: "0-based UTF-8 byte columns" → "0-based UTF-16 code-unit
-> columns." Evidence: persisted v4 columns are UTF-16 code units — a def
-> after a `é` prefix persists column 22 where bytes would give 23;
-> web-tree-sitter positions are JS-string indices, and the literal floor's
-> locate() matches persisted facts on that unit. Current code and one
-> text-floor test pin follow the substrate (UTF-16) and are held against
-> this pending ruling — if the proposal is rejected, the blast radius is
-> the floor's locate(), that test oracle, and Wave 3's
-> `ExactSourceRange.startByte` converter design, all of which would move
-> to byte-unit columns.
+All public lines are 1-based. Columns are 0-based UTF-16 code-unit columns, matching web-tree-sitter's JS-string positions and every persisted v4 column. *(Amendment owner-approved 2026-07-16 — Tanner. Provenance: raised 2026-07-15 by Wave-2 adversarial review finding F2; this line previously claimed "UTF-8 byte columns"; an implementation probe proved persisted v4 columns are UTF-16 code units — a def after a `é` prefix persists column 22 where bytes would give 23. Consequence: Wave 3's `ExactSourceRange.startByte` carries byte precision separately, and its line/column-to-byte converter must be defined against UTF-16 units.)* Byte offsets are 0-based and ranges are half-open. A v4 fact without byte precision uses only the `precision:'line'` arm; no composer invents byte offsets from line spans. A position supplied as line/column is converted against the exact fresh bytes before any v5/v6 occurrence lookup.
 
 `resolved` has no weak basis variant. A compile-time constructor test must prove that a candidate carrying `heuristic_name`, `legacy_callee_id` (internal only), `text_occurrence`, or a text handle cannot satisfy the resolved branch or a proven relation endpoint.
 

@@ -280,19 +280,15 @@ R11. **scopeModel cannot serve scopes/imports/anchors/injections/structures
    prior claims and are provisionally accepted as real pending re-verification.
 4. **POLARIS_REAL_DB_COPY rehearsal never executed** — env-gated test requires
    an explicit copy of a real `~/.zenith-mcp` DB; needs Tanner to provide one.
-5. **F2 plan wording (UTF-16 vs UTF-8 columns) — PROPOSED, PENDING OWNER
-   APPROVAL; improperly applied as adopted on 2026-07-15 and demoted back on
-   2026-07-16.** The lead wrote the amendment into plan line ~423 as if
-   adopted without owner approval — that was the authority violation, now
-   corrected: the original plan wording ("0-based UTF-8 byte columns") is
-   restored as authoritative with the proposal quoted beneath it, clearly
-   marked pending. Note the honest consequence either way: persisted v4
-   columns and the literal floor currently BEHAVE as UTF-16 code units (the
-   substrate's unit), so until the owner rules, code+pins follow UTF-16 and
-   stand formally out of spec against the restored plan line. If approved:
-   Wave 3's `ExactSourceRange.startByte` converter is defined against UTF-16
-   units. If rejected: floor locate(), one text-floor test oracle, and the
-   Wave-3 converter move to byte units.
+5. **F2 plan wording (UTF-16 vs UTF-8 columns) — OWNER-APPROVED 2026-07-16.**
+   Columns are 0-based UTF-16 code units everywhere (persisted facts, floor,
+   composers); plan line ~423 now carries the amendment with the approval
+   recorded. History: improperly applied as adopted 2026-07-15, demoted to
+   proposed 2026-07-16, then explicitly approved by Tanner the same day.
+   Load-bearing at Wave 3: `ExactSourceRange.startByte` must not conflate
+   bytes with columns. Note A9 (audit) is a DIFFERENT axis — it concerns
+   canonical SORT order of strings, not position units; F2's approval does
+   not resolve A9.
 
 6. **v4 honesty gaps in composed answers** (resolve at v5, per FACT_LEDGER
    `availableFrom`): `OccurrenceFact.namespace` is always `'unknown'` (v4
