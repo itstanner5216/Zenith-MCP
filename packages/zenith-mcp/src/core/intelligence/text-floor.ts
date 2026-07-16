@@ -77,10 +77,20 @@ const IDENTIFIER_CHAR = /[\p{L}\p{N}_$]/u;
 
 function boundaryAnnotation(buffer: Buffer, start: number, literalBytes: number): boolean {
     // Generic annotation only: language-specific identifier rules differ, so
-    // this NEVER discards a hit (plan step 3).
-    const before = start === 0 ? '' : buffer.subarray(Math.max(0, start - 4), start).toString('utf8').slice(-1);
+    // this NEVER discards a hit (plan step 3). Adjacency is tested on whole
+    // Unicode code points, not UTF-16 halves: a supplementary-plane identifier
+    // char (\p{L}/\p{N}) must not be split into a lone surrogate (audit A20),
+    // which would misread an astral letter or digit beside the literal as a
+    // non-identifier and wrongly annotate the hit as on an identifier boundary.
+    // The 4-byte windows end/begin on the literal's own char boundaries, so the
+    // last code point before and the first code point after are the true
+    // adjacent chars for valid UTF-8 (leading partial bytes decode to U+FFFD
+    // and are ignored because only the boundary code point is inspected).
+    const beforeText = start === 0 ? '' : buffer.subarray(Math.max(0, start - 4), start).toString('utf8');
     const afterStart = start + literalBytes;
-    const after = afterStart >= buffer.length ? '' : buffer.subarray(afterStart, Math.min(buffer.length, afterStart + 4)).toString('utf8').slice(0, 1);
+    const afterText = afterStart >= buffer.length ? '' : buffer.subarray(afterStart, Math.min(buffer.length, afterStart + 4)).toString('utf8');
+    const before = [...beforeText].at(-1) ?? '';
+    const after = [...afterText].at(0) ?? '';
     const beforeIsIdent = before !== '' && IDENTIFIER_CHAR.test(before);
     const afterIsIdent = after !== '' && IDENTIFIER_CHAR.test(after);
     return !beforeIsIdent && !afterIsIdent;
@@ -208,8 +218,44 @@ function scanOnce(
     // always scanned in process because rg cannot see unsaved bytes.
     let rgHits: Map<string, number[]> | null = null;
     let scanner: 'rg' | 'in_process' = 'in_process';
+    // The exact set of disk paths handed to rg: only files that pass the same
+    // stat / per-file / aggregate byte bounds the scan loop enforces (audit
+    // A13). rg is acceleration only, so it must never scan a file the bounded
+    // scan would refuse; and the loop below trusts an rg "no hits" verdict only
+    // for a path proven to be in this domain (never for a file the loop reaches
+    // that rg was not asked about — e.g. after a mid-scan filesystem change).
+    const rgDomain = new Set<string>();
     if (wantRg) {
-        const diskPaths = files.filter((f) => f.content === undefined).map((f) => f.absPath);
+        // Bound rg's work up front. A file over the per-file bound, or past the
+        // shared byte budget, is one whose rg hits the scan loop already
+        // discards (it skips or never reaches it), so excluding it here narrows
+        // rg's work without changing any output. Content-fresh files never
+        // reach rg but still consume the shared budget, so they are accounted
+        // here to place the disk cutoff exactly where the scan loop places it.
+        let plannedBytes = 0;
+        for (const file of files) {
+            if (file.content !== undefined) {
+                const size = Buffer.byteLength(file.content, 'utf8');
+                if (size > fileByteBound) continue;
+                if (plannedBytes + size > byteBudget) break;
+                plannedBytes += size;
+                continue; // in-hand bytes are invisible to rg but consume budget
+            }
+            let size = -1;
+            try {
+                const stat = fs.statSync(file.absPath);
+                if (stat.isFile()) size = stat.size;
+            } catch {
+                // Unreadable at stat: the scan loop records it as unreadable,
+                // and rg would fail on it too. Never part of rg's domain.
+            }
+            if (size < 0) continue; // stat failed or non-regular (rg must not recurse a directory)
+            if (size > fileByteBound) continue;
+            if (plannedBytes + size > byteBudget) break;
+            plannedBytes += size;
+            rgDomain.add(file.absPath);
+        }
+        const diskPaths = [...rgDomain];
         const rgResult = diskPaths.length === 0
             ? { hits: new Map<string, number[]>() }
             : runRipgrep(literal, diskPaths, options.rgCommand ?? 'rg');
@@ -252,8 +298,10 @@ function scanOnce(
                 // With rg, files rg proved hit-free are counted without a
                 // second read (never as absence proof — see the wrapper);
                 // files WITH hits are read once so line/column/boundary come
-                // from the true bytes.
-                if (rgHits !== null) {
+                // from the true bytes. Only trust rg's verdict for a path that
+                // was actually in rg's bounded domain; a file the loop reaches
+                // that rg was never asked about is scanned in process below.
+                if (rgHits !== null && rgDomain.has(file.absPath)) {
                     scannedBytes += size;
                     scannedFiles += 1;
                     const offsets = rgHits.get(file.absPath);
