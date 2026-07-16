@@ -195,3 +195,29 @@ prompting).
 - RED-first was proven mechanically (12/13 new assertions fail with source
   reverted; the 13th is a count-invariant that holds vacuously — honest
   disclosure by the lane).
+
+---
+
+## Lane: resolution-3 — A1 / A11 / A12 / A16 / A17 (session-security cluster) — INTERIM
+
+**Status: verification CONFIRMED-SO-FAR (independent subagent, snapshot-safe,
+revert-proven baseline); final review holds until the lane writes FIX-REPORT.md.**
+
+- Surface: session.ts (112 lines), shared.ts (5), polaris-session.test.js (24),
+  + 3 new independent-oracle suites (content-receipts, store-failure-typed,
+  walk-coverage). Nothing beyond the expected surface.
+- All five cluster findings targeted with evidence-matching changes: A1 (.mcp
+  force-excluded even under custom excludes), A11 (canonical content ordering,
+  duplicate-key INVALID_QUERY, honest updated/unchanged split, unattempted tail
+  omitted), A12 (incomplete_walk coverage on readdir failure), A16
+  (typedStoreFailure at query seam AND the previously-uncaught open-time
+  pin-view transaction; deliberately excludes transient/misuse errors), A17
+  (validatePath on anchor + file + directory selectors).
+- Modified existing test adjudicated per N3: the changed expectation is
+  STRONGER (old version's own comment admitted it encoded the bug — failed
+  file sat in `unchanged`; new version pins exact arrays plus a no-leak guard).
+- Numbers (verifier's own runs): baseline 17 failed / 1754 passed re-proven by
+  revert; fixed state 15 failed / 1762 passed; the two flipped reds are
+  exactly this cluster's baseline signatures (A1 .mcp fileCount, A17 realpath
+  validator); all 15 non-cluster failures byte-identical. Constraints clean.
+- Gate run + verdict section owed when FIX-REPORT.md lands.
