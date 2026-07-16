@@ -184,7 +184,10 @@ async function enumerateDomain(
         keyPredicate = scopePrefix === '' ? () => true : (k) => k.startsWith(scopePrefix);
     }
 
-    files.sort((a, b) => (a.storeKey < b.storeKey ? -1 : a.storeKey > b.storeKey ? 1 : 0));
+    files.sort((a, b) => Buffer.compare(
+        Buffer.from(a.storeKey, 'utf8'),
+        Buffer.from(b.storeKey, 'utf8'),
+    ));
     const capped = files.length > PROVISIONAL_LIMITS.workspaceFiles;
     const kept = capped ? files.slice(0, PROVISIONAL_LIMITS.workspaceFiles) : files;
 
@@ -734,7 +737,7 @@ export async function openAstSessionWithDeps(
         contentFileCount = contentKeys.length;
         contentDigest = domainHash('polaris-content-domain@1', contentKeys
             .map((c) => `${c.key}\x1f${domainHash('polaris-content-file@1', [c.content])}`)
-            .sort());
+            .sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))));
     }
 
     // Pin: one view read supplies present hashes for digest AND the

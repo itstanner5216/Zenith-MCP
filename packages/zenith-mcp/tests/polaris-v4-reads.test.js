@@ -111,6 +111,8 @@ function occurrenceKey(row) {
         path: row.path,
         line: row.line,
         column: row.column,
+        endLine: row.endLine,
+        kind: row.kind,
         name: row.name,
     };
 }

@@ -577,12 +577,21 @@ describe('occurrence discovery: raw-row, UTF-8, and keyset oracles', () => {
                 compareUtf8(left.path, right.path)
                 || left.line - right.line
                 || left.column - right.column
+                || left.endLine - right.endLine
+                || compareUtf8(left.kind, right.kind)
                 || compareUtf8(left.name, right.name)
             ));
     }
 
     function pageKey(row) {
-        return { path: row.path, line: row.line, column: row.column, name: row.name };
+        return {
+            path: row.path,
+            line: row.line,
+            column: row.column,
+            endLine: row.endLine,
+            kind: row.kind,
+            name: row.name,
+        };
     }
 
     it('concatenated pages equal a raw full scan in SQLite UTF-8 byte order', () => {
@@ -598,7 +607,7 @@ describe('occurrence discovery: raw-row, UTF-8, and keyset oracles', () => {
                 ) VALUES (?, 'def', ?, 'unicode/corpus.ts', 20, 20, 5,
                           'definition.synthetic', NULL, NULL, NULL)
                 RETURNING id
-            `, name, index % 2 === 0 ? 'function' : 'class');
+            `, name, 'function');
         }
 
         const filter = { scopePrefix: 'unicode/', role: 'declaration' };

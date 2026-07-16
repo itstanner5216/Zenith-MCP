@@ -308,6 +308,8 @@ describe('POLARIS independent adversarial contracts', () => {
                 path: firstRow.path,
                 line: firstRow.line,
                 column: firstRow.column,
+                endLine: firstRow.endLine,
+                kind: firstRow.kind,
                 name: firstRow.name,
             },
         });
@@ -323,6 +325,118 @@ describe('POLARIS independent adversarial contracts', () => {
             .toHaveLength(1);
         expect(pagedIds).toEqual(oracleIds);
         expect(new Set(pagedIds).size).toBe(2);
+    });
+
+    it('keeps occurrence order insertion-invariant and rejects duplicate canonical fact keys', () => {
+        const forward = freshDb();
+        const reverse = freshDb();
+        const facts = [
+            { kind: 'call', endLine: 8, captureTag: 'reference.call' },
+            { kind: 'property', endLine: 8, captureTag: 'reference.property' },
+        ];
+        for (const [conn, orderedFacts] of [
+            [forward, facts],
+            [reverse, [...facts].reverse()],
+        ]) {
+            queryRaw(conn, `
+                INSERT INTO files (path, hash, last_indexed)
+                VALUES ('stable.ts', 'stable-hash', 1)
+                RETURNING path
+            `);
+            for (const fact of orderedFacts) {
+                insertId(conn, `
+                    INSERT INTO symbols (
+                        name, kind, type, file_path, line, end_line, column,
+                        capture_tag, body_hash, parent_symbol_id, visibility
+                    ) VALUES (
+                        'samePosition', 'ref', ?, 'stable.ts', 8, ?, 4,
+                        ?, NULL, NULL, NULL
+                    ) RETURNING id
+                `, fact.kind, fact.endLine, fact.captureTag);
+            }
+        }
+
+        const storageForward = queryRaw(forward, 'SELECT type FROM symbols ORDER BY id')
+            .map((row) => row.type);
+        const storageReverse = queryRaw(reverse, 'SELECT type FROM symbols ORDER BY id')
+            .map((row) => row.type);
+        expect(storageForward).not.toEqual(storageReverse);
+
+        const filter = {
+            scopePrefix: '',
+            role: 'reference',
+            name: { mode: 'exact', value: 'samePosition' },
+        };
+        const walk = (conn) => {
+            const rows = [];
+            let afterKey;
+            for (let guard = 0; guard < 4; guard++) {
+                const page = queryV4Occurrences(
+                    conn,
+                    filter,
+                    afterKey === undefined ? { limit: 1 } : { limit: 1, afterKey },
+                );
+                rows.push(...page.rows);
+                if (page.rows.length === 0) break;
+                const row = page.rows[0];
+                afterKey = {
+                    path: row.path,
+                    line: row.line,
+                    column: row.column,
+                    endLine: row.endLine,
+                    kind: row.kind,
+                    name: row.name,
+                };
+            }
+            return rows.map((row) => ({
+                path: row.path,
+                line: row.line,
+                column: row.column,
+                endLine: row.endLine,
+                kind: row.kind,
+                name: row.name,
+            }));
+        };
+        expect(walk(forward)).toEqual(walk(reverse));
+        expect(walk(forward).map((row) => row.kind)).toEqual(['call', 'property']);
+
+        const corrupt = freshDb();
+        queryRaw(corrupt, `
+            INSERT INTO files (path, hash, last_indexed)
+            VALUES ('duplicate.ts', 'duplicate-hash', 1)
+            RETURNING path
+        `);
+        for (const captureTag of ['reference.call.first', 'reference.call.second']) {
+            insertId(corrupt, `
+                INSERT INTO symbols (
+                    name, kind, type, file_path, line, end_line, column,
+                    capture_tag, body_hash, parent_symbol_id, visibility
+                ) VALUES (
+                    'duplicate', 'ref', 'call', 'duplicate.ts', 3, 3, 2,
+                    ?, NULL, NULL, NULL
+                ) RETURNING id
+            `, captureTag);
+        }
+        expect(queryRaw(
+            corrupt,
+            "SELECT COUNT(*) AS count FROM symbols WHERE file_path = 'duplicate.ts'",
+        )).toEqual([{ count: 2 }]);
+        expect(() => queryV4Occurrences(corrupt, {
+            scopePrefix: '',
+            role: 'reference',
+            name: { mode: 'exact', value: 'duplicate' },
+        }, { limit: 10 })).toThrow(/^STORE_CORRUPT: queryV4Occurrences: duplicate canonical occurrence key$/);
+
+        queryRaw(corrupt, `
+            DELETE FROM symbols
+            WHERE id = (SELECT MAX(id) FROM symbols WHERE file_path = 'duplicate.ts')
+            RETURNING id
+        `);
+        expect(queryV4Occurrences(corrupt, {
+            scopePrefix: '',
+            role: 'reference',
+            name: { mode: 'exact', value: 'duplicate' },
+        }, { limit: 10 })).toMatchObject({ total: 1, rows: [expect.objectContaining({ name: 'duplicate' })] });
     });
 
     it('orders adapter rows by SQLite BINARY UTF-8 bytes for adversarial paths and names', () => {
