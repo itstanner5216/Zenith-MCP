@@ -18,8 +18,10 @@ Communication with the peer goes through the owner and
    store no positions; new fact needs go into db-adapter queries).
 2. `docs/concepts/AST_INTELLIGENCE_SYNTHESIS.md` — THE plan (POLARIS).
 3. `docs/POLARIS-DUAL-LEAD-PLAN.md` — split, checkpoints, peer ruling.
-4. `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md` +
-   `docs/POLARIS-NEW-FINDINGS-2026-07-16.md` — all rulings/residuals.
+4. `docs/KNOWN-ISSUES-LANE-STORE.md` — YOUR running ledger (owner rules
+   inside; every surfaced issue goes here FIRST). Historical:
+   `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md`,
+   `docs/POLARIS-NEW-FINDINGS-2026-07-16.md`.
 
 ## Standing law (owner-set)
 - HOW is yours; WHAT is the owner's: public type/contract/behavior/test-

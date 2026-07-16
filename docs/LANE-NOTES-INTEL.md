@@ -12,7 +12,7 @@ ties. Communication with the peer goes through the owner and
 1. `AGENTS.md` (repo root — TOON contract, style rules, Rule 19).
 2. `docs/concepts/AST_INTELLIGENCE_SYNTHESIS.md` — THE plan (POLARIS).
 3. `docs/POLARIS-DUAL-LEAD-PLAN.md` — split, checkpoints, peer ruling.
-4. `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md` + `docs/POLARIS-NEW-FINDINGS-2026-07-16.md` — every ruling and residual (N1–N12).
+4. `docs/KNOWN-ISSUES-LANE-INTEL.md` — YOUR running ledger (owner rules inside; every surfaced issue goes here FIRST). Historical: `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md`, `docs/POLARIS-NEW-FINDINGS-2026-07-16.md` (N1–N12).
 
 ## Standing law (owner-set)
 - HOW is yours; WHAT is the owner's. Public type/contract/behavior/test-
