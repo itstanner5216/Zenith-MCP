@@ -100,7 +100,7 @@ N6. **[cross-lane seam, lead-documented 2026-07-16] A5 × A15 intersect on
 
 ---
 
-## N7 — PROPOSED AMENDMENT (A8/A14 coverage honesty) — PENDING OWNER APPROVAL
+## N7 — AMENDMENT (A8/A14 coverage honesty) — OWNER-APPROVED 2026-07-16: OPTION A
 
 Escalated by the resolution-2 agent; lead concurs with its Option A and
 records the recommendation here for owner ruling. Lead notes this finding
@@ -164,3 +164,16 @@ U+10000 keys, trigger on the byte-canonically-last file; proven RED under
 the JS sort by compiled-dist mutation, GREEN restored). Both lanes' own
 tests were blind to it (ASCII fixtures only). Lead decision — pending
 owner; disclosed here per the audit-repair ledger protocol.
+
+---
+
+## N9 — Owner approval batch (2026-07-16, verbatim scope)
+
+The owner approved, in one batch: res-5's five amendments (A2, A21, A6,
+A7, A15 — public-type changes now adopted), N7 Option A (two
+UnavailabilityReason members, scope discipline binding), the Decision-26
+collation amendment (UTF-8 byte order — written into the plan), and the
+three outstanding ratifications (Task 1.1 persist.ts allowlist, Task 1.2
+typed-edge-anchor expected-value correction, P2-4b pre-clamp junk-root
+fix in boundaries.ts). res-3's report-waiver question was mooted by its
+delivered FIX-REPORT. Recorded by the lead as the durable receipt.

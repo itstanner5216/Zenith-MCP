@@ -271,6 +271,14 @@ opaque AstSession
 25. Hitting a safety bound returns `partial` plus a named issue. It never purges unvisited data and never returns a proof-backed complete empty answer for an incompletely searched domain.
 26. Canonical orders are: sections by the closed enum order declared in the public contract; files by store key; positions by `(startByte,endByte,kind,name)`; candidates by `(proofGrade desc, qualifierVerified desc, sameFile desc, nearDistance asc null-last, path,line,column,handle.stableKey)`; relations by `(kind,sourceKey,targetKey)`; issues by enum then path/range. Row IDs and insertion order never affect factual data. Canonical oracle digests exclude lease timestamps and the opaque cursor encoding itself, but include the decoded query/last-key position and concatenated page data.
 
+    > **Amendment (owner-approved 2026-07-16):** wherever this plan orders
+    > strings (store keys, names, paths, canonical tuples, digests, merges),
+    > the collation is UTF-8 byte order (`Buffer.compare`, identical to
+    > SQLite `BINARY`). JavaScript UTF-16 relational ordering is never a
+    > canonical order. Provenance: audit finding A9; gap-fill implemented by
+    > resolution-1 and verified at the merge gate; ratified by the owner
+    > with the 2026-07-16 approval batch.
+
 ### Repository boundaries
 
 27. `core/indexing/extract.ts` remains the only production fact-extraction orchestrator. New ingestion-only tree-sitter modules are private and imported only there.
@@ -1119,8 +1127,8 @@ Wave 1 is the only place this plan touches current tool files, and only for repo
 - `packages/zenith-mcp/tests/polaris-schema-migration.test.js`
 
 > **Amendment (2026-07-15, discovered during implementation — lead-applied
-> under this plan's allowlist-gap rule (§Wave plan preamble); pending owner
-> ratification):**
+> under this plan's allowlist-gap rule (§Wave plan preamble); owner-ratified
+> 2026-07-16):**
 > `core/indexing/persist.ts` was added to this allowlist. The old
 > `INSERT OR REPLACE INTO files` cascade was not merely a latent hazard — it
 > was the DE-FACTO clearing mechanism for the file-FK'd fact tables
@@ -1153,8 +1161,8 @@ Change repaired-v4 reference dedup to `(name,kind,line,column)` while preserving
 **Acceptance:** two same-line calls persist separately; maxFiles=1 preserves every unvisited row and reports incomplete; a complete scan deletes a truly removed file; a generated over-limit file returns typed coverage without parsing, purging prior facts, or exceeding the RSS gate.
 
 > **Amendment (2026-07-15, discovered during implementation — lead-applied
-> under this plan's allowlist-gap rule (§Wave plan preamble); pending owner
-> ratification):**
+> under this plan's allowlist-gap rule (§Wave plan preamble); owner-ratified
+> 2026-07-16):**
 > `packages/zenith-mcp/tests/typed-edge-anchor-persistence.test.js` was added
 > to this task's allowlist. Its edge expectations had pinned the G5-lossy
 > behavior as truth (one `caller → Widget` type edge for a line that
