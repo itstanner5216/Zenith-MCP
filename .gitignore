@@ -50,3 +50,11 @@ lcov.info
 # chunk active sidecar tracking
 .chunk/sidecar.json
 .chunk/sidecar.*.json
+
+# Agent dot directories
+.codex
+.claude
+.mcp
+
+# turbo dot files 
+.turbo
