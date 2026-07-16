@@ -232,3 +232,20 @@ res-4 (A13/A20) → res-3 (A1/A11/A12/A16/A17, +N8 seam fix) → res-5
 N7 Option A, N6 seam closed at stitch). Every merge shrank the failure
 set by exactly its predicted signatures; zero mutations; zero new
 failures anywhere in the train.
+
+---
+
+## N12 — Lead process error: tracked node_modules SYMLINKS (FIXED)
+
+The lead's `git add -A` bookkeeping commits (from 28e3a77 onward) swept
+the three node_modules symlinks into the tree: `.gitignore`'s
+`node_modules/` (trailing slash) matches directories only, and a SYMLINK
+named node_modules is not a directory for gitignore purposes. Every
+worktree created from those commits materialized dangling symlinks into
+the (deleted) import-extension tree and failed pnpm install with ENOTDIR.
+Fix: symlinks git rm --cached'd, `.gitignore` pattern corrected to
+`node_modules` (matches dirs, files, and symlinks), lane branches
+recreated from the fixed commit. History still carries the 68-byte blobs;
+HEAD does not. Self-reported, N5's sibling: the cost of `git add -A` as a
+bookkeeping habit is now two ledger entries, so the habit ends — targeted
+adds only.
