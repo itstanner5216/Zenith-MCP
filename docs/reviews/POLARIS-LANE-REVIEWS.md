@@ -221,3 +221,56 @@ revert-proven baseline); final review holds until the lane writes FIX-REPORT.md.
   exactly this cluster's baseline signatures (A1 .mcp fileCount, A17 realpath
   validator); all 15 non-cluster failures byte-identical. Constraints clean.
 - Gate run + verdict section owed when FIX-REPORT.md lands.
+
+---
+
+## Lane: resolution-4 — A13 / A20 (text-floor cluster)
+
+**Verdict: ACCEPT — recommend merge as delivered. Zero proposed amendments**
+(no public type, signature, or payload changes; `FloorOutcome` untouched),
+zero existing tests edited, zero regressions.
+
+### Verification (independent subagent, CONFIRMED on all nine claims)
+
+- Method: own builds judged by exit code, RED-first re-proof by revert +
+  rebuild (both RED signatures reproduced exactly: rg argv containing the
+  over-bound and past-budget files; 3 astral misclassifications), snapshot
+  restoration proven byte-identical (sha256), lane work untouched.
+- A13: bounded pre-pass mirrors the scan loop's stat/per-file/budget
+  discipline; content-fresh files accounted in plannedBytes but never
+  handed to rg; non-regular paths excluded (a directory can no longer make
+  rg recurse — the purest form of the unbounded work); TOCTOU membership
+  guard on the rg fast-path closes the pre-pass/scan race. Output proven
+  invariant: outcome fields pinned pre- and post-fix, on-paper corpus trace
+  reproduced. The oracle is genuinely independent (stub rg writes argv to
+  disk; assertions read the log, never the function's return; anti-vacuity
+  companion proves reachability).
+- A20: whole-code-point boundary extraction ([...].at(-1)/.at(0)); zero
+  UTF-16 .slice splits remain on the boundary path; three baseline BUG
+  signatures flip, BMP/emoji/punct controls stay green. Consistent with the
+  earlier window-boundary audit (adjacent window edges are exact; U+FFFD
+  from partial bytes lands only on the far end).
+- Disclosed forceScanner edge (test-only knob; all-out-of-bounds + rg
+  unavailable no longer throws): verified nothing depends on the old throw.
+- Full suite in-lane: 1,759 passed / 14 failed — the 14 are byte-identical
+  non-cluster baseline failures, pre-existence re-proven by revert.
+
+### Gate result (authoritative)
+
+- Candidate: `candidate/resolution-4` (6d7a981), scratch-assembled; merged
+  onto integration HEAD 05419c7.
+- Newly green: exactly the 3 A20 baseline signatures (A13 had no baseline
+  signature; its proof is the lane's new independent-oracle suite). Foreign
+  14/14 unchanged; zero mutations; zero new failures. Diff surface: 2
+  entries, pure.
+
+### Merge notes
+
+- Cleanest lane of the four reviewed so far: single-file source change,
+  no contract surface, no test edits, no collisions with any other lane
+  (text-floor.ts has exactly one claimant).
+- Work uncommitted in-lane (same durability risk); candidate 6d7a981 is
+  the durable artifact.
+- The report's stale plan-line citation (763–767 → actual 775–786) was
+  self-corrected by the lane against text, not line numbers — the right
+  instinct given the plan doc's drift.
