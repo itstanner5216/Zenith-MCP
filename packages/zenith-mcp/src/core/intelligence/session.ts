@@ -81,6 +81,8 @@ interface EnumeratedDomain {
     capped: boolean;
     /** Store-key predicate defining domain membership for revalidation. */
     keyPredicate: (storeKey: string) => boolean;
+    /** True when a directory read failed, so the domain is known-incomplete. */
+    incompleteWalk: boolean;
 }
 
 function fileExcluded(scopeRoot: string, absPath: string, excludes: readonly string[]): boolean {
@@ -122,11 +124,13 @@ function dirExcluded(scopeRoot: string, absDir: string, name: string, excludes: 
  *    false validity would be a wrong proof).
  */
 async function enumerateDomain(
+    ctx: FsContext,
     address: IndexAddress,
     domain: Exclude<ScopeSelector, { kind: 'module' }>,
     anchorAbs: string,
 ): Promise<EnumeratedDomain | { invalid: string }> {
     const excludes = getDefaultExcludes();
+    let incompleteWalk = false;
     const resolveInScope = (p: string): string | null => {
         const abs = path.isAbsolute(p) ? p : path.resolve(address.scopeRoot, p);
         return address.toStoreKey(abs) === null ? null : abs;
@@ -143,7 +147,7 @@ async function enumerateDomain(
 
     async function walk(dir: string, recursive: boolean): Promise<void> {
         let entries;
-        try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+        try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { incompleteWalk = true; return; }
         for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
@@ -160,6 +164,9 @@ async function enumerateDomain(
     if (domain.kind === 'file') {
         const abs = resolveInScope(domain.path);
         if (abs === null) return { invalid: `file path escapes the session scope: ${domain.path}` };
+        // Realpath scope guard: a lexically-in-scope path that resolves outside
+        // the allowed roots (e.g. via symlink) is refused, never indexed.
+        try { await ctx.validatePath(abs); } catch { return { invalid: `file path escapes the allowed scope: ${domain.path}` }; }
         pushFile(abs);
         const key = address.toStoreKey(abs);
         if (files.length === 0 || key === null) {
@@ -171,6 +178,9 @@ async function enumerateDomain(
         if (abs === null) return { invalid: `directory path escapes the session scope: ${domain.path}` };
         const dirKey = address.toStoreKey(abs);
         if (dirKey === null) return { invalid: `directory path escapes the session scope: ${domain.path}` };
+        // Realpath scope guard (see file branch): refuse symlinked directory
+        // selectors that resolve outside the allowed roots.
+        try { await ctx.validatePath(abs); } catch { return { invalid: `directory path escapes the allowed scope: ${domain.path}` }; }
         await walk(abs, domain.recursive);
         const prefix = dirKey === '' ? '' : `${dirKey}/`;
         keyPredicate = domain.recursive
@@ -200,6 +210,7 @@ async function enumerateDomain(
         })),
         capped,
         keyPredicate,
+        incompleteWalk,
     };
 }
 
@@ -338,6 +349,37 @@ const LEASE_HARD_CAP_MS = 600_000;
 
 function failed(basis: SessionBasis | null, failure: OperationalFailure): QueryResult<never> {
     return { status: 'failed', basis, failure };
+}
+
+/**
+ * Classifies a caught error as a typed operational store failure, or null when
+ * it is not one (programming errors stay loud — they are not query results).
+ * Recognizes the composer/adapter's own STORE_CORRUPT/FUTURE_SCHEMA-prefixed
+ * signals AND raw node:sqlite corruption/schema errors (dropped table, missing
+ * column, malformed image, non-database file). Transient/programming SQLite
+ * errors (locked db, too-many-variables, API misuse) are deliberately NOT
+ * mapped, so real defects surface instead of masquerading as corruption.
+ */
+function typedStoreFailure(e: unknown): OperationalFailure | null {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.startsWith('FUTURE_SCHEMA')) {
+        return { code: 'FUTURE_SCHEMA', retryable: false, detail: message, correction: 'repair_store' };
+    }
+    if (message.startsWith('STORE_CORRUPT')) {
+        return { code: 'STORE_CORRUPT', retryable: false, detail: message, correction: 'repair_store' };
+    }
+    const code = typeof e === 'object' && e !== null && 'code' in e
+        ? (e as { code?: unknown }).code
+        : undefined;
+    if (code === 'ERR_SQLITE_ERROR') {
+        const m = message.toLowerCase();
+        if (m.includes('no such table') || m.includes('no such column')
+            || m.includes('malformed') || m.includes('not a database')
+            || m.includes('file is encrypted')) {
+            return { code: 'STORE_CORRUPT', retryable: false, detail: message, correction: 'repair_store' };
+        }
+    }
+    return null;
 }
 
 interface SessionState {
@@ -557,13 +599,8 @@ class StructuralSession implements AstSession {
                 staged = inTxn(entry);
             });
         } catch (e) {
-            const message = e instanceof Error ? e.message : String(e);
-            if (message.startsWith('STORE_CORRUPT')) {
-                return failed(this.basis, {
-                    code: 'STORE_CORRUPT', retryable: false,
-                    detail: message, correction: 'repair_store',
-                });
-            }
+            const failure = typedStoreFailure(e);
+            if (failure !== null) return failed(this.basis, failure);
             throw e;
         }
         if (changed || staged === undefined) {
@@ -649,6 +686,19 @@ export async function openAstSessionWithDeps(
     // surface as typed failures, never throws.
     let store: IntelligenceStore;
     const anchorAbs = path.resolve(request.anchor);
+    // Realpath scope guard: the anchor must resolve inside the allowed roots.
+    // A lexically-in-scope anchor that escapes via symlink is refused before any
+    // store/index work. The lexical anchorAbs is kept for routing so a legitimate
+    // symlinked allowed-root is not silently re-scoped to its realpath.
+    try {
+        await ctx.validatePath(request.anchor);
+    } catch {
+        return openFailure({
+            code: 'INVALID_QUERY', retryable: false,
+            detail: `anchor path resolves outside the allowed scope: ${request.anchor}`,
+            correction: 'narrow_scope',
+        });
+    }
     try {
         store = getProjectContext(ctx).getIntelligenceStore(anchorAbs);
     } catch (e) {
@@ -665,13 +715,13 @@ export async function openAstSessionWithDeps(
     const address = store.address;
 
     // Enumerate the complete requested domain.
-    const enumerated = await enumerateDomain(address, request.domain, anchorAbs);
+    const enumerated = await enumerateDomain(ctx, address, request.domain, anchorAbs);
     if ('invalid' in enumerated) {
         return openFailure({
             code: 'INVALID_QUERY', retryable: false, detail: enumerated.invalid, correction: 'narrow_scope',
         });
     }
-    const { members, capped, keyPredicate } = enumerated;
+    const { members, capped, keyPredicate, incompleteWalk } = enumerated;
 
     // Disk freshness transition over every supported member.
     for (const member of members) {
@@ -700,6 +750,8 @@ export async function openAstSessionWithDeps(
     if (request.freshness.mode === 'content') {
         const byKey = new Map(members.map((m) => [m.storeKey, m]));
         const updated: string[] = [];
+        const unchanged: string[] = [];
+        const seen = new Set<string>();
         const contentKeys: { key: string; member: DomainMember; content: string }[] = [];
         for (const file of request.freshness.files) {
             const abs = path.isAbsolute(file.path) ? file.path : path.resolve(address.scopeRoot, file.path);
@@ -712,25 +764,36 @@ export async function openAstSessionWithDeps(
                     correction: 'narrow_scope',
                 });
             }
+            if (seen.has(key)) {
+                return openFailure({
+                    code: 'INVALID_QUERY', retryable: false,
+                    detail: `duplicate content file in request: ${file.path}`,
+                    correction: 'narrow_scope',
+                });
+            }
+            seen.add(key);
             contentKeys.push({ key, member, content: file.content });
         }
+        // Canonical store-key order: a partial commit is deterministic and the
+        // updated/unchanged receipt names exactly the attempted prefix.
+        contentKeys.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
         for (let i = 0; i < contentKeys.length; i++) {
             const entry = contentKeys[i];
             if (entry === undefined) continue;
+            let reindexed: number;
             try {
-                await ensureFreshFromContentAt(address, entry.member.absPath, entry.content);
+                reindexed = await ensureFreshFromContentAt(address, entry.member.absPath, entry.content);
             } catch (e) {
+                // Facts for the 1..i-1 files already committed and stay authoritative;
+                // the failed file is named only in failedPath, unattempted files omitted.
                 return openFailure({
                     code: 'FRESHNESS_FAILED', retryable: true,
                     detail: `content ingestion failed for ${entry.key}: ${e instanceof Error ? e.message : String(e)}`,
                     correction: 'retry',
-                }, {
-                    updated,
-                    unchanged: contentKeys.slice(i).map((c) => c.key),
-                    failedPath: entry.key,
-                });
+                }, { updated, unchanged, failedPath: entry.key });
             }
-            updated.push(entry.key);
+            if (reindexed === 1) updated.push(entry.key);
+            else unchanged.push(entry.key);
             contentByKey.set(entry.key, entry.content);
             if (entry.member.status === 'unreadable') entry.member.status = 'present';
         }
@@ -745,10 +808,16 @@ export async function openAstSessionWithDeps(
     const viewPrefix = address.mode === 'global' ? `${address.scopeKey}/` : '';
     let presentView: string[] = [];
     let epoch: FactEpoch = { dataVersion: 0, commitGeneration: 0 };
-    runTransaction(address.db, () => {
-        presentView = readPresentView(address, viewPrefix, keyPredicate);
-        epoch = getFactEpoch(address.db);
-    });
+    try {
+        runTransaction(address.db, () => {
+            presentView = readPresentView(address, viewPrefix, keyPredicate);
+            epoch = getFactEpoch(address.db);
+        });
+    } catch (e) {
+        const failure = typedStoreFailure(e);
+        if (failure !== null) return openFailure(failure);
+        throw e;
+    }
     const hashByKey = new Map(presentView.map((line) => {
         const sep = line.indexOf('\x1f');
         return [line.slice(0, sep), line.slice(sep + 1)] as const;
@@ -769,6 +838,7 @@ export async function openAstSessionWithDeps(
     const digest = computeDomainDigest(members);
     const coverage: CoverageIssue[] = [];
     if (capped) coverage.push('incomplete_cap');
+    if (incompleteWalk) coverage.push('incomplete_walk');
     if (address.mode === 'global') coverage.push('global_structural_only');
     if (store.issue !== null) coverage.push(store.issue);
 
