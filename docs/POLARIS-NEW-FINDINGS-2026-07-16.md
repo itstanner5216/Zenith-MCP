@@ -177,3 +177,30 @@ three outstanding ratifications (Task 1.1 persist.ts allowlist, Task 1.2
 typed-edge-anchor expected-value correction, P2-4b pre-clamp junk-root
 fix in boundaries.ts). res-3's report-waiver question was mooted by its
 delivered FIX-REPORT. Recorded by the lead as the durable receipt.
+
+---
+
+## N10 — Owner design principle: the surface filters, it never hedges
+
+Owner-stated (2026-07-16), recorded verbatim in intent: the evidence
+grades, proofs, coverage receipts, and epochs are INTERNAL. The consuming
+model never sees how confidence was earned — context is not free, and it
+receives whatever crosses the tool boundary as fact. Anything below the
+confidence threshold is not shown at all (it may still feed ranking,
+compression, advisories, and other tools internally). This raises the
+stakes rather than lowering them:
+
+- The boundary launders: everything crossing it is upgraded to fact, so
+  miscalibration produces confident lies (over-grade) or silence
+  (under-grade) — never a visible hedge. Calibration is the product.
+- Therefore thresholds must be UNFORGEABLE TYPES, not scores (A2's
+  ResolvedCandidateBasis; TOON's value-blind boolean gate — same shape).
+- Therefore grade/basis conservation is mandatory on all internal flows:
+  weak facts may be used, never promoted by composition.
+- Therefore empty answers are two different facts: absent-with-coverage-
+  proof (licenses action) vs unsearched (licenses nothing). The surface
+  must never render the second as the first.
+
+Governs the presentation layer of the owner's ground-up tool rebuild and
+Wave 6 advisory surfacing (suppressedCount already counts what was not
+said). Lead recorded; owner-originated, so not pending anything.
