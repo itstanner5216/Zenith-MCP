@@ -76,3 +76,24 @@ N5. **[lead process error, self-reported 2026-07-16] A10 proof suite leaked
     too). Res1's gate numbers predate the leak and stand. Lesson encoded:
     candidate assembly and cross-checks now happen only in scratch
     worktrees, never in the shared tree.
+
+N6. **[cross-lane seam, lead-documented 2026-07-16] A5 × A15 intersect on
+    frontier candidate paths.** res-2's A5 fix (facade decodes store keys to
+    scope-relative paths per plan 789) covers the pinned surface
+    (fileModel/locationAt path). But res-5's A15 `locateTarget` mints
+    candidate `LocatedSymbol.path` from raw DB `filePath` — which in global
+    mode is a `g/<hash>/...` store key: the same A5 leak in the frontier
+    arm, outside A5's pinned surface. res-2 attempted a candidate decode,
+    hit 2 unexplained test regressions (likely more bug-pins of the same
+    leak shape), reverted it, and disclosed the residual — correct
+    discipline. Resolution belongs to the merge sequence: when res-2 and
+    res-5 both land, candidate paths need ONE consistent treatment
+    (recommend: decode via codec, fail loud on non-decoding domain-member
+    keys rather than falling back to the raw key; cross-scope candidates
+    need an owner ruling — serve decoded-foreign, typed-unavailable, or
+    omit-with-issue). Also noted for review: res-2's `publicPathOf` helper
+    ends in `?? storeKey` — a silent re-leak on any non-decoding key; the
+    primary path should hard-fail instead. Two stale bug-pinning
+    assertions in polaris-questions-file.test.js (the lead's own tests,
+    asserting `startsWith('g/')` and reusing model.path as a DB key) are
+    authorized for correction under N3 + plan 789.
