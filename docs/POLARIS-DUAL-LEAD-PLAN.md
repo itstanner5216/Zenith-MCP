@@ -85,6 +85,43 @@ deferral of known defects; owner decides WHAT, leads decide HOW; all
 rulings documented in the known-issues/new-findings ledgers, never only in
 code comments.
 
+## Biweekly adversarial audit (owner-run, every two waves)
+
+The owner runs an independent adversarial review after every two waves —
+after Wave 4 (covering v5 schema + extraction + receipts: the
+highest-risk new ground) and after Wave 6 (binder, v6 units, advisory).
+Wave 7 is itself a release-gate wave. The 2026-07 audit's lesson intake,
+so the next one finds fewer and *different* findings:
+
+1. **Contract-derived pins, written before implementation.** The dominant
+   finding class (A5/A6/A7/A8/A14/A21/A2) was plan-vs-code drift where the
+   implementer's own tests pinned the implementer's misunderstanding —
+   including two tests that literally asserted the A5 bug. New rule: every
+   plan MUST gets a pin that quotes the plan sentence it asserts, authored
+   from the plan text, and cross-review specifically hunts bug-pins
+   (assertions that encode a defect as expected).
+2. **Differential/metamorphic oracles are definition-of-done** for
+   anything with ordering, paging, accounting, or incremental semantics
+   (A3/A4/A9/A10 class): concat-equals-one-shot, clean-rebuild-equals-
+   incremental, permutation invariance, exhaustive transition matrices —
+   the audit suites are the reusable template library.
+3. **Every I/O boundary ships with fault-injection pins** at authoring
+   time (A11/A12/A16/A17/A1 class): trigger faults, chmod, stub binaries,
+   hostile filesystems — patterns now exist for all of them.
+4. **No latent surfaces**: code no composer consumes is tested to its
+   contract anyway or not merged (A18 class). Unicode/astral adversarial
+   corpora are standing fixtures (A20/A9 class).
+5. **Pre-audit self-audit**: before each owner review, both lanes run the
+   audit playbook against their own two waves and fix or ledger what they
+   find. The owner's audit should be finding what the internal pass
+   *missed*, not what it skipped.
+
+Honest expectation-setting: Waves 3–5 introduce semantic ground (binding,
+five-language extraction) genuinely harder than Wave 2's plumbing. The
+commitment is that the *preventable classes* above are prevented, so
+owner-audit findings trend toward genuinely novel semantic edges — fewer,
+and different in kind.
+
 ## Open items to settle at adoption
 
 1. Who runs Lane STORE vs INTEL (current lead's recommendation: current
