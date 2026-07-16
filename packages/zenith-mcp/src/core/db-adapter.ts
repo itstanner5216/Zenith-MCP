@@ -1255,6 +1255,14 @@ export function rewriteLegacyGlobalRows(
 // Transaction Support
 // ---------------------------------------------------------------------------
 
+interface TransactionFrame {
+    changesBefore: number;
+    rolledBackChanges: number;
+}
+
+/** Active transaction/savepoint frames for rollback-aware commit accounting. */
+const _transactionFrames = new WeakMap<DbConnection, TransactionFrame[]>();
+
 /**
  * Wraps the provided function in a database transaction.
  * Supports nesting via SAVEPOINTs — inner calls don't start a new top-level transaction.
@@ -1263,12 +1271,27 @@ export function rewriteLegacyGlobalRows(
 export function runTransaction(conn: DbConnection, fn: () => void): void {
     const db = handle(conn);
     const depth = conn._txDepth;
+    let frames = _transactionFrames.get(conn);
+    if (frames === undefined) {
+        frames = [];
+        _transactionFrames.set(conn, frames);
+    }
+    if (frames.length !== depth) {
+        throw new Error(`runTransaction: frame/depth mismatch (${frames.length} !== ${depth})`);
+    }
+    const parentFrame = depth > 0 ? frames[depth - 1] : undefined;
+    if (depth > 0 && parentFrame === undefined) {
+        throw new Error(`runTransaction: missing parent frame at depth ${depth}`);
+    }
+    const frame: TransactionFrame = {
+        changesBefore: totalChanges(conn),
+        rolledBackChanges: 0,
+    };
+    frames.push(frame);
     let started = false;
     conn._txDepth = depth + 1;
     try {
-        let changesBefore = 0;
         if (depth === 0) {
-            changesBefore = totalChanges(conn);
             db.exec('BEGIN');
         } else {
             db.exec(`SAVEPOINT sp_${depth}`);
@@ -1279,26 +1302,42 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
             db.exec('COMMIT');
             // POLARIS Decision 16: the connection-local outer-commit
             // generation increments only here — after a real outer COMMIT
-            // that actually wrote rows (total_changes moved). Read-only
-            // transactions, savepoint releases, and rollbacks (both catch
-            // arms below) never increment it. Together with PRAGMA
-            // data_version (blind to same-connection commits), this pair
-            // forms the session fact epoch read by getFactEpoch.
-            if (totalChanges(conn) !== changesBefore) {
+            // that actually retained row writes. SQLite total_changes() also
+            // counts writes later rolled back to a savepoint, so every nested
+            // rollback contributes its attempted-change delta to the outer
+            // frame and is subtracted here. Read-only transactions,
+            // savepoint releases, and rollbacks never increment the counter.
+            // Together with PRAGMA data_version (blind to same-connection
+            // commits), this forms the session fact epoch read by getFactEpoch.
+            const committedChanges = totalChanges(conn)
+                - frame.changesBefore
+                - frame.rolledBackChanges;
+            if (committedChanges > 0) {
                 _commitGenerations.set(conn, (_commitGenerations.get(conn) ?? 0) + 1);
             }
         } else {
             db.exec(`RELEASE sp_${depth}`);
+            if (parentFrame !== undefined) {
+                parentFrame.rolledBackChanges += frame.rolledBackChanges;
+            }
         }
     } catch (e) {
+        const changesAtFailure = totalChanges(conn);
         if (started && depth === 0) {
             db.exec('ROLLBACK');
         } else if (started) {
             db.exec(`ROLLBACK TO sp_${depth}`);
             db.exec(`RELEASE sp_${depth}`);
+            if (parentFrame !== undefined) {
+                parentFrame.rolledBackChanges += changesAtFailure - frame.changesBefore;
+            }
         }
         throw e;
     } finally {
+        frames.pop();
+        if (frames.length === 0) {
+            _transactionFrames.delete(conn);
+        }
         conn._txDepth = depth;
     }
 }
@@ -1309,7 +1348,7 @@ export function runTransaction(conn: DbConnection, fn: () => void): void {
 
 const _commitGenerations = new WeakMap<DbConnection, number>();
 
-/** Cumulative rows written by this connection (SQLite total_changes()). */
+/** Cumulative attempted row writes, including savepoint-rolled-back writes. */
 function totalChanges(conn: DbConnection): number {
     const row = handle(conn).prepare('SELECT total_changes() AS tc').get() as { tc?: number } | undefined;
     return typeof row?.tc === 'number' ? row.tc : 0;
@@ -1728,15 +1767,25 @@ export function getDefinitionNamesByFile(conn: DbConnection, filePath: string): 
 
 /**
  * SQL (per 100-name chunk):
+ *   WITH changed_names(name) AS (VALUES (…), …)
  *   UPDATE edges SET callee_symbol_id = NULL
- *   WHERE (referenced_name IN (…)
- *          OR callee_symbol_id IN (SELECT id FROM symbols WHERE kind = 'def' AND name IN (…)))
- *     AND (referenced_name IN (…) OR callee_symbol_id IS NOT NULL)
+ *   WHERE EXISTS (
+ *       SELECT 1 FROM changed_names n
+ *       WHERE edges.referenced_name = n.name
+ *          OR edges.referenced_name has the exact terminal segment n.name
+ *   )
+ *      OR callee_symbol_id IN (
+ *          SELECT s.id FROM symbols s
+ *          JOIN changed_names n ON n.name = s.name
+ *          WHERE s.kind = 'def'
+ *      )
  *   RETURNING referenced_name
  *
  * The affected-name CLEAR (POLARIS Task 1.3). Two match arms on purpose:
- *   (a) edges that REFERENCE a changed name directly — their resolution (or
- *       lack of one) must be recomputed against the new definition set;
+ *   (a) edges whose exact plain or dot-qualified terminal reference name is a
+ *       changed definition name — their resolution (or lack of one) must be
+ *       recomputed against the new definition set. The suffix comparison is
+ *       exact SQLite text logic, not LIKE/GLOB wildcard matching;
  *   (b) edges currently RESOLVED TO a definition bearing a changed name —
  *       this catches dot-qualified references (`Outer.method`) whose
  *       referenced_name would never equal the bare changed name but whose
@@ -1748,14 +1797,36 @@ export function getDefinitionNamesByFile(conn: DbConnection, filePath: string): 
 export function clearEdgeTargetsByNames(conn: DbConnection, names: readonly string[]): string[] {
     const touched = new Set<string>();
     for (const chunk of chunks(names, NAME_CHUNK_SIZE)) {
-        const placeholders = chunk.map(() => '?').join(', ');
+        const values = chunk.map(() => '(?)').join(', ');
         const rows = prepareOrCache(
             conn,
-            `UPDATE edges SET callee_symbol_id = NULL
-             WHERE referenced_name IN (${placeholders})
-                OR callee_symbol_id IN (SELECT id FROM symbols WHERE kind = 'def' AND name IN (${placeholders}))
+            `WITH changed_names(name) AS (VALUES ${values})
+             UPDATE edges SET callee_symbol_id = NULL
+             WHERE EXISTS (
+                       SELECT 1
+                       FROM changed_names n
+                       WHERE edges.referenced_name = n.name
+                          OR (
+                              length(edges.referenced_name) > length(n.name) + 1
+                              AND substr(
+                                  edges.referenced_name,
+                                  length(edges.referenced_name) - length(n.name),
+                                  1
+                              ) = '.'
+                              AND substr(
+                                  edges.referenced_name,
+                                  length(edges.referenced_name) - length(n.name) + 1
+                              ) = n.name
+                          )
+                   )
+                OR callee_symbol_id IN (
+                       SELECT s.id
+                       FROM symbols s
+                       JOIN changed_names n ON n.name = s.name
+                       WHERE s.kind = 'def'
+                   )
              RETURNING referenced_name`
-        ).all(...chunk, ...chunk) as { referenced_name: string }[];
+        ).all(...chunk) as { referenced_name: string }[];
         for (const row of rows) touched.add(row.referenced_name);
     }
     return [...touched];
@@ -2123,6 +2194,8 @@ export interface V4OccurrenceKey {
     path: string;
     line: number;
     column: number;
+    endLine: number;
+    kind: string;
     name: string;
 }
 
@@ -2511,7 +2584,7 @@ export function readV4FactsIntersectingRange(
         facts(
             file_path, sort_line, sort_end_line, sort_column,
             sort_start_byte, sort_end_byte, family_order, sort_kind, sort_name,
-            fact_family, payload_json
+            fact_family, payload_json, corruption_reason
         ) AS (
             SELECT s.file_path, s.line, s.end_line, s.column,
                    -1, -1, 0, s.type, s.name, 'symbol',
@@ -2532,10 +2605,17 @@ export function readV4FactsIntersectingRange(
                        'bodyHash', s.body_hash,
                        'parentInternalId', s.parent_symbol_id,
                        'visibility', s.visibility
-                   )
+                   ),
+                   CASE
+                       WHEN s.line IS NULL OR s.end_line IS NULL
+                       THEN 'symbol has a null line span'
+                       ELSE NULL
+                   END
             FROM symbols s
             JOIN bounds b ON b.file_path = s.file_path
-            WHERE s.line <= b.end_line AND s.end_line >= b.start_line
+            WHERE (s.line <= b.end_line AND s.end_line >= b.start_line)
+               OR s.line IS NULL
+               OR s.end_line IS NULL
 
             UNION ALL
             SELECT s.file_path, a.line, COALESCE(a.end_line, a.line), 0,
@@ -2549,11 +2629,17 @@ export function readV4FactsIntersectingRange(
                        'line', a.line,
                        'endLine', COALESCE(a.end_line, a.line),
                        'text', a.text
-                   )
+                   ),
+                   CASE
+                       WHEN a.line IS NULL
+                       THEN 'anchor has a null line span'
+                       ELSE NULL
+                   END
             FROM anchors a
             JOIN symbols s ON s.id = a.symbol_id
             JOIN bounds b ON b.file_path = s.file_path
-            WHERE a.line <= b.end_line AND COALESCE(a.end_line, a.line) >= b.start_line
+            WHERE (a.line <= b.end_line AND COALESCE(a.end_line, a.line) >= b.start_line)
+               OR a.line IS NULL
 
             UNION ALL
             SELECT s.file_path, ls.start_line, ls.end_line, 0,
@@ -2568,11 +2654,18 @@ export function readV4FactsIntersectingRange(
                        'endLine', ls.end_line,
                        'parametersJson', ls.parameters_json,
                        'localsJson', ls.locals_json
-                   )
+                   ),
+                   CASE
+                       WHEN ls.start_line IS NULL OR ls.end_line IS NULL
+                       THEN 'scope has a null line span'
+                       ELSE NULL
+                   END
             FROM local_scopes ls
             JOIN symbols s ON s.id = ls.symbol_id
             JOIN bounds b ON b.file_path = s.file_path
-            WHERE ls.start_line <= b.end_line AND ls.end_line >= b.start_line
+            WHERE (ls.start_line <= b.end_line AND ls.end_line >= b.start_line)
+               OR ls.start_line IS NULL
+               OR ls.end_line IS NULL
 
             UNION ALL
             SELECT i.file_path, COALESCE(i.start_line, i.line), COALESCE(i.end_line, i.line),
@@ -2585,11 +2678,19 @@ export function readV4FactsIntersectingRange(
                        'line', i.line,
                        'startLine', COALESCE(i.start_line, i.line),
                        'endLine', COALESCE(i.end_line, i.line)
-                   )
+                   ),
+                   CASE
+                       WHEN COALESCE(i.start_line, i.line) IS NULL
+                         OR COALESCE(i.end_line, i.line) IS NULL
+                       THEN 'import has a null line span'
+                       ELSE NULL
+                   END
             FROM imports i
             JOIN bounds b ON b.file_path = i.file_path
-            WHERE COALESCE(i.start_line, i.line) <= b.end_line
-              AND COALESCE(i.end_line, i.line) >= b.start_line
+            WHERE (COALESCE(i.start_line, i.line) <= b.end_line
+               AND COALESCE(i.end_line, i.line) >= b.start_line)
+               OR COALESCE(i.start_line, i.line) IS NULL
+               OR COALESCE(i.end_line, i.line) IS NULL
 
             UNION ALL
             SELECT inj.file_path, inj.start_line, inj.end_line, 0,
@@ -2603,12 +2704,21 @@ export function readV4FactsIntersectingRange(
                        'endLine', inj.end_line,
                        'startByte', inj.start_byte,
                        'endByte', inj.end_byte
-                   )
+                   ),
+                   CASE
+                       WHEN inj.start_line IS NULL OR inj.end_line IS NULL
+                       THEN 'injection has a null line span'
+                       ELSE NULL
+                   END
             FROM injections inj
             JOIN bounds b ON b.file_path = inj.file_path
-            WHERE inj.start_line <= b.end_line AND inj.end_line >= b.start_line
+            WHERE (inj.start_line <= b.end_line AND inj.end_line >= b.start_line)
+               OR inj.start_line IS NULL
+               OR inj.end_line IS NULL
         )
-        SELECT fact_family AS factFamily, payload_json AS payloadJson
+        SELECT fact_family AS factFamily,
+               payload_json AS payloadJson,
+               corruption_reason AS corruptionReason
         FROM facts
         ORDER BY file_path, sort_line, sort_column, sort_start_byte,
                  sort_end_byte, sort_end_line, family_order, sort_kind, sort_name
@@ -2616,7 +2726,13 @@ export function readV4FactsIntersectingRange(
     const rows = prepareOrCache(conn, sql).all(fileKey, startLine, endLine) as Array<{
         factFamily: 'symbol' | 'anchor' | 'scope' | 'import' | 'injection';
         payloadJson: string;
+        corruptionReason: string | null;
     }>;
+    for (const row of rows) {
+        if (row.corruptionReason !== null) {
+            throw new Error(`STORE_CORRUPT: readV4FactsIntersectingRange: ${row.corruptionReason}`);
+        }
+    }
     return rows.map((row): V4IntersectingFactRow => {
         switch (row.factFamily) {
             case 'symbol': return { factFamily: 'symbol', fact: JSON.parse(row.payloadJson) as V4SymbolFactRow };
@@ -2669,8 +2785,10 @@ export function namePrefixUpperBound(prefix: string): string | null {
  * empty kind set, otherwise exactly 1.
  *
  * SQL: filtered symbols materialized once; metadata counts the full filtered
- * domain; page applies `(file_path,line,column,name) > (?,?,?,?)`, canonical
- * ordering, and LIMIT.
+ * domain; page applies
+ * `(file_path,line,column,end_line,type,name) > (?,?,?,?,?,?)`, canonical
+ * ordering, and LIMIT. A repeated full canonical key is store corruption:
+ * it would map multiple persisted rows to one public fact identity.
  */
 export function queryV4Occurrences(
     conn: DbConnection,
@@ -2719,10 +2837,17 @@ export function queryV4Occurrences(
     }
 
     const afterSql = page.afterKey
-        ? 'WHERE (path, line, column, name) > (?, ?, ?, ?)'
+        ? 'WHERE (path, line, column, endLine, kind, name) > (?, ?, ?, ?, ?, ?)'
         : '';
     if (page.afterKey) {
-        params.push(page.afterKey.path, page.afterKey.line, page.afterKey.column, page.afterKey.name);
+        params.push(
+            page.afterKey.path,
+            page.afterKey.line,
+            page.afterKey.column,
+            page.afterKey.endLine,
+            page.afterKey.kind,
+            page.afterKey.name,
+        );
     }
     params.push(page.limit);
 
@@ -2743,29 +2868,36 @@ export function queryV4Occurrences(
             WHERE ${where.join(' AND ')}
         ),
         metadata AS (
-            SELECT COUNT(*) AS total FROM filtered
+            SELECT COUNT(*) AS total,
+                   EXISTS (
+                       SELECT 1
+                       FROM filtered
+                       GROUP BY path, line, column, endLine, kind, name
+                       HAVING COUNT(*) > 1
+                   ) AS duplicateCanonicalKey
+            FROM filtered
         ),
         page_rows AS (
             SELECT *
             FROM filtered
             ${afterSql}
-            ORDER BY path, line, column, name
+            ORDER BY path, line, column, endLine, kind, name
             LIMIT ?
         )
         SELECT 0 AS metadataOnly,
                p.internalId, p.path, p.line, p.endLine, p.column, p.name,
                p.role, p.kind, p.captureTag, p.parentInternalId, p.visibility,
-               m.total
+               m.total, m.duplicateCanonicalKey
         FROM page_rows p
         CROSS JOIN metadata m
         UNION ALL
         SELECT 1 AS metadataOnly,
                NULL, NULL, NULL, NULL, NULL, NULL,
                NULL, NULL, NULL, NULL, NULL,
-               m.total
+               m.total, m.duplicateCanonicalKey
         FROM metadata m
         WHERE NOT EXISTS (SELECT 1 FROM page_rows)
-        ORDER BY metadataOnly, path, line, column, name
+        ORDER BY metadataOnly, path, line, column, endLine, kind, name
     `;
     const raw = prepareOrCache(conn, sql).all(...params) as unknown as Array<{
         metadataOnly: number;
@@ -2781,7 +2913,11 @@ export function queryV4Occurrences(
         parentInternalId: number | null;
         visibility: string | null;
         total: number;
+        duplicateCanonicalKey: number;
     }>;
+    if ((raw[0]?.duplicateCanonicalKey ?? 0) !== 0) {
+        throw new Error('STORE_CORRUPT: queryV4Occurrences: duplicate canonical occurrence key');
+    }
     const total = raw[0]?.total ?? 0;
     const rows: V4OccurrenceRow[] = [];
     for (const row of raw) {
@@ -2848,7 +2984,11 @@ export function readV4StructuresByInternalIds(
     rows.sort((a, b) => {
         const aFilePath = a.filePath ?? '';
         const bFilePath = b.filePath ?? '';
-        if (aFilePath !== bFilePath) return aFilePath < bFilePath ? -1 : 1;
+        const filePathOrder = Buffer.compare(
+            Buffer.from(aFilePath, 'utf8'),
+            Buffer.from(bFilePath, 'utf8'),
+        );
+        if (filePathOrder !== 0) return filePathOrder;
         const aLine = a.line ?? -1;
         const bLine = b.line ?? -1;
         if (aLine !== bLine) return aLine - bLine;
@@ -2857,7 +2997,11 @@ export function readV4StructuresByInternalIds(
         if (aColumn !== bColumn) return aColumn - bColumn;
         const aName = a.name ?? '';
         const bName = b.name ?? '';
-        if (aName !== bName) return aName < bName ? -1 : 1;
+        const nameOrder = Buffer.compare(
+            Buffer.from(aName, 'utf8'),
+            Buffer.from(bName, 'utf8'),
+        );
+        if (nameOrder !== 0) return nameOrder;
         const aFactKey = JSON.stringify([
             a.paramsJson, a.returnText, a.decoratorsJson, a.modifiersJson,
             a.genericsText, a.parentKind, a.parentName,
@@ -2866,7 +3010,7 @@ export function readV4StructuresByInternalIds(
             b.paramsJson, b.returnText, b.decoratorsJson, b.modifiersJson,
             b.genericsText, b.parentKind, b.parentName,
         ]) ?? '';
-        return aFactKey < bFactKey ? -1 : aFactKey > bFactKey ? 1 : 0;
+        return Buffer.compare(Buffer.from(aFactKey, 'utf8'), Buffer.from(bFactKey, 'utf8'));
     });
     return rows;
 }
@@ -3231,17 +3375,17 @@ export function readV4DirectoryProjectAggregates(
     }
 
     const scopeLanguages = [...scopeAccumulator.languages.entries()]
-        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .sort(([a], [b]) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')))
         .map(([language, fileCount]) => ({ language, fileCount }));
     const directories = [...directoryAccumulators.entries()]
-        .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+        .sort(([a], [b]) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')))
         .map(([key, accumulator]): V4ScopeAggregateRow => ({
             key,
             fileCount: accumulator.fileCount,
             declarationCount: accumulator.declarationCount,
             referenceCount: accumulator.referenceCount,
             languages: [...accumulator.languages.entries()]
-                .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+                .sort(([a], [b]) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')))
                 .map(([language, fileCount]) => ({ language, fileCount })),
         }));
     return {
@@ -3286,6 +3430,9 @@ export function readV4FileHashesByKeys(
         >;
         rows.push(...raw.map((row) => ({ ...row, present: row.present !== 0 })));
     }
-    rows.sort((a, b) => a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0);
+    rows.sort((a, b) => Buffer.compare(
+        Buffer.from(a.filePath, 'utf8'),
+        Buffer.from(b.filePath, 'utf8'),
+    ));
     return rows;
 }

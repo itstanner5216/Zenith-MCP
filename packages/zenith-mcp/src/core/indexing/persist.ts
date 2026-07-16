@@ -116,23 +116,17 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
             insertLocalScope(conn, { symbolId, scopeKind: local.scopeKind, startLine: local.startLine, endLine: local.endLine, parametersJson: JSON.stringify(local.parameters), localsJson: JSON.stringify(local.locals) });
         }
 
-        // 10. Affected-name resolution (POLARIS Task 1.3), same transaction:
-        //     changedDefinitions = old ∪ new definition names, computed only
-        //     when the sets differ (a caller-only edit must not churn other
-        //     files' resolutions). Clear every stale target touching those
-        //     names — including dot-qualified edges currently RESOLVED TO a
-        //     changed name — then re-resolve exactly the affected names plus
-        //     this file's own (all-unresolved) new references. The clear
-        //     returns the referenced names it touched, so nothing cleared is
-        //     ever left owed at commit.
+        // 10. Affected-name resolution (POLARIS Task 1.3), same transaction.
+        //     Every definition row in this file was deleted and reinserted, so
+        //     every old/new definition name changed storage identity even when
+        //     the two name sets are equal. Clear every reference group whose
+        //     terminal name can resolve through one of those identities, then
+        //     re-resolve the exact groups the clear touched plus this file's
+        //     own (all-unresolved) new references. The clear returns the full
+        //     referenced names (including qualified groups), so nothing
+        //     cleared is ever left owed at commit.
         const newDefinitionNames = [...new Set(record.symbols.filter((s) => s.kind === 'def').map((s) => s.name))];
-        const oldSet = new Set(oldDefinitionNames);
-        const newSet = new Set(newDefinitionNames);
-        const setsDiffer = oldSet.size !== newSet.size
-            || [...newSet].some((n) => !oldSet.has(n));
-        const changedDefinitions = setsDiffer
-            ? [...new Set([...oldDefinitionNames, ...newDefinitionNames])]
-            : [];
+        const changedDefinitions = [...new Set([...oldDefinitionNames, ...newDefinitionNames])];
 
         const clearedNames = changedDefinitions.length > 0
             ? clearEdgeTargetsByNames(conn, changedDefinitions)

@@ -78,12 +78,14 @@ function cmpBytes(a, b) {
     return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 }
 
-// SQLite ORDER BY path, line, column, name under BINARY collation: text columns
+// SQLite's canonical v4 occurrence order under BINARY collation: text columns
 // compare by UTF-8 bytes, integer columns numerically.
 function cmpRow(x, y) {
     return cmpBytes(x.path, y.path)
         || (x.line - y.line)
         || (x.column - y.column)
+        || (x.endLine - y.endLine)
+        || cmpBytes(x.kind, y.kind)
         || cmpBytes(x.name, y.name);
 }
 
@@ -168,7 +170,9 @@ describe('queryV4Occurrences — differential vs an independent raw-row filter',
             expect(api.rows.map(projectApi), `rows ${label}`).toEqual(ref.rows);
             // Keys must be distinct so the canonical order is fully determined
             // (guards the ordered comparison against tie-induced flakiness).
-            const keys = api.rows.map((r) => `${r.path}\u0000${r.line}\u0000${r.column}\u0000${r.name}`);
+            const keys = api.rows.map((r) => (
+                `${r.path}\u0000${r.line}\u0000${r.column}\u0000${r.endLine}\u0000${r.kind}\u0000${r.name}`
+            ));
             expect(new Set(keys).size, `distinct keys ${label}`).toBe(keys.length);
         }
     });
@@ -202,7 +206,14 @@ describe('queryV4Occurrences — keyset pagination completeness (references)', (
                 collected.push(...page.rows);
                 if (page.rows.length < limit) break;
                 const last = page.rows[page.rows.length - 1];
-                afterKey = { path: last.path, line: last.line, column: last.column, name: last.name };
+                afterKey = {
+                    path: last.path,
+                    line: last.line,
+                    column: last.column,
+                    endLine: last.endLine,
+                    kind: last.kind,
+                    name: last.name,
+                };
             }
             expect(collected.map(projectApi)).toEqual(oneShot.rows.map(projectApi));
         });
@@ -274,12 +285,11 @@ describe('queryV4Occurrences — Unicode name collation is UTF-8 bytes, not JS o
     });
 });
 
-describe('queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact', () => {
-    // Two schema-permitted rows sharing (path,line,column,name) but differing in
-    // `type` are distinct occurrences. one-shot sees both (total=2); keyset
-    // pagination at limit=1 cannot advance past the shared key and drops the
-    // second — violating Decision 24 "each canonical fact exactly once".
-    it('metamorphic concat != one-shot when two facts share the page key', () => {
+describe('queryV4Occurrences — strict canonical keyset order', () => {
+    // Two schema-permitted rows sharing the old (path,line,column,name) prefix
+    // but differing in `type` are distinct occurrences. The complete stable
+    // tuple must enumerate both exactly once without consulting row identity.
+    it('metamorphic concat equals one-shot when two facts share the legacy page key', () => {
         execRaw(db, 'SAVEPOINT polaris_audit_dup');
         try {
             queryRaw(db, "INSERT INTO files (path, hash, last_indexed) VALUES ('zdup/d.ts', 'h', 1) RETURNING path");
@@ -304,11 +314,17 @@ describe('queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact
                 collected.push(...page.rows);
                 if (page.rows.length < 1) break;
                 const last = page.rows[page.rows.length - 1];
-                afterKey = { path: last.path, line: last.line, column: last.column, name: last.name };
+                afterKey = {
+                    path: last.path,
+                    line: last.line,
+                    column: last.column,
+                    endLine: last.endLine,
+                    kind: last.kind,
+                    name: last.name,
+                };
             }
 
             // Decision 24: following cursors to exhaustion yields each fact once.
-            // Today the second fact is skipped, so this is RED.
             expect(collected).toHaveLength(oneShot.total);
             expect(new Set(collected.map((r) => r.kind))).toEqual(new Set(['call', 'property']));
         } finally {
@@ -342,7 +358,14 @@ describe('queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact
                 collected.push(...page.rows);
                 if (page.rows.length < 1) break;
                 const last = page.rows[page.rows.length - 1];
-                afterKey = { path: last.path, line: last.line, column: last.column, name: last.name };
+                afterKey = {
+                    path: last.path,
+                    line: last.line,
+                    column: last.column,
+                    endLine: last.endLine,
+                    kind: last.kind,
+                    name: last.name,
+                };
             }
             expect(collected).toHaveLength(2);
         } finally {

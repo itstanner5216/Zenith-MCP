@@ -149,7 +149,12 @@ export function gradeOfBasis(basis: CandidateBasis): EvidenceGrade {
 // ---------------------------------------------------------------------------
 
 function cmp(a: string | number, b: string | number): number {
-    return a < b ? -1 : a > b ? 1 : 0;
+    if (typeof a === 'number') {
+        if (typeof b !== 'number') throw new Error('cmp: mixed string/number comparison');
+        return a < b ? -1 : a > b ? 1 : 0;
+    }
+    if (typeof b !== 'string') throw new Error('cmp: mixed string/number comparison');
+    return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 }
 
 /** Positions order by (startLine, startColumn|-1, endLine, kind, name). */
