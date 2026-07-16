@@ -1,0 +1,48 @@
+{
+  "base": "28e3a77",
+  "supersedes": "da240f5",
+  "merged": [
+    "resolution-1",
+    "resolution-4",
+    "resolution-3 (+N8 seam fix)"
+  ],
+  "suite": {
+    "passed": 1790,
+    "failed": 7,
+    "skipped": 2
+  },
+  "remainingFindings": {
+    "A6 x5 + A2": "res-5 pending owner amendment approvals",
+    "A5": "res-2 in flight (stitches after res-5)"
+  },
+  "failing": [
+    {
+      "key": "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=1)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-audit-file-model-paging.test.js:246:72\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chu"
+    },
+    {
+      "key": "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=2)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-audit-file-model-paging.test.js:246:72\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chu"
+    },
+    {
+      "key": "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=3)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-audit-file-model-paging.test.js:246:72\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chu"
+    },
+    {
+      "key": "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages full canonical answer: concat of all pages equals one-shot (line 1315)",
+      "sig": "AssertionError: every canonical fact (array + object) exactly once across pages: expected false to be true // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-audit-file-model-paging.test.js:257:80\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/run"
+    },
+    {
+      "key": "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts rejects heuristic_name as a ResolvedLocatedSymbol even when its handle is a persisted fact",
+      "sig": "AssertionError: expected false to be true // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-independent-adversarial-contracts.test.js:201:11\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11\n    at file:///home/t"
+    },
+    {
+      "key": "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
+      "sig": "AssertionError: expected 'g/3af73fa6bc87cd6e18db180235e9f748ab1…' to be 'src/main.ts' // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-independent-facade-adversarial.test.js:100:34\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk"
+    },
+    {
+      "key": "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles paginates relation facts exactly once with the array-shaped fact stream",
+      "sig": "AssertionError: expected [ …(12) ] to deeply equal [ …(3) ]\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-independent-facade-adversarial.test.js:159:36\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+    }
+  ]
+}
