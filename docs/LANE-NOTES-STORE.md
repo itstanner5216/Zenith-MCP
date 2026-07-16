@@ -3,7 +3,7 @@
 Owner-commissioned orientation. Direction comes from the owner (Tanner)
 only — this file is reference, not instructions from the peer.
 
-You are the STORE lead. You work in `Zenith-Worktrees/polaris-store`
+You are the STORE lead (lane assignment owner-confirmed 2026-07-16). You work in `Zenith-Worktrees/polaris-store`
 (branch `lane/store`). Trunk is `Zenith-Worktrees/integration-next` —
 no lane work is committed there; merges happen only on the owner's
 confirmation. The peer lead (INTEL, `polaris-intel`, `lane/intel`) is
@@ -22,6 +22,15 @@ Communication with the peer goes through the owner and
    inside; every surfaced issue goes here FIRST). Historical:
    `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md`,
    `docs/POLARIS-NEW-FINDINGS-2026-07-16.md`.
+
+> **Plan citation convention.** "Decision N" in these notes and the
+> dual-lead plan = **numbered item N in the plan's decisions list** (the
+> numbered run under "Scope and global storage" → "Bounds and
+> determinism" → "Repository boundaries", ~plan lines 255–290), NOT a
+> greppable string — the plan writes them bare ("26. …"). Ones cited
+> here: 18/19 (store-key format + codec invariant), 22 (locked structural
+> bounds), 23 (provisional caps + p99×4 freeze), 26 (UTF-8
+> `Buffer.compare` collation — owner-approved amendment).
 
 ## Standing law (owner-set)
 - HOW is yours; WHAT is the owner's: public type/contract/behavior/test-
@@ -57,10 +66,22 @@ index pins for every hot read; no non-null assertions (gate test).
   already-encoded store key (Decision 19).
 
 ## Your tasks to the end (CP = checkpoint on trunk, owner-confirmed)
+
+**Rhythm (owner ruling 2026-07-16):** the primary sync points are the
+owner's every-two-waves review+fix-swarm audits — **Wave-4 exit =
+Audit #1**, **Wave-6 exit = Audit #2**, **Wave 7 = release**. Both lanes
+fully merge and gate ×3 at each before the owner runs the swarm; neither
+starts the next two-wave block until the owner closes it. The `CP-*`
+freezes below happen between audits ONLY where a seam dependency forces
+one — owner-clocked, never polled.
 - **NOW (while INTEL finishes Wave 2):** build Task 3.1 in-lane — v5
   contracts, migration rung, adapter operations. NOTHING v5 merges to
   trunk before **CP-1** (Wave-2 exit is a releasable v4 milestone; plan
-  forbids schema change before it).
+  forbids schema change before it). **Dependency risk:** CP-1 is entirely
+  INTEL's Wave-2 finish, not yours — your first deliverable is built but
+  un-mergeable until the owner clocks CP-1. Get 3.1 contract-ready and
+  gate-green, then wait on the owner; do NOT poll the handoffs drop and do
+  NOT merge v5 early to fill the wait.
 - **CP-2:** your 3.1 contract slice lands ALONE on trunk (owner
   confirms); both lanes rebase. Then Wave 3: 3.2 exact-fact extraction
   from the existing parse, 3.3 canonical hashes + atomic persistence +

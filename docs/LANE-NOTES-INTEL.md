@@ -1,6 +1,6 @@
 # LANE NOTE — INTEL (compaction anchor; re-read after every compaction)
 
-You are the INTEL lead. You work in `Zenith-Worktrees/polaris-intel`
+You are the INTEL lead (lane assignment owner-confirmed 2026-07-16). You work in `Zenith-Worktrees/polaris-intel`
 (branch `lane/intel`). Trunk is `Zenith-Worktrees/integration-next` —
 nobody commits lane work there; merges happen only on the owner's (Tanner's)
 confirmation. The peer lead (STORE, `polaris-store`, `lane/store`) is your
@@ -13,6 +13,15 @@ ties. Communication with the peer goes through the owner and
 2. `docs/concepts/AST_INTELLIGENCE_SYNTHESIS.md` — THE plan (POLARIS).
 3. `docs/POLARIS-DUAL-LEAD-PLAN.md` — split, checkpoints, peer ruling.
 4. `docs/KNOWN-ISSUES-LANE-INTEL.md` — YOUR running ledger (owner rules inside; every surfaced issue goes here FIRST). Historical: `docs/POLARIS-KNOWN-ISSUES-2026-07-15.md`, `docs/POLARIS-NEW-FINDINGS-2026-07-16.md` (N1–N12).
+
+> **Plan citation convention.** "Decision N" in these notes and the
+> dual-lead plan = **numbered item N in the plan's decisions list** (the
+> numbered run under "Scope and global storage" → "Bounds and
+> determinism" → "Repository boundaries", ~plan lines 255–290), NOT a
+> greppable string — the plan writes them bare ("26. …"). Ones cited
+> here: 18/19 (store-key format + codec invariant), 22 (locked structural
+> bounds), 23 (provisional caps + p99×4 freeze), 26 (UTF-8
+> `Buffer.compare` collation — owner-approved amendment).
 
 ## Standing law (owner-set)
 - HOW is yours; WHAT is the owner's. Public type/contract/behavior/test-
@@ -33,6 +42,14 @@ never crosses the facade. No OFFSET. Buffer.compare UTF-8 collation
 everywhere (owner-approved Decision 26). Coverage per N7 Option A.
 
 ## Your tasks to the end (CP = checkpoint on trunk, owner-confirmed)
+
+**Rhythm (owner ruling 2026-07-16):** the primary sync points are the
+owner's every-two-waves review+fix-swarm audits — **Wave-4 exit =
+Audit #1**, **Wave-6 exit = Audit #2**, **Wave 7 = release**. Both lanes
+fully merge and gate ×3 at each before the owner runs the swarm; neither
+starts the next two-wave block until the owner closes it. The `CP-*`
+freezes below happen between audits ONLY where a seam dependency forces
+one — owner-clocked, never polled.
 - **NOW (Wave 2 finish):** composers `queryOccurrences` + `resolveAt`
   (literal-floor coupling, candidate protocol; floor is
   acceleration-only, rg never trusted for absence), `traceRelations`

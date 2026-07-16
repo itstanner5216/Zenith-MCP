@@ -8,7 +8,7 @@ history; entries change status, they never disappear.
 
 ---
 
-## Owner instructions (Tanner) — *drafted for owner review; Tanner edits/confirms this section*
+## Owner instructions (Tanner) — OWNER-CONFIRMED 2026-07-16
 
 These are my rules. They are not suggestions.
 
@@ -37,9 +37,11 @@ These are my rules. They are not suggestions.
 6. **Plan silence can be deliberate.** Absence of something in the plan
    is not automatically a gap for you to fill. Ask. I am the authority
    on gap vs decision.
-7. **Never soften, skip, or delete a failing assertion to make
-   progress.** The failure stands until it is properly fixed or I rule
-   on it.
+7. **Never *weaken*, skip, or delete an asserted property to make
+   progress.** A failing assertion stands until it is properly fixed or
+   I rule on it. A test may change only to assert a *stronger* property
+   (finding N3) — strengthening is encouraged, never frozen; only
+   weakening is rejectable.
 8. **You and the other lead are equals.** You do not direct each other;
    direction comes from me. Disagreements come to me — I am the
    tiebreaker. You do not touch their lane's work.

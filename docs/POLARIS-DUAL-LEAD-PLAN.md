@@ -45,8 +45,19 @@ lane before starting (no drift from memory).
 
 ## Checkpoint protocol (the alignment mechanism)
 
-Checkpoints are **contract freezes at the seam, landed on integration
-HEAD** — never direct lane-to-lane merges.
+**Primary rhythm — the owner's every-two-waves audit (owner ruling
+2026-07-16).** The load-bearing synchronization points are the owner's
+biweekly review-swarm + fix-swarm audits: **Wave-4 exit = Audit #1**,
+**Wave-6 exit = Audit #2**, **Wave 7 = release gate** (see "Biweekly
+adversarial audit" below). At each, BOTH lanes' work is fully merged on
+integration HEAD and gate-verified ×3 before the owner runs the swarm,
+and neither lane starts the next two-wave block until the owner closes
+the audit. Everything below serves that rhythm.
+
+Checkpoints between audits are **contract freezes at the seam, landed on
+integration HEAD** — never direct lane-to-lane merges — and they exist
+ONLY where a real cross-lane dependency (or a wave-exit gate) forces one,
+never as scheduled ceremony.
 
 - CP-0 (fork): both lanes fork from post-audit-merge integration HEAD.
   Nothing forks until the five audit lanes land and the baseline re-pins.
@@ -54,8 +65,10 @@ HEAD** — never direct lane-to-lane merges.
   named-read signatures" (types + adapter read stubs + EQP pins); INTEL
   lands "composer question/answer payloads frozen." The artifact merges to
   integration first, alone, gate-verified; THEN both lanes rebase onto the
-  new HEAD. Cadence: per task-pair, roughly weekly-equivalent, not per-wave
-  (too coarse) or per-commit (too chatty).
+  new HEAD. These dependency-forced freezes are the ONLY checkpoints
+  between audits — concretely CP-2 (STORE's v5 contract before INTEL's
+  v5-precision reads), CP-4 (profile contract), CP-5 (v6/binding contract);
+  each is triggered by the seam and owner-clocked, not scheduled.
 - Seam rules between checkpoints: STORE may append named reads (append-only
   region, proven by 2.2); INTEL consumes only reads that exist on
   integration HEAD. Neither lane edits `types.ts` outside a checkpoint, and
@@ -124,11 +137,11 @@ and different in kind.
 
 ## Open items to settle at adoption
 
-1. Who runs Lane STORE vs INTEL (current lead's recommendation: current
-   lead takes INTEL — it owns the composer/floor/session code it wrote and
-   the 2.4 gate authorship; the second lead takes STORE, forking clean
-   surfaces with the strongest existing test scaffolding: ladder fixtures,
-   atomicity suites, EQP pins).
+1. **RESOLVED — OWNER RULING 2026-07-16.** Continuing lead = **INTEL**
+   (owns the composer/floor/session code it wrote and the 2.4 gate
+   authorship); second lead = **STORE** (forks the clean surfaces with the
+   strongest existing test scaffolding: ladder fixtures, atomicity suites,
+   EQP pins). This is the owner's decision, not the lead's self-selection.
 2. Second lead's identity/runtime (needs to be long-running and
    plan-literate; the Task 2.1/2.2 parallel agent already knows the
    contracts).
