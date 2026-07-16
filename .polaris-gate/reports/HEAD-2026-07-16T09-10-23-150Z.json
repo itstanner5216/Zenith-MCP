@@ -1,0 +1,22 @@
+{
+  "lane": "HEAD",
+  "scratchBranch": "gate/HEAD-2026-07-16T09-10-23-150Z",
+  "integrationHead": "e324cb2",
+  "laneHead": "e324cb2",
+  "startedAt": "2026-07-16T09:10:23.158Z",
+  "verdicts": {
+    "merge": {
+      "ok": true
+    },
+    "rebuild": {
+      "ok": false,
+      "detail": "Scope: all 3 workspace projects\n[ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY] Aborted removal of modules directory due to no TTY\n\nIf you are running pnpm in CI, set the CI environment variable to \"true\", or set \"confirmModulesPurge\" to \"false\".\n[ERROR] Command failed with exit code 1: pnpm install\n\npnpm: Command failed with exit code 1: pnpm install\n    at getFinalError (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:88106:14)\n    at makeError (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:90413:21)\n    at getSyncResult (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:92257:10)\n    at spawnSubprocessSync (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:92217:14)\n    at execaCoreSync (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:92147:23)\n    at callBoundExeca (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:94675:23)\n    at boundExeca (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:94652:49)\n    at sync2 (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:94807:14)\n    at runPnpmCli (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:248252:5)\n    at runDepsStatusCheck (file:///home/tanner/.local/share/pnpm/lib/node_modules/pnpm/dist/pnpm.mjs:250016:7)\n\n"
+    }
+  },
+  "delta": null,
+  "diffSurface": [
+    ""
+  ],
+  "baseSuite": null,
+  "finishedAt": "2026-07-16T09:10:24.706Z"
+}

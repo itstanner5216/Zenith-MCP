@@ -1,0 +1,354 @@
+{
+  "forkCommit": "46b341f",
+  "approvalCommit": "e324cb2",
+  "capturedAt": "2026-07-16T09:08:44.562Z",
+  "failing": [
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=1)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=2)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=3)",
+      "sig": "AssertionError: relations must appear exactly once across all pages: expected false to be true // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — FINDING F1: object sections duplicate across pages full canonical answer: concat of all pages equals one-shot (line 1315)",
+      "sig": "AssertionError: every canonical fact (array + object) exactly once across pages: expected false to be true // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact metamorphic concat != one-shot when two facts share the page key",
+      "sig": "AssertionError: expected [ { internalId: 16, …(10) } ] to have a length of 2 but got 1"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) before the literal is misclassified as a boundary",
+      "sig": "AssertionError: letter precedes literal ⇒ not a boundary: expected true to be false // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) after the literal is misclassified as a boundary",
+      "sig": "AssertionError: letter follows literal ⇒ not a boundary: expected true to be false // Object.is equality"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral NUMBER (\\p{N}) adjacent is misclassified as a boundary",
+      "sig": "AssertionError: number precedes literal ⇒ not a boundary: expected true to be false // Object.is equality"
+    },
+    {
+      "file": "polaris-independent-adversarial-contracts.test.js",
+      "test": "POLARIS independent adversarial contracts rejects heuristic_name as a ResolvedLocatedSymbol even when its handle is a persisted fact",
+      "sig": "AssertionError: expected false to be true // Object.is equality"
+    },
+    {
+      "file": "polaris-independent-adversarial-contracts.test.js",
+      "test": "POLARIS independent adversarial contracts keeps same-name incoming edge targets equal to a clean rebuild after a target body edit",
+      "sig": "AssertionError: incremental replacement must preserve the incoming target: expected null to be 'target.ts' // Object.is equality"
+    },
+    {
+      "file": "polaris-independent-adversarial-contracts.test.js",
+      "test": "POLARIS independent adversarial contracts enumerates keyset-tied occurrence rows exactly once across one-row pages",
+      "sig": "AssertionError: the cursor must not skip the legal row tied on its exposed key: expected [] to have a length of 1 but got +0"
+    },
+    {
+      "file": "polaris-independent-adversarial-contracts.test.js",
+      "test": "POLARIS independent adversarial contracts orders adapter rows by SQLite BINARY UTF-8 bytes for adversarial paths and names",
+      "sig": "AssertionError: expected [ …(2) ] to deeply equal [ …(2) ]"
+    },
+    {
+      "file": "polaris-independent-adversarial-contracts.test.js",
+      "test": "POLARIS independent adversarial contracts does not advance the fact commit generation for a rolled-back inner savepoint",
+      "sig": "AssertionError: a rolled-back savepoint is not a fact-changing outer commit: expected { dataVersion: 1, commitGeneration: 6 } to deeply equal { dataVersion: 1, commitGeneration: 5 }"
+    },
+    {
+      "file": "polaris-independent-facade-adversarial.test.js",
+      "test": "independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
+      "sig": "AssertionError: expected 'g/6f9126d0a85529652057a014e2c6dc3d82a…' to be 'src/main.ts' // Object.is equality"
+    },
+    {
+      "file": "polaris-independent-facade-adversarial.test.js",
+      "test": "independent facade boundary oracles paginates relation facts exactly once with the array-shaped fact stream",
+      "sig": "AssertionError: expected [ …(12) ] to deeply equal [ …(3) ]"
+    },
+    {
+      "file": "polaris-independent-facade-adversarial.test.js",
+      "test": "independent facade boundary oracles enforces realpath validation before a symlink can import outside bytes",
+      "sig": "AssertionError: expected { validatorUsed: false, …(2) } to deeply equal { validatorUsed: true, …(2) }"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent session factory and freshness oracles canonical source-domain identity ignores filesystem creation order but changes with source bytes",
+      "sig": "AssertionError: source-domain membership must exclude the factory's own .mcp artifacts: expected 7 to be 3 // Object.is equality"
+    }
+  ],
+  "passing": [
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — the fixture actually exercises the seam one-shot has relations AND enough array facts to force multi-page walks"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — POSITIVE CONTROL (array sections paginate exactly once) array-only concat equals one-shot at limit=1"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — POSITIVE CONTROL (array sections paginate exactly once) array-only concat equals one-shot at limit=2"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — POSITIVE CONTROL (array sections paginate exactly once) array-only concat equals one-shot at limit=3"
+    },
+    {
+      "file": "polaris-audit-file-model-paging.test.js",
+      "test": "fileModel paging — FINDING F1: object sections duplicate across pages limit > total returns a single exhausted page (no duplication when unpaged)"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — differential vs an independent raw-row filter every filter combination matches the independent oracle (rows + total)"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — differential vs an independent raw-row filter anti-vacuity: the oracle disagrees with a deliberately wrong filter"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — keyset pagination completeness (references) reference pages at limit=1 concatenate to the one-shot result"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — keyset pagination completeness (references) reference pages at limit=2 concatenate to the one-shot result"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — keyset pagination completeness (references) reference pages at limit=3 concatenate to the one-shot result"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — Unicode name collation is UTF-8 bytes, not JS order orders Unicode names by UTF-8 bytes (independent Buffer.compare reference)"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — Unicode name collation is UTF-8 bytes, not JS order exact and prefix name filters are Unicode-correct"
+    },
+    {
+      "file": "polaris-audit-occurrences-differential.test.js",
+      "test": "queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact anti-vacuity: with distinct columns the same walk is complete (control)"
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src/nested/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src/nested/deep/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src-sibling/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src.config/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"src0/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"srcery/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"pkg/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"𝌆mod/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"zz/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — range query vs. naive full-scan prefix (differential) range == naive byte-prefix full-scan for scopePrefix=\"does-not-exist/\""
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — the slash boundary is real (anti-vacuity mutation) the correct src/ scope excludes every sibling that a stem match would leak"
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — the slash boundary is real (anti-vacuity mutation) a bare file named 'src' is below the 'src/' lower bound and excluded"
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — ordering is UTF-8 byte order, not JS UTF-16 returns zz/ members in UTF-8 byte order, which differs from a JS < sort"
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — documented precondition (positive/negative control) throws for a non-empty prefix that does not end with '/'"
+    },
+    {
+      "file": "polaris-audit-scope-prefix-range.test.js",
+      "test": "getScopeFileHashView — documented precondition (positive/negative control) does not throw for '' or a '/'-terminated prefix"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — UTF-16 column is hand-computed, not snapshotted case 0: literal \"HERE\" at UTF-16 column 7"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — UTF-16 column is hand-computed, not snapshotted case 1: literal \"X\" at UTF-16 column 4"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — UTF-16 column is hand-computed, not snapshotted case 2: literal \"naïve\" at UTF-16 column 4"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — UTF-16 column is hand-computed, not snapshotted anti-vacuity: a wrong hand-computed column would be RED"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — UTF-16 column is hand-computed, not snapshotted column on a later line accounts only for that line prefix"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — rg and in-process agree on Unicode byte offsets (differential) same byte-offset multiset for a multibyte literal"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — rg and in-process agree on Unicode byte offsets (differential) anti-vacuity: the differential can distinguish scanners (wrong literal → both empty, equal; real literal → nonempty)"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars CONTROL: BMP letter before/after → boundary false"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars CONTROL: non-identifier (space / punctuation) → boundary true"
+    },
+    {
+      "file": "polaris-audit-text-floor-unicode.test.js",
+      "test": "text floor — FINDING F2: boundary annotation and supplementary-plane chars CONTROL: astral NON-letter (emoji) adjacent → boundary true (correct either way)"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "independent evidence-lattice oracles uses UTF-8 byte lengths in the domain-separated hash"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "independent evidence-lattice oracles computes the meet for every deterministic grade triple"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "literal floor against raw-byte and metamorphic oracles matches hand-derived UTF-8 offsets and UTF-16 columns"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "literal floor against raw-byte and metamorphic oracles keeps rg and in-process output equivalent on the Unicode corpus"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "literal floor against raw-byte and metamorphic oracles treats the byte budget as an exact inclusive threshold"
+    },
+    {
+      "file": "polaris-independent-file-floor.test.js",
+      "test": "fileModel supported sections against raw SQL concatenates keyset pages to the one-shot raw-fact projection"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent session factory and freshness oracles content mode persists the exact in-hand program while leaving disk bytes untouched"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent session factory and freshness oracles content-domain identity is a set-order invariant and remains content-sensitive"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent session factory and freshness oracles a later content-ingestion failure preserves earlier live facts without committing the failed file"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent epoch, cursor, and lease controls a fact-only rollback preserves a cursor while a fact-only commit invalidates it as INPUT_CHANGED"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent epoch, cursor, and lease controls a public continuation works only on its emitter even when a twin session pins the same basis"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent epoch, cursor, and lease controls INVALID_QUERY does not slide the lease while a valid continuation does"
+    },
+    {
+      "file": "polaris-independent-session-freshness.test.js",
+      "test": "independent typed-open failure boundary maps a future project schema to FUTURE_SCHEMA while a healthy sibling opens normally"
+    },
+    {
+      "file": "polaris-independent-unicode-content.test.js",
+      "test": "independent UTF-16 and content-addressed oracles projects declaration and reference columns as UTF-16 code units across every adversarial prefix class"
+    },
+    {
+      "file": "polaris-independent-unicode-content.test.js",
+      "test": "independent UTF-16 and content-addressed oracles content-mode ingestion equals a clean disk ingestion of the identical bytes"
+    },
+    {
+      "file": "polaris-independent-unicode-content.test.js",
+      "test": "independent UTF-16 and content-addressed oracles preserves fact identity on a no-op, changes it with source bytes, and restores it with the original content"
+    },
+    {
+      "file": "polaris-independent-unicode-content.test.js",
+      "test": "independent UTF-16 and content-addressed oracles keeps every project-mode fileModel path scope-relative for absolute and relative questions"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "complete v4 bundle: hand-authored SQLite oracle projects every requested v4 family exactly and excludes a prefix-adjacent file"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "inclusive range reads: naive full-scan and metamorphic oracles equals a naive five-table inclusive-overlap filter at exact boundaries"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "inclusive range reads: naive full-scan and metamorphic oracles a two-line query equals the set union of its two point queries"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "occurrence discovery: raw-row, UTF-8, and keyset oracles concatenated pages equal a raw full scan in SQLite UTF-8 byte order"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "UTF-16 source columns versus UTF-8 storage bytes persists declaration and repeated-call columns as JS UTF-16 code units"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "targeted family reads and frontier honesty: raw-SQL differential deduplicates requested keys and returns only rows from the exact key set"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "targeted family reads and frontier honesty: raw-SQL differential raw edge grouping agrees on exact counts, scope, and legacy-only targets"
+    },
+    {
+      "file": "polaris-independent-v4-oracles.test.js",
+      "test": "incremental persistence: clean-build, rollback, and restoration oracles a fault leaves the old commit; retry equals clean; add-then-remove restores baseline"
+    }
+  ]
+}

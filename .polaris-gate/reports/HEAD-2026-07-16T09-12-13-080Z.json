@@ -1,0 +1,60 @@
+{
+  "lane": "HEAD",
+  "scratchBranch": "gate/HEAD-2026-07-16T09-12-13-080Z",
+  "integrationHead": "e324cb2",
+  "laneHead": "e324cb2",
+  "startedAt": "2026-07-16T09:12:13.089Z",
+  "verdicts": {
+    "merge": {
+      "ok": true
+    },
+    "rebuild": {
+      "ok": true
+    },
+    "signatures": {
+      "ok": false,
+      "newlyGreen": 0,
+      "unchangedFailing": 16,
+      "mutated": 1,
+      "newlyFailing": 0
+    }
+  },
+  "delta": {
+    "newlyGreen": [],
+    "unchangedFailing": [
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=1)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=2)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages relations appear exactly once across concatenated pages (limit=3)",
+      "polaris-audit-file-model-paging.test.js::fileModel paging — FINDING F1: object sections duplicate across pages full canonical answer: concat of all pages equals one-shot (line 1315)",
+      "polaris-audit-occurrences-differential.test.js::queryV4Occurrences — LATENT: non-unique keyset skips a distinct fact metamorphic concat != one-shot when two facts share the page key",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) before the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral LETTER (\\p{L}) after the literal is misclassified as a boundary",
+      "polaris-audit-text-floor-unicode.test.js::text floor — FINDING F2: boundary annotation and supplementary-plane chars BUG: astral NUMBER (\\p{N}) adjacent is misclassified as a boundary",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts rejects heuristic_name as a ResolvedLocatedSymbol even when its handle is a persisted fact",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts keeps same-name incoming edge targets equal to a clean rebuild after a target body edit",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts enumerates keyset-tied occurrence rows exactly once across one-row pages",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts orders adapter rows by SQLite BINARY UTF-8 bytes for adversarial paths and names",
+      "polaris-independent-adversarial-contracts.test.js::POLARIS independent adversarial contracts does not advance the fact commit generation for a rolled-back inner savepoint",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles paginates relation facts exactly once with the array-shaped fact stream",
+      "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles enforces realpath validation before a symlink can import outside bytes",
+      "polaris-independent-session-freshness.test.js::independent session factory and freshness oracles canonical source-domain identity ignores filesystem creation order but changes with source bytes"
+    ],
+    "mutatedFailing": [
+      {
+        "key": "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
+        "was": "AssertionError: expected 'g/6f9126d0a85529652057a014e2c6dc3d82a…' to be 'src/main.ts' // Object.is equality",
+        "now": "AssertionError: expected 'g/4c38be5c17a4be7ff2d3e02edb9eeceaf94…' to be 'src/main.ts' // Object.is equality"
+      }
+    ],
+    "newlyFailing": []
+  },
+  "diffSurface": [
+    ""
+  ],
+  "baseSuite": {
+    "totalPassed": 1754,
+    "totalFailed": 17,
+    "auditOraclesStillGreen": true
+  },
+  "finishedAt": "2026-07-16T09:13:13.042Z"
+}
