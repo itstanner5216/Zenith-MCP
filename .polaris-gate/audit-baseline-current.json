@@ -1,25 +1,18 @@
 {
-  "note": "post res-5; supersedes per-sha pins",
+  "programClosed": "2026-07-16",
   "merged": [
     "resolution-1",
     "resolution-4",
     "resolution-3 (+N8)",
-    "resolution-5 (owner-approved batch)"
+    "resolution-5",
+    "resolution-2 (+N6 stitch)"
   ],
   "suite": {
-    "passed": 1809,
-    "failed": 1,
+    "passed": 1817,
+    "failed": 0,
     "skipped": 2
   },
-  "remainingFindings": {
-    "A5": "res-2 in flight; N6 seam resolves at its stitch",
-    "A19": "done in res-2 tree, awaiting delivery",
-    "A8+A14": "res-2, unblocked by N7 Option A approval"
-  },
-  "failing": [
-    {
-      "key": "polaris-independent-facade-adversarial.test.js::independent facade boundary oracles decodes global storage keys to allowed-root-relative public paths",
-      "sig": "AssertionError: expected 'g/5f206bf044160ac0d7d5c6faa6e807f8454…' to be 'src/main.ts' // Object.is equality\n    at /home/tanner/Projects/Zenith-Worktrees/integration-next/packages/zenith-mcp/tests/polaris-independent-facade-adversarial.test.js:100:34\n    at file:///home/tanner/Projects/Zenith-Worktrees/import-extension/node_modules/.pnpm/@vitest+runner@4.1.10/node_modules/@vitest/runner/dist/chunk"
-    }
-  ]
+  "remainingFindings": {},
+  "failing": [],
+  "note": "all 21 findings closed; N11 pending owner (one-field type amendment, optional)"
 }
