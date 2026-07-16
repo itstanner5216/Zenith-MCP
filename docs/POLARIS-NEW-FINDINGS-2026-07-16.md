@@ -37,3 +37,28 @@ N2. **[gate accommodation, FYI] audit failure signatures can embed
     that a temp path rolled. Recorded so nobody mistakes normalization for
     signature laundering; raw signatures remain pinned in
     `.polaris-gate/audit-baseline-46b341f.json`.
+
+N3. **[OWNER RULING, 2026-07-16] Tests are judged by property strength, not
+    stasis.** Tanner: tests can and should be updated to reflect the better
+    implementation when one is available; verdicts are about what is most
+    correct for the codebase, never about whether a test file changed. Gate
+    consequence: a vanished baseline key is an adjudication pointer (find
+    the successor test in the diff; judge stronger/weaker), not a failure.
+    Only WEAKENING an asserted property is rejectable. The lead's earlier
+    "freeze audit test titles" recommendation is retracted. First
+    application: resolution-1's renamed occurrences-differential test
+    asserts a strictly stronger property (concat == one-shot over the
+    six-field tuple) and passes — adjudicated clean.
+
+N4. **[process event, owner-acknowledged 2026-07-16] A foreign lane agent is
+    writing into the integration worktree.** Discovered as an unattributed
+    uncommitted A19-shaped edit to `questions/file.ts` (parseJsonStringArray
+    rejecting non-string JSON list members as STORE_CORRUPT, mtime 07:55).
+    Tanner identified it as a lane agent confused about worktree paths and
+    chose to let it finish. Containment: the lead's own edits are committed
+    so the uncommitted delta is attributable to the agent alone; a
+    change-triggered snapshot monitor records every state it passes through
+    (for review or full revert); nothing of the agent's is committed; gate
+    runs are immune (scratch trees build from committed refs, never this
+    working tree). Its finished work will be adjudicated like any lane
+    delivery — on correctness, per N3.

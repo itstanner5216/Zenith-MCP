@@ -149,13 +149,20 @@ for (const tf of full.testResults) {
 const baseFailing = new Map(baseline.failing.map((f) => [`${f.file}::${f.test}`, normalizeSig(f.sig)]));
 const baseAuditPassing = new Set(baseline.passing.map((f) => `${f.file}::${f.test}`));
 
-const delta = { newlyGreen: [], unchangedFailing: [], mutatedFailing: [], newlyFailing: [] };
+const delta = { newlyGreen: [], unchangedFailing: [], mutatedFailing: [], vanishedBaseline: [], newlyFailing: [] };
 for (const [key, sig] of baseFailing) {
     if (nowPassing.has(key)) delta.newlyGreen.push(key);
     else if (nowFailing.has(key)) {
         if (nowFailing.get(key) === sig) delta.unchangedFailing.push(key);
         else delta.mutatedFailing.push({ key, was: sig, now: nowFailing.get(key) });
-    } else delta.newlyFailing.push({ key, note: 'baseline failure disappeared without passing (renamed/deleted test?)' });
+    } else {
+        // Owner ruling 2026-07-16: tests may be updated/renamed alongside a
+        // better implementation. A vanished baseline key is NOT a failure
+        // verdict — it is an adjudication pointer: find the successor test in
+        // the diff and judge whether the asserted property got stronger or
+        // weaker. Only weakening is rejectable.
+        delta.vanishedBaseline.push(key);
+    }
 }
 for (const [key, sig] of nowFailing) {
     if (!baseFailing.has(key)) delta.newlyFailing.push({ key, sig });
@@ -178,6 +185,7 @@ console.log(`\n=== GATE: ${lane} (${report.laneHead}) onto ${report.integrationH
 console.log(`merge: clean | rebuild: ok | suite: ${nowPassing.size} passed / ${nowFailing.size} failed`);
 console.log(`newly green : ${delta.newlyGreen.length}`); delta.newlyGreen.forEach((k) => console.log(`   + ${k}`));
 console.log(`foreign unchanged: ${delta.unchangedFailing.length}`);
+if (delta.vanishedBaseline.length) { console.log('VANISHED BASELINE KEYS (adjudicate at review — renamed/updated tests?):'); delta.vanishedBaseline.forEach((k) => console.log(`   ? ${k}`)); }
 if (delta.mutatedFailing.length) { console.log('MUTATED FOREIGN FAILURES (STOP):'); delta.mutatedFailing.forEach((m) => console.log(`   ! ${m.key}`)); }
 if (delta.newlyFailing.length) { console.log('NEW FAILURES (STOP):'); delta.newlyFailing.forEach((m) => console.log(`   ! ${m.key}`)); }
 console.log(`diff surface: ${report.diffSurface.length - 1} entries (see report)`);
