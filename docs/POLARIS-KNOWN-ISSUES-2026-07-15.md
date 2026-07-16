@@ -6,20 +6,17 @@ test agents' findings. Two categories: **OPEN** (real, owed, scheduled) and
 
 ## OPEN — owed by the lead, scheduled
 
-1. **Unpinned session behaviors (review gaps, scheduled Task 2.4).** The
-   adversarial session review verified these behaviors correct but they have no
-   regression pins yet in `tests/polaris-session.test.js`:
-   - Out-of-domain write survival: a commit touching files *outside* the pinned
-     domain must NOT invalidate the session (epoch halves move, pinned view
-     backstop must hold the answer valid).
-   - Epoch view add/delete-vs-hash: file *added* to and *deleted* from the
-     pinned scope must each trigger `INPUT_CHANGED` via the (path,hash) view
-     even when `PRAGMA data_version` alone would miss same-connection writes.
-2. **Wave 2 composers incomplete.** `locationAt`, `resolveAt`,
-   `queryOccurrences`, `traceRelations`, `scopeModel`, `contextFor` are typed
-   `unavailable question_kind_unsupported` until each composer lands (Task 2.3,
-   in progress — fileModel done). Tests asserting "unavailable" for these six
-   are pins scheduled for retirement, not defects.
+1. **Session epoch/view pin matrix — CLOSED 2026-07-15.** All cells now pinned
+   in `tests/polaris-session.test.js`: own-prefix autocommit hash/delete/add
+   (view half), foreign-prefix autocommit survival, foreign-prefix TRANSACTED
+   write invalidation (strict epoch), cross-connection commit invalidation
+   (data_version).
+2. **Wave 2 composers incomplete.** `resolveAt`, `queryOccurrences`,
+   `traceRelations`, `contextFor` are typed `unavailable
+   question_kind_unsupported` until each composer lands (Task 2.3, in
+   progress — fileModel and locationAt done; scopeModel delegated). Tests
+   asserting "unavailable" for the remainder are pins scheduled for
+   retirement, not defects.
 3. **Task 2.4 adversarial/totality/conservation/determinism suite** not started;
    Wave 2 exit gate (x3 identical full-suite runs) not run.
 4. **POLARIS_REAL_DB_COPY rehearsal never executed** — env-gated test requires
@@ -31,6 +28,64 @@ test agents' findings. Two categories: **OPEN** (real, owed, scheduled) and
    columns must not be conflated there).
 
 ## INTENTIONAL — documented decisions that may look like defects
+
+### Wave 2 composer rulings (2026-07-15) — each pinned by test
+
+R1. **Line-only ties REMAIN in `locationAt` answers.** A point query at
+    (5,0) returns same-line single-line declarations (`const a`, `const b`)
+    in both the enclosing chain and occurrence facts, because v4 persists
+    NAME-START columns only (not construct start), so column-based exclusion
+    of declarations is provably unsound (`const a` starts at col 8, its name
+    at col 14 — excluding on name-col would wrongly drop cols 8–13). Plan v4
+    clause: "equal or line-only ties remain ambiguous/partial"; per-fact
+    `range.precision:'line'` is the disclosure. Correct future fix: v5
+    byte-exact fact spans (Wave 3+), NEVER a column heuristic at v4. Pinned:
+    polaris-questions-location.test.js "line-only ties REMAIN".
+    References ARE column-refined (name-start + UTF-16 length is decidable).
+
+R2. **`locationAt` include-gating map** (payload semantics, frozen after
+    Wave 2): 'enclosing' gates the chain PLUS scope and anchor facts (the
+    containment picture); 'occurrences'/'injections'/'diagnostics'/'relations'
+    gate their arms. Import facts have NO LocatedFact arm by frozen contract —
+    an import at the location surfaces via its reference occurrence row. Not
+    a dropped family.
+
+R3. **Byte positions at v4 are accepted-then-unavailable**
+    (`question_kind_unsupported`) — the same typed pattern as regex. Correct
+    future fix: Wave 3 ExactSourceRange byte facts; do NOT bolt on a
+    bytes→line converter in the composer (needs fs, composers are pure).
+
+R4. **The relation fact is a single trailing element** in `locationAt.facts`
+    (always the final position), restricted to relations/frontier whose
+    endpoints intersect the queried range, and OMITTED entirely when empty.
+    An adversarial "relations missing at empty location" finding is this
+    ruling working.
+
+R5. **`locationAt` paging bounds**: PROVISIONAL_LIMITS has no location entry,
+    so it borrows pageDefaults.fileModel (500) / pageMaxima.fileFacts (500).
+    Provisional; Wave 7 settles from measurement. The enclosing chain is NOT
+    paged — served whole on every page; only `facts` pages.
+
+R6. **Cross-root determinism is meaningless by design**: scope keys embed
+    sha256(root), so handles/factKeys differ across roots for identical file
+    content. Determinism contracts hold per-root (two sessions, same root,
+    deep-equal). An adversarial cross-root comparison "failure" is not a bug.
+
+R7. **Injection language labels belong to the grammar** (a js sql-tagged
+    template may label 'html' depending on injections.scm rules). The
+    contract is locationAt/fileModel consistency at the same lines, not label
+    values. Fixing labels means editing grammar .scm files, not composers.
+
+R8. **Status is NEVER paging-derived (fixed + pinned 2026-07-15).**
+    composeFileModel previously inferred `partial` from page truncation,
+    violating the plan's payload rule ("No partial status is inferred merely
+    from … a non-exhausted page; it is derived from FactCoverage"). Fixed at
+    answer level AND per-section level (a page-cut section keeps its coverage
+    status with facts elided; cross-page concatenation reconstructs it).
+    Anyone testing against pre-fix behavior will see the flip. Pinned:
+    polaris-questions-file.test.js "never infers partial", and locationAt
+    equivalent.
+
 
 6. **v4 honesty gaps in composed answers** (resolve at v5, per FACT_LEDGER
    `availableFrom`): `OccurrenceFact.namespace` is always `'unknown'` (v4
@@ -48,6 +103,14 @@ test agents' findings. Two categories: **OPEN** (real, owed, scheduled) and
    (path,hash) view covers the whole key predicate, wider than capped
    membership, so a change beyond the cap invalidates the session. Conservative
    by design (over-invalidation, never staleness).
+9b. **Strict epoch conservatism (ruled 2026-07-15):** ANY committed transaction
+   or cross-connection commit invalidates every open session on that store,
+   even when the session's pinned (path,hash) view is untouched. Rationale: in
+   the cohabiting global DB, another scope's persist can rewrite THIS scope's
+   edges via name-based re-resolution — invisible to the file view. Sessions
+   are short-leased; reopen is the correction. Do NOT "fix" this to view-only
+   revalidation — that serves silently stale frontiers. Pinned in
+   polaris-session.test.js; comment at session.ts `changedSincePin`.
 10. **Literal floor: rg is acceleration only** (review F1). A complete
     zero-match rg pass is always re-run in-process; absence proofs come only
     from the in-process scanner. `--encoding none` pinned. Any rg exit/signal/

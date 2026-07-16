@@ -271,6 +271,39 @@ describe('fileModel — paging', () => {
         expect(stolen.failure.code).toBe('INVALID_QUERY');
         session.close();
     });
+
+    it('never infers partial from a non-exhausted page: clean coverage stays complete (plan payload rule)', async () => {
+        // declarations/references/scopes are v4-complete domains and the
+        // relations section (whose frontier adds an issue) is not requested,
+        // so coverage is clean; limit 1 forces truncation. The plan forbids
+        // deriving `partial` from paging — status must stay 'complete' while
+        // page.exhausted/next carry the enumeration state.
+        const { session } = await openSession();
+        const sections = ['declarations', 'references', 'scopes'];
+        let after;
+        let pages = 0;
+        let sawTruncated = false;
+        for (let guard = 0; guard < 60; guard++) {
+            const page = await session.fileModel('src/main.ts',
+                after === undefined
+                    ? { sections, page: { limit: 1 } }
+                    : { sections, page: { limit: 1, after } });
+            expect(page.status).toBe('complete');
+            expect(page.data.coverage.unavailable).toEqual([]);
+            expect(page.data.coverage.issues).toEqual([]);
+            pages += 1;
+            if (page.data.page.next === null) {
+                expect(page.data.page.exhausted).toBe(true);
+                break;
+            }
+            sawTruncated = true;
+            expect(page.data.page.exhausted).toBe(false);
+            after = page.data.page.next;
+        }
+        expect(sawTruncated).toBe(true); // anti-vacuity: truncation actually happened
+        expect(pages).toBeGreaterThan(1);
+        session.close();
+    });
 });
 
 describe('fileModel — entry protocol integration', () => {

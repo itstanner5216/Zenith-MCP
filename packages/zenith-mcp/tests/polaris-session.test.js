@@ -414,6 +414,25 @@ describe('fact epoch', () => {
         expect(answer.status).not.toBe('failed'); // session survives
         result.session.close();
     });
+
+    it('a TRANSACTED write outside the prefix invalidates: strict epoch conservatism', async () => {
+        // Locked design pin: commit-generation movement invalidates even when
+        // the pinned view is untouched, because a cohabiting scope's persist
+        // can rewrite THIS scope's edges via name-based re-resolution — a
+        // change the (path,hash) view cannot see. Over-invalidation is the
+        // sound side of that trade until edge provenance is scope-explicit.
+        const { result } = await openGlobal();
+        const conn = mods.pc.getGlobalDbConnection();
+        mods.db.runTransaction(conn, () => {
+            mods.db.execRaw(conn,
+                "INSERT INTO files (path, hash, last_indexed) VALUES ('g/1111111111111111111111111111111111111111111111111111111111111111/foreign2.ts', 'h', 1)");
+        });
+        const answer = await result.session.fileModel('src/alpha.ts');
+        expect(answer.status).toBe('failed');
+        expect(answer.failure.code).toBe('INPUT_CHANGED');
+        expect(answer.failure.retryable).toBe(true);
+        result.session.close();
+    });
 });
 
 // ---------------------------------------------------------------------------

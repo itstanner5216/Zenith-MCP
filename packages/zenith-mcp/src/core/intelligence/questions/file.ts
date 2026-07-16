@@ -652,19 +652,19 @@ export function composeFileModel(
         }
         const facts = (r as { facts: readonly unknown[] }).facts;
         const kept: unknown[] = [];
-        let dropped = false;
         for (const fact of facts) {
             const factPosition = position;
             position += 1;
             if (factPosition <= resumeAfter) continue;       // before the cursor
-            if (consumed >= limit) { dropped = true; truncated = true; continue; }
+            if (consumed >= limit) { truncated = true; continue; }
             kept.push(fact);
             consumed += 1;
             lastEmittedPosition = factPosition;
         }
-        const status = dropped || (resumeAfter >= 0 && kept.length < facts.length)
-            ? 'partial' : r.status;
-        paged.push({ ...r, status, facts: kept } as FileSectionResult);
+        // Plan payload rule (§Question contracts): status is coverage-derived
+        // only — paging progress lives exclusively in `page.exhausted`/`next`,
+        // so a page-cut section keeps its coverage status with facts elided.
+        paged.push({ ...r, facts: kept } as FileSectionResult);
     }
 
     const totalFacts = sections.reduce((sum, s) => sum + s.factCount, 0);
@@ -691,7 +691,9 @@ export function composeFileModel(
         coverage: cov,
     };
     return {
-        status: truncated || issues.size > 0 || cov.unavailable.length > 0 ? 'partial' : 'complete',
+        // Plan payload rule: never infer `partial` from a non-exhausted page —
+        // status derives from FactCoverage alone (issues + unavailable domains).
+        status: issues.size > 0 || cov.unavailable.length > 0 ? 'partial' : 'complete',
         basis: entry.basis,
         data: model,
         issues: cov.issues,

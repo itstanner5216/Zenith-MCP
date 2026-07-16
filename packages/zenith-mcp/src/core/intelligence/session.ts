@@ -28,7 +28,7 @@ import fs from 'node:fs/promises';
 import { minimatch } from 'minimatch';
 
 import type {
-    AstSession, ContextQuestion, CoverageIssue, FileModel, FileModelQuestion, FsContext,
+    AstSession, ContextQuestion, CoverageIssue, FileModel, FileModelQuestion, FsContext, LocationModel,
     LocationQuestion, OccurrenceQuestion, OpenSessionRequest, OpenSessionResult,
     OperationalFailure, QueryResult, RelationQuestion, ResolveQuestion,
     ScopeQuestion, ScopeSelector, SessionBasis, CoveredAnswer, ContinuationCursor,
@@ -37,6 +37,7 @@ import { PROVISIONAL_LIMITS } from './limits.js';
 import { canonicalJsonStringify, domainHash } from './evidence.js';
 export { canonicalJsonStringify, domainHash } from './evidence.js';
 import { composeFileModel } from './questions/file.js';
+import { composeLocationModel } from './questions/location.js';
 import { getProjectContext, type IntelligenceStore } from '../project-context.js';
 import {
     ensureFreshFromContentAt, indexFileAt, type IndexAddress, type IndexFileOutcome,
@@ -494,6 +495,15 @@ class StructuralSession implements AstSession {
         const epoch = getFactEpoch(this.address.db);
         if (epoch.dataVersion !== this.pinned.epoch.dataVersion
             || epoch.commitGeneration !== this.pinned.epoch.commitGeneration) {
+            // Deliberately strict (locked design): epoch movement invalidates
+            // even when the pinned (path,hash) view is untouched, because a
+            // commit in ANOTHER scope of a cohabiting global store can rewrite
+            // THIS scope's edges through name-based re-resolution — a change
+            // the file view cannot see. Over-invalidation is the sound side of
+            // that trade until semantic units make edge provenance
+            // scope-explicit (Wave 5+). The view below backstops the epoch's
+            // own blind spot: same-connection autocommit writes move neither
+            // epoch half.
             return true;
         }
         const view = readPresentView(this.address, this.pinned.viewPrefix, this.pinned.keyPredicate);
@@ -583,7 +593,9 @@ class StructuralSession implements AstSession {
     fileModel(p: string, q?: FileModelQuestion) {
         return this.answer<FileModel>((entry) => composeFileModel(entry, p, q));
     }
-    locationAt(p: string, q: LocationQuestion) { void p; void q; return this.notComposedYet<never>(); }
+    locationAt(p: string, q: LocationQuestion) {
+        return this.answer<LocationModel>((entry) => composeLocationModel(entry, p, q));
+    }
     resolveAt(p: string, q: ResolveQuestion) { void p; void q; return this.notComposedYet<never>(); }
     queryOccurrences(q: OccurrenceQuestion) { void q; return this.notComposedYet<never>(); }
     traceRelations(q: RelationQuestion) { void q; return this.notComposedYet<never>(); }
