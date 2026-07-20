@@ -25,7 +25,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           # Pinned to engines.node in packages/zenith-mcp/package.json
           node-version: "26.3.0"
