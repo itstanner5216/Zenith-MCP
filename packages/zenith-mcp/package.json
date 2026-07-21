@@ -37,7 +37,7 @@
     "@cfworker/json-schema": "^4.1.1",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@modelcontextprotocol/server": "2.0.0-beta.2",
+    "@modelcontextprotocol/server": "2.0.0-beta.4",
     "@repomix/tree-sitter-wasms": "^0.1.17",
     "ajv": "^8.20.0",
     "diff": "^9.0.0",
