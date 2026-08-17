@@ -252,8 +252,8 @@ If `args.dryRun === true` AND `errors.length === 0`:
 Only runs if `pendingSnapshots.length > 0` AND the write succeeded AND `dryRun` is false.
 
 1. Get project context: `getProjectContext(ctx)`
-2. Resolve repo root: `pc.getRoot(validPath) || path.dirname(validPath)` — fallback to file's parent dir
-3. Open the symbol-index DB: `getDb(repoRoot)` (creates `.mcp/symbols.db` if missing)
+2. Resolve repo root: `pc.getWorkingRoot(validPath)` — never null (falls back to `~/.zenith-mcp/workspace` when no project is detected; see [sandbox-mode-note.md](../project-scoping/sandbox-mode-note.md) for the materialization policy)
+3. Open the symbol-index DB: `getDb(repoRoot)` (creates `.mcp/symbols.db` if missing; note that for detected/unregistered projects, `getWorkingRoot` routes to the neutral workspace, so snapshots land in a DB owned by the global workspace, not the user's project directory)
 4. Compute `sessionId = ctx.sessionId || getSessionId()` — uses the MCP session ID or generates a process-scoped one
 5. Compute `relPath = path.relative(repoRoot, validPath)`
 6. For each snapshot, call `snapshotSymbol(db, snap.symbol, relPath, snap.originalText, sessionId, snap.line)`:
