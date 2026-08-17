@@ -196,7 +196,7 @@ All edits in a file bundle succeed or fail atomically. Post-edit syntax error de
 
 **Important**: Project root resolution never expands filesystem permissions. Only `allowedDirectories` control access.
 
-Global SQLite DB at `~/.zenith-mcp/global-stash.db` (stash tables today; symbol schema arrives with the AstIntelligence global tier). Note: `core/symbol-index.ts`'s `findRepoRoot`/`getDb` git-walk is a legacy internal primitive of the symbol machinery, not a routing authority. The historical git → markers → registry resolution ladder (`utils/project-scope.ts`, `utils/process-tree.ts`) was superseded by the config-registry design and its dead remnants were deleted 2026-07-14 — do not reintroduce a second resolver.
+Global SQLite DB at `~/.zenith-mcp/global-stash.db` (stash tables today; symbol schema arrives with the AstIntelligence global tier). Note: `core/symbol-index.ts`'s `findRepoRoot`/`getDb` git-walk is a legacy internal primitive of the symbol machinery, not a routing authority. Project routing lives in `ProjectContext`, which consults `core/detection/boundaries.ts` — do not introduce a second resolver.
 
 ### 5.9 `core/project-registry.ts` — Project Manifest Registry
 
