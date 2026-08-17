@@ -64,3 +64,9 @@ lcov.info
 *.tar.xz
 *.tar.gz
 *.bak
+
+# per-machine AI-tooling + vestigial CI configs — deliberately off git (2026-08-17)
+.chunk/
+.claude/settings.json
+.codex/
+.circleci/

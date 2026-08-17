@@ -28,6 +28,11 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
     // sandbox" behavior) until an operator explicitly enables the `sandbox`
     // config flag — registerEnabledTools wires that flag in via setSandboxEnabled().
     let _sandboxEnabled = false;
+    // Security boundary is distinct from mutable project/context roots.
+    // Enabling the sandbox freezes the directories that existed at that moment
+    // (normally the operator-provided CLI roots). Later MCP Roots may enrich
+    // project detection but must never widen filesystem access.
+    let _sandboxDirectories: string[] = [];
 
     function getAllowedDirectories() {
         return [..._allowedDirectories];
@@ -39,6 +44,7 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
 
     function setSandboxEnabled(enabled: boolean) {
         _sandboxEnabled = enabled;
+        _sandboxDirectories = enabled ? [..._allowedDirectories] : [];
     }
 
     async function isInsideAllowed(candidate: string): Promise<boolean> {
@@ -49,13 +55,10 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         // enforced" (only when the operator opts in). Historically these were
         // conflated: any configured dir silently turned enforcement on.
         if (!_sandboxEnabled) return true;
-        // Sandbox enabled but no allowlist configured: nothing to gate against, so
-        // stay permissive for callers (CLIs, tests) that enable the sandbox without
-        // supplying dirs. When directories ARE supplied, the candidate must resolve
-        // inside one of them — checked with realpath on BOTH sides and a
-        // path-separator boundary so '/tmp/foo' does not match '/tmp/foobar'.
-        if (_allowedDirectories.length === 0) return true;
-        for (const allowed of _allowedDirectories) {
+        // Sandbox enabled but no boundary configured: fail closed. An enabled
+        // sandbox without roots must never degrade into unrestricted access.
+        if (_sandboxDirectories.length === 0) return false;
+        for (const allowed of _sandboxDirectories) {
             const expanded = expandHome(allowed);
             const absoluteAllowed = path.isAbsolute(expanded)
                 ? path.resolve(expanded)
@@ -147,9 +150,8 @@ export function createFilesystemContext(initialAllowedDirectories: string[] = []
         // target that can be realpath-resolved, so it is the symlink-collapsed
         // anchor the allowlist must gate — exactly as validatePath gates the
         // realpath of an ENOENT target's existing parent before returning. When
-        // _allowedDirectories is empty, isInsideAllowed returns true (opt-in
-        // sandbox: no allowlist configured => no enforcement, no behavior change
-        // for the write path).
+        // When the sandbox is enabled, the frozen sandbox boundary (not the
+        // mutable project/context roots) gates the existing ancestor.
         if (!(await isInsideAllowed(realAncestor))) {
             throw new Error(`Access denied: ${requestedPath} is outside allowed directories`);
         }

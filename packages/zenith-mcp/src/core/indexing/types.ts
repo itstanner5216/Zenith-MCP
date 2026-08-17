@@ -31,6 +31,7 @@ export interface AnchorRow {
     parentSymbolKey: string;
     kind: string;
     line: number;               // 1-based line number (extract.ts persists a.line + 1)
+    endLine: number;            // 1-based inclusive end of the AST construct
     priority: number;
     text: string;               // first ~80 chars of the anchor line
 }
@@ -74,6 +75,7 @@ export interface LocalScopeRow {
 export interface RawEdgeRow {
     containerDefKey: string;
     referencedName: string;
+    referenceKind: string;
 }
 
 export interface ParsedFileRecord {

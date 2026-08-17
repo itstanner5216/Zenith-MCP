@@ -76,14 +76,14 @@ describe('review #5: schema_version single-row determinism', () => {
     let db;
     afterEach(() => { if (db) { closeDb(db); db = undefined; } });
 
-    it('initSymbolSchema yields exactly one row with id=1, version=3', () => {
+    it('initSymbolSchema yields exactly one row with id=1, version=4', () => {
         db = openMemoryDb();
         initSymbolSchema(db);
 
         expect(schemaVersionRowCount(db)).toBe(1);
         const rows = queryRaw(db, 'SELECT id, version FROM schema_version');
-        expect(rows).toEqual([{ id: 1, version: 3 }]);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(rows).toEqual([{ id: 1, version: 4 }]);
+        expect(getSchemaVersion(db)).toBe(4);
     });
 
     it('calling initSymbolSchema twice keeps exactly one row (no accumulation)', () => {
@@ -92,9 +92,9 @@ describe('review #5: schema_version single-row determinism', () => {
         initSymbolSchema(db);
 
         expect(schemaVersionRowCount(db)).toBe(1);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         const rows = queryRaw(db, 'SELECT id, version FROM schema_version');
-        expect(rows).toEqual([{ id: 1, version: 3 }]);
+        expect(rows).toEqual([{ id: 1, version: 4 }]);
     });
 
     it('table carries the id PRIMARY KEY + CHECK(id=1) so a second identity is impossible', () => {
@@ -109,7 +109,7 @@ describe('review #5: schema_version single-row determinism', () => {
         expect(() => execRaw(db, 'INSERT INTO schema_version (id, version) VALUES (1, 9)')).toThrow();
         // Still exactly one row, untouched.
         expect(schemaVersionRowCount(db)).toBe(1);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
     });
 });
 
@@ -121,9 +121,9 @@ describe('review #5: old-shape schema_version upgrade', () => {
     let db;
     afterEach(() => { if (db) { closeDb(db); db = undefined; } });
 
-    it('migrates an old-shape (no id column) table to single-row, then advances to version=3', () => {
+    it('migrates an old-shape (no id column) table to single-row, then advances to version=4', () => {
         db = openMemoryDb();
-        initSymbolSchema(db);              // fully migrated, new-shape, v3
+        initSymbolSchema(db);              // fully migrated, new-shape, v4
         downgradeToOldShape(db, [1]);      // simulate a DB migrated under the old code
 
         // Sanity: the downgraded table really is old-shape.
@@ -133,8 +133,8 @@ describe('review #5: old-shape schema_version upgrade', () => {
 
         expect(schemaVersionColumns(db)).toContain('id');
         expect(schemaVersionRowCount(db)).toBe(1);
-        expect(queryRaw(db, 'SELECT id, version FROM schema_version')).toEqual([{ id: 1, version: 3 }]);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(queryRaw(db, 'SELECT id, version FROM schema_version')).toEqual([{ id: 1, version: 4 }]);
+        expect(getSchemaVersion(db)).toBe(4);
     });
 
     it('collapses multiple legacy rows into the single id=1 row (the #5 bug)', () => {
@@ -147,7 +147,7 @@ describe('review #5: old-shape schema_version upgrade', () => {
         initSymbolSchema(db);
 
         expect(schemaVersionRowCount(db)).toBe(1);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
     });
 
     it('re-runs the v0->v1 ladder when an old-shape table reports version 0', () => {
@@ -155,12 +155,12 @@ describe('review #5: old-shape schema_version upgrade', () => {
         initSymbolSchema(db);
         downgradeToOldShape(db, [0]);      // legacy DB that never reached v1
 
-        initSymbolSchema(db);              // ladders should run and advance to 3
+        initSymbolSchema(db);              // ladders should run and advance to 4
 
         expect(schemaVersionColumns(db)).toContain('id');
         expect(schemaVersionRowCount(db)).toBe(1);
-        expect(getSchemaVersion(db)).toBe(3);
-        // v1/v2/v3 child tables are present after the ladder.
+        expect(getSchemaVersion(db)).toBe(4);
+        // v1/v2/v3/v4 child tables and columns are present after the ladder.
         const tables = queryRaw(db, "SELECT name FROM sqlite_master WHERE type='table'").map((r) => r.name);
         for (const t of ['symbol_structures', 'anchors', 'imports', 'import_bindings', 'injections', 'local_scopes', 'project_roots']) {
             expect(tables).toContain(t);
@@ -170,7 +170,7 @@ describe('review #5: old-shape schema_version upgrade', () => {
         expect(importCols).toContain('end_line');
     });
 
-    it('upgrades an existing v1 database to v3 by adding import_bindings and import spans', () => {
+    it('upgrades an existing v1 database through v4', () => {
         db = openMemoryDb();
         initSymbolSchema(db);
         execRaw(db, 'DROP TABLE import_bindings');
@@ -182,7 +182,7 @@ describe('review #5: old-shape schema_version upgrade', () => {
 
         initSymbolSchema(db);
 
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         const tables = queryRaw(db, "SELECT name FROM sqlite_master WHERE type='table'").map((r) => r.name);
         expect(tables).toContain('import_bindings');
         const importCols = queryRaw(db, 'PRAGMA table_info(imports)').map((c) => c.name);
@@ -202,13 +202,13 @@ describe('review #5: old-shape schema_version upgrade', () => {
 
         initSymbolSchema(db);
 
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         const rows = queryRaw(db, 'SELECT hash FROM files');
         expect(rows).toHaveLength(1);
         expect(rows[0].hash).toBeNull();
     });
 
-    it('upgrades an existing v2 database to v3 by adding import span columns', () => {
+    it('upgrades an existing v2 database through v4', () => {
         db = openMemoryDb();
         initSymbolSchema(db);
         execRaw(db, 'DROP TABLE imports');
@@ -219,7 +219,7 @@ describe('review #5: old-shape schema_version upgrade', () => {
 
         initSymbolSchema(db);
 
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         const importCols = queryRaw(db, 'PRAGMA table_info(imports)').map((c) => c.name);
         expect(importCols).toContain('start_line');
         expect(importCols).toContain('end_line');
@@ -234,11 +234,11 @@ describe('review #6: transactional migration', () => {
     let db;
     afterEach(() => { if (db) { closeDb(db); db = undefined; } });
 
-    it('initSymbolSchema commits atomically: version=3 and all v1/v2/v3 columns/tables exist', () => {
+    it('initSymbolSchema commits atomically: version=4 and all migration columns/tables exist', () => {
         db = openMemoryDb();
         initSymbolSchema(db);
 
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
 
         // v1 columns added to existing tables.
         const symbolCols = queryRaw(db, 'PRAGMA table_info(symbols)').map((c) => c.name);
@@ -248,7 +248,7 @@ describe('review #6: transactional migration', () => {
         const edgeCols = queryRaw(db, 'PRAGMA table_info(edges)').map((c) => c.name);
         expect(edgeCols).toContain('callee_symbol_id');
 
-        // v1/v2/v3 child tables created.
+        // v1/v2/v3/v4 child tables and columns created.
         const tables = queryRaw(db, "SELECT name FROM sqlite_master WHERE type='table'").map((r) => r.name);
         for (const t of ['symbol_structures', 'anchors', 'imports', 'import_bindings', 'injections', 'local_scopes', 'project_roots']) {
             expect(tables).toContain(t);
@@ -258,12 +258,12 @@ describe('review #6: transactional migration', () => {
         expect(importCols).toContain('end_line');
     });
 
-    it('version stays 3 across repeated inits (ladder does not re-advance or duplicate)', () => {
+    it('version stays 4 across repeated inits (ladder does not re-advance or duplicate)', () => {
         db = openMemoryDb();
         initSymbolSchema(db);
         initSymbolSchema(db);
         initSymbolSchema(db);
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         expect(schemaVersionRowCount(db)).toBe(1);
     });
 });

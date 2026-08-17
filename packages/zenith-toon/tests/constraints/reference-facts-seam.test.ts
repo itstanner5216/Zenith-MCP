@@ -30,8 +30,8 @@ describe('reference facts seam', () => {
         ],
         edges: [],
         referenceEdges: [
-          { callerLine: 2, referencedName: 'TIMEOUT', referenceCount: 1 },
-          { callerLine: 5, referencedName: 'TIMEOUT', referenceCount: 1 },
+          { callerLine: 2, referencedName: 'TIMEOUT', referenceKind: 'constant', referenceCount: 1 },
+          { callerLine: 5, referencedName: 'TIMEOUT', referenceKind: 'constant', referenceCount: 1 },
         ],
         anchors: [],
         imports: [],

@@ -41,10 +41,12 @@ describe('ProjectContext — registry-first resolution', () => {
         try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
     });
 
-    it('unregistered git repo path returns global (no heuristic promotion)', () => {
+    it('unregistered git repo under tmp stays global (junk-filtered — tmp never promotes)', () => {
         const pc = new ProjectContext(ctx);
         const root = pc.getRoot(path.join(repoDir, 'file.js'));
-        // Not registered in registry → global
+        // Unregistered AND under os.tmpdir() → junk filter blocks detection →
+        // global. Unregistered repos in real locations now bind via detection —
+        // see project-context-detection.test.js.
         expect(root).toBeNull();
         expect(pc.isGlobal).toBe(true);
     });
