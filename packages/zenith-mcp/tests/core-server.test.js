@@ -114,13 +114,27 @@ describe('registerEnabledTools', () => {
         }
     });
 
-    it('passes tool server and ctx to each register call', async () => {
+    it('passes a ping-wrapped tool server (delegating to the original) and ctx to each register call', async () => {
         const { mod, mocks } = await getToolMocks();
         const toolServer = makeMockToolServer();
         const ctx = makeMockCtx();
         mod.registerEnabledTools(toolServer, ctx);
         for (const modPath of TOOL_REGISTERS) {
-            expect(mocks[modPath]).toHaveBeenCalledWith(toolServer, ctx);
+            expect(mocks[modPath]).toHaveBeenCalledTimes(1);
+            const [receivedServer, receivedCtx] = mocks[modPath].mock.calls[0];
+            // ctx passes through untouched
+            expect(receivedCtx).toBe(ctx);
+            // the server is the caller-environment-ping wrapper, which must
+            // delegate registrations (name + registration object) to the
+            // original ToolServer with the handler wrapped
+            expect(typeof receivedServer.registerTool).toBe('function');
+            const probeName = `probe-tool:${modPath}`;
+            const registration = { description: 'probe' };
+            receivedServer.registerTool(probeName, registration, async () => ({ content: [] }));
+            const delegated = toolServer.registerTool.mock.calls.find(c => c[0] === probeName);
+            expect(delegated).toBeTruthy();
+            expect(delegated[1]).toBe(registration); // registration untouched — no schema injection
+            expect(typeof delegated[2]).toBe('function');
         }
     });
 
@@ -282,7 +296,7 @@ describe('updateAllowedDirectoriesFromRoots', () => {
             roots.map(r => r.uri.replace('file://', ''))
         );
         const result = await getToolMocks({
-            [PROJECT_CONTEXT]: () => ({ onRootsChanged, getProjectContext: vi.fn(() => ({ initProject: vi.fn() })) }),
+            [PROJECT_CONTEXT]: () => ({ onRootsChanged, getProjectContext: vi.fn(() => ({ initProject: vi.fn(), registerSessionRoot: vi.fn() })) }),
             [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
         });
         mod = result.mod;

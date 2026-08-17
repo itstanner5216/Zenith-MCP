@@ -4,7 +4,7 @@ import path from "path";
 import { randomBytes, createHash } from 'crypto';
 import type { ToolServer, ToolContext } from './types.js';
 import { getProjectContext } from '../core/project-context.js';
-import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, findRepoRoot, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
+import { getDb, indexDirectory, ensureIndexFresh, indexFile, impactQuery, getSessionId, snapshotSymbol, getVersionHistory, getVersionText, } from '../core/symbol-index.js';
 import { getLangForFile, checkSyntaxErrors } from '../core/tree-sitter.js';
 // Refactor-batch is a SYMBOL-FACT CONSUMER — per docs/toon-constraints
 // §0.5 symbol lookups come from the DB-backed adapter, never the
@@ -281,13 +281,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'target required for query.' }] };
             }
             const resolvedScope = args.fileScope ? await ctx.validatePath(args.fileScope) : undefined;
-            const allowedDirs = ctx.getAllowedDirectories();
-            if (resolvedScope === undefined && allowedDirs.length === 0)
-                throw new Error("No allowed directories configured.");
-            const rootHint = resolvedScope !== undefined ? resolvedScope : allowedDirs[0];
-            const repoRoot = pc.getRoot(rootHint);
-            if (!repoRoot)
-                throw new Error("No project root.");
+            // Only a USER-supplied scope is path evidence; absent that, resolve
+            // hint-free (review finding P2-7 — allowedDirs[0] is not evidence).
+            const repoRoot = pc.getWorkingRoot(resolvedScope); // never null — never refuse
             const db = getDb(repoRoot);
             const count = getFileCount(db);
             if (count === 0 || !args.fileScope) {
@@ -348,13 +344,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.selection?.length && !args.loadMore) {
                 return { content: [{ type: 'text' as const, text: 'selection required for loadDiff (or use loadMore=true to continue).' }] };
             }
-            const allowedDirs = ctx.getAllowedDirectories();
-            if (allowedDirs.length === 0) {
-                throw new Error("No allowed directories configured.");
-            }
-            const repoRoot = pc.getRoot(allowedDirs[0]);
-            if (!repoRoot)
-                throw new Error("No project root.");
+            // No user-supplied path in this mode: resolve WITHOUT a hint so a
+            // fabricated allowedDirs[0] can't rebind the session as fake path
+            // evidence (review finding P2-7). Non-mutating when already bound.
+            const repoRoot = pc.getWorkingRoot(); // never null — never refuse
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             const cacheKey = `${repoRoot}::${sessionId}`;
@@ -573,13 +566,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.payload) {
                 return { content: [{ type: 'text' as const, text: 'payload required for apply.' }] };
             }
-            const allowedDirs = ctx.getAllowedDirectories();
-            if (allowedDirs.length === 0) {
-                throw new Error('No allowed directories configured.');
-            }
-            const repoRoot = pc.getRoot(allowedDirs[0]);
-            if (!repoRoot)
-                throw new Error("No project root.");
+            // No user-supplied path in this mode: resolve WITHOUT a hint so a
+            // fabricated allowedDirs[0] can't rebind the session as fake path
+            // evidence (review finding P2-7). Non-mutating when already bound.
+            const repoRoot = pc.getWorkingRoot(); // never null — never refuse
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             const cacheKey = `${repoRoot}::${sessionId}`;
@@ -887,13 +877,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
             if (!args.newTargets?.length) {
                 return { content: [{ type: 'text' as const, text: 'newTargets required for reapply.' }] };
             }
-            const allowedDirs = ctx.getAllowedDirectories();
-            if (allowedDirs.length === 0) {
-                throw new Error('No allowed directories configured.');
-            }
-            const repoRoot = pc.getRoot(allowedDirs[0]);
-            if (!repoRoot)
-                throw new Error("No project root.");
+            // No user-supplied path in this mode: resolve WITHOUT a hint so a
+            // fabricated allowedDirs[0] can't rebind the session as fake path
+            // evidence (review finding P2-7). Non-mutating when already bound.
+            const repoRoot = pc.getWorkingRoot(); // never null — never refuse
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             const payloadKey = `${repoRoot}::${sessionId}::${args.symbolGroup}`;
@@ -1143,13 +1130,9 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'symbol required for history.' }] };
             }
             const resolvedFile = args.file ? await ctx.validatePath(args.file) : undefined;
-            const allowedDirs = ctx.getAllowedDirectories();
-            if (resolvedFile === undefined && allowedDirs.length === 0)
-                throw new Error('No allowed directories configured.');
-            const rootHint = resolvedFile !== undefined ? resolvedFile : allowedDirs[0];
-            const repoRoot = pc.getRoot(rootHint);
-            if (!repoRoot)
-                throw new Error("No project root.");
+            // Only a USER-supplied file is path evidence; absent that, resolve
+            // hint-free (review finding P2-7 — allowedDirs[0] is not evidence).
+            const repoRoot = pc.getWorkingRoot(resolvedFile); // never null — never refuse
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             let relPath: string | undefined;
@@ -1174,9 +1157,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 return { content: [{ type: 'text' as const, text: 'file required for restore.' }] };
             }
             const absPath = await ctx.validatePath(args.file);
-            const repoRoot = findRepoRoot(absPath) || pc.getRoot();
-            if (!repoRoot)
-                throw new Error("No project root.");
+            const repoRoot = pc.getWorkingRoot(absPath); // registry → detection → never null
             const db = getDb(repoRoot);
             const sessionId = ctx.sessionId || getSessionId();
             const relPath = path.relative(repoRoot, absPath);

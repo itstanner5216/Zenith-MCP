@@ -73,12 +73,14 @@ export interface RawFileFacts {
   readonly referenceEdges: ReadonlyArray<{
     readonly callerLine: number;      // resolved start line of the containing def
     readonly referencedName: string;  // raw referenced symbol name, resolved or unresolved
+    readonly referenceKind: string;   // tree-sitter reference capture kind; no MCP weighting
     readonly referenceCount: number;
   }>;
   readonly anchors: ReadonlyArray<{
     readonly symbolName: string;
     readonly kind: string;
     readonly line: number;
+    readonly endLine: number;
     readonly text: string;
   }>;
   readonly imports: ReadonlyArray<{

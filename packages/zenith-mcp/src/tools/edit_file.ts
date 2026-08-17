@@ -93,7 +93,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         if (pendingSnapshots.length > 0) {
             try {
                 const pc = getProjectContext(ctx);
-                const repoRoot = pc.getRoot(validPath) || path.dirname(validPath);
+                const repoRoot = pc.getWorkingRoot(validPath); // never null — never refuse
                 const db = getDb(repoRoot);
                 const sessionId = ctx.sessionId || getSessionId();
                 const relPath = path.relative(repoRoot, validPath);

@@ -135,16 +135,65 @@ describe('sandbox-opt-in — A. behavioral: sandbox OFF by default (the primary 
     );
 
     it(
-        'sandbox ON with EMPTY allowlist stays permissive (nothing to gate against)',
+        'sandbox ON with EMPTY allowlist fails closed',
         async () => {
             const { createFilesystemContext } = await importLib();
-            const fsc = createFilesystemContext([]); // empty allowlist
+            const fsc = createFilesystemContext([]); // no operator-provided boundary
             fsc.setSandboxEnabled(true);
             await expect(
                 fsc.validatePath('/etc/hostname'),
-                'With sandbox ON but NO configured dirs, isInsideAllowed must return true ' +
-                '(nothing to gate against). An empty allowlist must not block everything.',
-            ).resolves.toBeTruthy();
+                'REGRESSION: sandbox ON with no configured roots became permissive. ' +
+                'An enabled sandbox with no boundary must fail closed, never unrestricted.',
+            ).rejects.toThrow('Access denied');
+        },
+    );
+
+    it(
+        'sandbox boundary is frozen when enabled — later allowed-directory updates cannot widen access',
+        async () => {
+            const { createFilesystemContext } = await importLib();
+            const extraDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbox-extra-root-'));
+            try {
+                const fsc = createFilesystemContext([tmpDir]);
+                fsc.setSandboxEnabled(true);
+
+                // Simulate a later MCP Roots update. This is valid project/context
+                // information, but it must not mutate the security boundary.
+                fsc.setAllowedDirectories([tmpDir, extraDir]);
+
+                expect(fsc.getAllowedDirectories()).toContain(extraDir);
+                await expect(
+                    fsc.validatePath(extraDir),
+                    'REGRESSION: a post-enable MCP Roots update widened sandbox access. ' +
+                    'Allowed/project roots may change, but the sandbox boundary must remain frozen.',
+                ).rejects.toThrow('Access denied');
+
+                await expect(fsc.validatePath(tmpDir)).resolves.toBe(realTmpDir);
+            } finally {
+                try { fs.rmSync(extraDir, { recursive: true, force: true }); } catch {}
+            }
+        },
+    );
+
+    it(
+        're-enabling sandbox freezes the then-current allowed directories',
+        async () => {
+            const { createFilesystemContext } = await importLib();
+            const extraDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbox-reenable-root-'));
+            try {
+                const realExtraDir = fs.realpathSync(extraDir);
+                const fsc = createFilesystemContext([tmpDir]);
+
+                fsc.setSandboxEnabled(true);
+                fsc.setSandboxEnabled(false);
+                fsc.setAllowedDirectories([extraDir]);
+                fsc.setSandboxEnabled(true);
+
+                await expect(fsc.validatePath(extraDir)).resolves.toBe(realExtraDir);
+                await expect(fsc.validatePath(tmpDir)).rejects.toThrow('Access denied');
+            } finally {
+                try { fs.rmSync(extraDir, { recursive: true, force: true }); } catch {}
+            }
         },
     );
 

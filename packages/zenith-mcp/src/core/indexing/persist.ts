@@ -46,7 +46,7 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
         // 4. Edges
         for (const edge of record.edges) {
             const containerId = keyToId.get(edge.containerDefKey);
-            if (containerId !== undefined) insertEdge(conn, containerId, edge.referencedName);
+            if (containerId !== undefined) insertEdge(conn, containerId, edge.referencedName, edge.referenceKind);
         }
         // 5. Structures
         for (const struct of record.structures) {
@@ -58,7 +58,7 @@ export function persistParsedFile(conn: DbConnection, record: ParsedFileRecord):
         for (const anchor of record.anchors) {
             const symbolId = keyToId.get(anchor.parentSymbolKey);
             if (symbolId === undefined) continue;
-            insertAnchor(conn, { symbolId, kind: anchor.kind, line: anchor.line, text: anchor.text });
+            insertAnchor(conn, { symbolId, kind: anchor.kind, line: anchor.line, endLine: anchor.endLine, text: anchor.text });
         }
         // 7. Imports
         for (const imp of record.imports) {
