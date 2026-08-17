@@ -96,7 +96,7 @@ TOON owns every compression decision. Given the inputs MCP supplies, TOON:
 - Any helper / wrapper / adapter / "bridge" file in MCP whose purpose is to pre-shape data for TOON
 - Any new MCP-side file with "compression" or "toon" in its name
 
-Note: MCP keeping `getSymbols`, the block/edge queries, repo-root resolution, the symbol-index DB, etc. is **fine and expected** — those serve `edit_file`, `refactor_batch`, `directory`, search, and the fact hand-off to TOON. What's forbidden is MCP using them to make compression *decisions*.
+Note: MCP keeping the symbol/edge queries (e.g., `getSymbolsInFile`, `getCalleesFiltered`), repo-root resolution, the symbol-index DB, etc. is **fine and expected** — those serve `edit_file`, `refactor_batch`, `directory`, search, and the fact hand-off to TOON. What's forbidden is MCP using them to make compression *decisions*.
 
 #### For Subagents
 
@@ -109,8 +109,8 @@ MCP's side of the integration seam should look approximately like:
 ```ts
 // MCP gathers facts it already has
 const languageInfo = getLangForFile(path);
-const symbolInfo   = await getSymbols(rawText, languageInfo);   // reused from MCP's existing index
-const edgeInfo     = getFileBlockEdges(db, relPath, defNames);  // raw query result, no weighting
+const symbolInfo   = getSymbolsInFile(db, relPath);             // DB-backed, from MCP's existing index
+const edgeInfo     = getCalleesFiltered(db, defName, relPath);  // raw edge query, no weighting
 
 // Hand them to TOON — TOON decides everything from here
 const compressed = zenithToon.compressFile({

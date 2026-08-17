@@ -11,7 +11,8 @@
 
 **Key dependencies:**
 - `core/symbol-index.ts` — `getDb()`, `indexDirectory()`, `ensureIndexFresh()`, `indexFile()`, `impactQuery()`, `getSessionId()`, `findRepoRoot()`, `snapshotSymbol()`, `getVersionHistory()`, `getVersionText()`
-- `core/tree-sitter.ts` — `getLangForFile()`, `findSymbol()`, `checkSyntaxErrors()`
+- `core/tree-sitter.ts` — `getLangForFile()`, `checkSyntaxErrors()`
+- `core/indexed-symbols.ts` — `loadSymbolInFile()` (DB-backed symbol lookup)
 - `core/edit-engine.ts` — `applyEditList()`, `syntaxWarn()`, `Edit` type
 - `core/lib.ts` — `normalizeLineEndings()`
 - `core/db-adapter.ts` — `getFileCount()`, `getFilePaths()`, `findSymbolFiles()`, `getFileHash()`
@@ -164,7 +165,7 @@ This tool maintains in-memory caches keyed by `${repoRoot}::${sessionId}` (or `:
    - `ctx.validatePath(absPath)` — skip on failure.
    - `fs.readFile` — skip on failure.
    - `getLangForFile(validPath)` — skip if null.
-   - `findSymbol(source, langName, symbol, { kindFilter: 'def' })` — skip if no matches.
+   - `loadSymbolInFile(validPath, symbol, { kindFilter: 'def' })` — DB-backed, indexes on demand; skip if no matches.
    - For each match, push an occurrence record with `{symbol, relFile, absPath, source, sourceLines, line, endLine, workIndex}`.
 7. **Outlier flagging stub:** group occurrences by symbol name. For groups of >= 2, build a `structs` array (currently always empty — there's a `// TODO: Populate actual SymbolStructure from AST` comment) and call `findModal(structs)`. With empty `structs`, `findModal` returns `null`, so the flagging block is effectively a no-op today.
 8. Emit blocks:
@@ -289,7 +290,7 @@ function symbolName2(...) { ... new body ... }
    - String entry: `symName = entry`, `file = undefined`.
    - Object entry: `symName = entry.symbol`, `file = entry.file`.
    - If `file` provided, use as the only candidate file. Else `findSymbolFiles(db, symName, 'def')` to enumerate definitions; if empty, add to `skipped[]`.
-   - For each candidate file: `validatePath`, `readFile`, `getLangForFile`, `findSymbol(... kindFilter: 'def')`. Push every match as a `ReapplyTarget` with `{symbol, absPath, relFile, source, line, endLine}`.
+   - For each candidate file: `validatePath`, `readFile`, `getLangForFile`, `loadSymbolInFile(absPath, symName, { kindFilter: 'def' })`. Push every match as a `ReapplyTarget` with `{symbol, absPath, relFile, source, line, endLine}`.
    - If no matches added across all candidates, push to `skipped[]`.
 6. If `!targets.length` → `'Reapplied 0 targets.${skipped ? ` (skipped ${N})` : ''}'`.
 7. **Outlier gate:** stub (same as `loadDiff`). `structs` is always empty, so `findModal` returns `null` and no outliers are flagged. The `ack` parameter is therefore inactive in practice.
@@ -365,7 +366,7 @@ function symbolName2(...) { ... new body ... }
 8. Read current file (with line-ending normalization). On failure → `${symbol}: file not found — ${relPath}.`
 9. **Staleness check:** compare MD5 of current content to `getFileHash(db, relPath)`. If differ, set `fileChanged = true` (used for the warning suffix). Failure silently swallowed.
 10. `langName = getLangForFile(absPath)`. If null → `${symbol}: unsupported language for ${relPath}.`
-11. `matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' })`. If empty → `${symbol}: not found in ${relPath}.`
+11. `matches = await loadSymbolInFile(absPath, args.symbol, { kindFilter: 'def' })` — DB-backed via the symbol-index. If empty → `${symbol}: not found in ${relPath}.`
 12. **Disambiguation** (when multiple matches):
     - First try matching by `versionEntry.line`.
     - If not found OR sym still equals `firstMatch`: body-similarity heuristic — compute overlap between each candidate's current body lines and the restored text lines (treating each as a `Set` of trimmed lines). Pick the highest-overlap candidate.

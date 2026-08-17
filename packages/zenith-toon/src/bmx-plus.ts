@@ -41,7 +41,7 @@ interface Chunk {
   text: string;
 }
 
-export class BMXPlusIndex {
+class BMXPlusIndex {
   // ── Public configuration ──
   readonly normalizeScores: boolean;
 
@@ -592,7 +592,7 @@ function findBmxCoreCount(sortedScores: number[], maxK: number): number {
  * line numbers it deems important — its vote for the consensus the removal gate
  * will need. Defined and owned HERE; only later engines (removal) consume it.
  */
-export interface BMXMetadata {
+interface BMXMetadata {
   readonly scores: ReadonlyMap<number, number>;  // per-line relevance, unchanged
   readonly core: ReadonlySet<number>;            // line numbers at/above BMX+'s knee
 }

@@ -69,9 +69,10 @@ expandLines?: number (extra lines above/below symbol bounds, 0–50)
 2. Get language via `getLangForFile()` — throws `'Unsupported file type.'` if not detected
 3. Read entire file content as UTF-8
 4. Split content into lines array, count total lines
-5. Call `findSymbol(source, langName, symbolName, { kindFilter: 'def', nearLine? })`:
+5. Call `loadSymbolInFile(validPath, symbolName, { kindFilter: 'def', nearLine? })`:
    - `kindFilter: 'def'` — only looks for **definitions**, not references
-   - `nearLine` passed through if provided for disambiguation
+   - `nearLine` passed through if provided for proximity-based disambiguation
+   - DB-backed: the file is indexed on demand via `ensureIndexFresh` before querying
 6. If no matches → throws `'Symbol not found.'`
 7. If multiple matches AND no `nearLine` → throws `'Multiple matches. Use nearLine.'`
 8. Takes `matches[0]` — the first (or nearest) match
@@ -84,9 +85,9 @@ expandLines?: number (extra lines above/below symbol bounds, 0–50)
 
 **Key details:**
 - This is the **only tool that returns actual symbol source code** (not just location)
-- Uses tree-sitter for precise symbol bounds
-- Dot-qualified names supported (e.g., `Class.method`) — handled by `findSymbol()`
-- `expandLines` adds context above and below the symbol's AST bounds
+- Uses the symbol-index DB for symbol lookup
+- Dot-qualified names supported (e.g., `Class.method`) — handled by `loadSymbolInFile`'s parent-chain verification
+- `expandLines` adds context above and below the symbol's line bounds
 - No BM25, no ranking — it's a direct AST lookup
 - If the symbol has multiple definitions in the same file, `nearLine` is required to disambiguate
 
@@ -332,7 +333,7 @@ definesSymbol?: string
 
 3. **BM25 pre-filter can cause false negatives** — if the BM25 file ranker excludes a file that actually contains the match, the ripgrep pass won't find it. The fallback is a full ripgrep scan, but it only triggers if the pre-filter returns 0 candidates (not if it returns some but misses others).
 
-5. **`search_file` symbol mode uses `findSymbol()` while `search_files` definition mode uses `getDefinitions()`** — these are different tree-sitter functions with different matching behavior. `findSymbol` supports dot-qualification natively; `getDefinitions` + manual parent-chain checking is a re-implementation of similar logic.
+5. **`search_file` symbol mode uses `loadSymbolInFile()` (single-file, exact name match) while `search_files` definition mode uses `getDefinitions()` (multi-file BM25 pre-filter)** — these are different lookup strategies with different matching behavior.
 
 6. **Two separate walks with different semantics** — `search_files` has at least 4 different `walk()` implementations (one per mode) with slightly different filter logic and directory validation behavior.
 

@@ -18,7 +18,7 @@ import { markerLen } from '../../src/removal.js';
 
 // ── Seeded PRNG ───────────────────────────────────────────────────────────────────────
 /** A tiny seeded PRNG so every corpus + trial is reproducible (a failing seed stays recoverable). */
-export function mulberry32(seed: number): () => number {
+function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;
@@ -39,7 +39,7 @@ export interface Case {
 const DEFAULT_BUDGET = 5_000_000;
 
 /** Prefix raw source with `N. ` line numbers — identical to read_file's authority. */
-export function prefixLines(raw: string): string {
+function prefixLines(raw: string): string {
   return raw
     .split('\n')
     .map((l, i) => `${i + 1}. ${l}`)
@@ -69,7 +69,7 @@ function genBody(pool: readonly string[], rng: () => number): string {
 }
 
 /** A synthetic file of `nLines` lines drawn from a body pool ('mixed'|'light'|'heavy'). */
-export function syntheticCase(
+function syntheticCase(
   name: string,
   nLines: number,
   weight: 'mixed' | 'light' | 'heavy' = 'mixed',
@@ -96,10 +96,10 @@ export function sweepCases(
 export type Profile = (n: number, seed?: number) => boolean[];
 
 /** Everything eligible — worst case for Rcap/netSpan; this is where the wall bites hardest. */
-export const profileAll: Profile = (n) => new Array<boolean>(n).fill(true);
+const profileAll: Profile = (n) => new Array<boolean>(n).fill(true);
 
 /** A few contiguous protected bands totalling ~30% — mimics a SageRank block core + BMX tail. */
-export const profileClustered: Profile = (n, seed = 7) => {
+const profileClustered: Profile = (n, seed = 7) => {
   const rng = mulberry32((seed ^ n) >>> 0);
   const eligible = new Array<boolean>(n).fill(true);
   const target = Math.floor(n * 0.3);
@@ -119,13 +119,13 @@ export const profileClustered: Profile = (n, seed = 7) => {
 };
 
 /** ~30% protected as scattered singletons — fragments eligibility so 6-line runs are scarce. */
-export const profileSparse: Profile = (n, seed = 11) => {
+const profileSparse: Profile = (n, seed = 11) => {
   const rng = mulberry32((seed ^ n) >>> 0);
   return Array.from({ length: n }, () => rng() >= 0.3);
 };
 
 /** Closest to real cores: protected signature head + import block + a couple interior defs + tail. */
-export const profileRealistic: Profile = (n) => {
+const profileRealistic: Profile = (n) => {
   const eligible = new Array<boolean>(n).fill(true);
   const protect = (a: number, b: number): void => {
     for (let i = Math.max(0, a); i < Math.min(n, b); i++) eligible[i] = false;
@@ -160,7 +160,7 @@ export function runsValid(drop: readonly boolean[], eligible: readonly boolean[]
   return droppedRunsAllGE6(drop) && interiorKeptRunsAllGE6(drop);
 }
 
-export function droppedRunsAllGE6(drop: readonly boolean[]): boolean {
+function droppedRunsAllGE6(drop: readonly boolean[]): boolean {
   const n = drop.length;
   let i = 0;
   while (i < n) {
@@ -174,7 +174,7 @@ export function droppedRunsAllGE6(drop: readonly boolean[]): boolean {
   return true;
 }
 
-export function interiorKeptRunsAllGE6(drop: readonly boolean[]): boolean {
+function interiorKeptRunsAllGE6(drop: readonly boolean[]): boolean {
   const n = drop.length;
   let i = 0;
   while (i < n) {

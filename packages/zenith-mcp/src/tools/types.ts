@@ -1,35 +1,35 @@
-export type ToolTextContent = {
+type ToolTextContent = {
     type: "text";
     text: string;
 };
 
-export type ToolImageContent = {
+type ToolImageContent = {
     type: "image";
     data: string;
     mimeType: string;
 };
 
-export type ToolAudioContent = {
+type ToolAudioContent = {
     type: "audio";
     data: string;
     mimeType: string;
 };
 
-export type ToolBlobContent = {
+type ToolBlobContent = {
     type: "blob";
     data: string;
     mimeType: string;
 };
 
-export type ToolContent = ToolTextContent | ToolImageContent | ToolAudioContent | ToolBlobContent;
+type ToolContent = ToolTextContent | ToolImageContent | ToolAudioContent | ToolBlobContent;
 
-export type ToolResult = {
+type ToolResult = {
     content: ToolContent[];
 };
 
-export type ToolHandler<TArgs> = (args: TArgs) => Promise<ToolResult> | ToolResult;
+type ToolHandler<TArgs> = (args: TArgs) => Promise<ToolResult> | ToolResult;
 
-export type ToolRegistration = {
+type ToolRegistration = {
     title?: string;
     description?: string;
     inputSchema?: unknown;

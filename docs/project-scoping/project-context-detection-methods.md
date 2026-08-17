@@ -565,27 +565,36 @@ From the [source comment](file:///home/tanner/Projects/Zenith-MCP/packages/zenit
 
 ### How the Registry Is Populated
 
-The registry is populated from the SQLite database via [`ProjectContext._syncRegistry()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/project-context.ts#L186-L200):
+The registry is populated from the config file via [`ProjectContext.reloadRegistry()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/project-context.ts#L176-L226):
 
 ```typescript
-private _syncRegistry(): void {
-    try {
-        const conn = getGlobalDb();
-        const rows = getAllProjectRootPaths(conn);
-        for (const row of rows) {
-            this._registry.register({
-                project_id: row.name || path.basename(row.root_path),
-                project_name: row.name,
-                project_root: row.root_path,
-            });
+reloadRegistry(entries: ProjectEntry[]): void {
+    const manifests: ProjectManifest[] = [];
+    for (const e of entries) {
+        if (!e.project_id || !e.project_root) continue;
+        let resolvedRoot = normalizePath(path.resolve(expandTilde(e.project_root)));
+        try { resolvedRoot = fs.realpathSync(resolvedRoot); } catch { /* dir may not exist yet */ }
+        const m: ProjectManifest = {
+            project_id: e.project_id,
+            project_name: e.project_name,
+            project_root: resolvedRoot,
+        };
+        // ... (optional fields: description, language, tags, include, exclude, entry_point)
+        manifests.push(m);
+    }
+    this._registry = new ProjectRegistry(manifests);
+    // Re-evaluate current binding against new registry
+    if (this._boundRoot && !this._explicit) {
+        const match = this._registry.findProject(this._boundRoot);
+        if (!match) {
+            this._boundRoot = null;
+            this._isGlobal = true;
         }
-    } catch {
-        // Registry might be empty or DB not ready yet
     }
 }
 ```
 
-Data comes from the `project_roots` table in the global DB (`~/.zenith-mcp/global-stash.db`), populated by `initProject()`.
+Data comes from the config file (loaded by `ConfigManager`). The config is the persistent source of truth — SQLite-persisted entries are not merged.
 
 ---
 
@@ -636,7 +645,7 @@ Manually registers a project root, persisting it to the global SQLite DB.
 
 **Steps**:
 1. Resolves to absolute path, validates it's a directory.
-2. Upserts into `project_roots` table via `upsertProjectRoot()`.
+2. Registers in the in-memory `ProjectRegistry` (no SQLite persistence — the config file is the persistent source of truth).
 3. Registers in the in-memory `ProjectRegistry` for immediate use.
 4. **Sticky bind**: Sets `_boundRoot = abs`, `_explicit = true`. This overrides auto-promote — the explicit binding is permanent for the session.
 
@@ -647,11 +656,11 @@ Manually registers a project root, persisting it to the global SQLite DB.
 
 Hook called by `server.ts` when MCP roots change. Looks up the `ProjectContext` for the given `FsContext` and calls `refresh()`.
 
-`refresh()` ([`project-context.ts:132-140`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/project-context.ts#L132-L140)):
-1. Resets all internal state (`_boundRoot`, `_isGlobal`, `_resolved`, `_explicit`).
+`refresh()` ([`project-context.ts:118-130`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/project-context.ts#L118-L130)):
+1. If not `_explicit`, resets all internal state (`_boundRoot`, `_isGlobal`, `_resolved`).
 2. Clears the `project-scope.ts` cache via `clearProjectScopeCache()`.
-3. Re-syncs the registry from the global DB.
-4. Re-resolves from `process.cwd()`.
+3. Does not re-sync from SQLite — the config registry is authoritative.
+4. Re-resolves from `process.cwd()` via `_resolveNoFile()`.
 
 ### `ProjectContext.getStashDb(filePath?)`
 
@@ -868,15 +877,7 @@ export function expandHome(filepath: string): string {
 
 **File**: [`db-adapter.ts:645-678`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L645-L678)
 
-Three operations on the `project_roots` table:
-
-| Function | SQL | Purpose |
-|----------|-----|---------|
-| [`upsertProjectRoot()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L652-L662) | `INSERT OR REPLACE INTO project_roots (root_path, name, created_at) VALUES (?, ?, ?)` | Register or update a project root |
-| [`listProjectRoots()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L667-L670) | `SELECT * FROM project_roots ORDER BY created_at DESC` | List all roots (newest first) |
-| [`getAllProjectRootPaths()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L675-L678) | `SELECT root_path, name FROM project_roots` | Get just paths/names (for registry sync) |
-
-The global schema is initialized by [`initGlobalSchema()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L182-L190):
+The `project_roots` table is created inside [`initSymbolSchema()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L95) as part of the v1 migration ladder:
 ```sql
 CREATE TABLE IF NOT EXISTS project_roots (
     root_path TEXT PRIMARY KEY,
@@ -884,6 +885,8 @@ CREATE TABLE IF NOT EXISTS project_roots (
     created_at INTEGER
 );
 ```
+
+[`upsertProjectRoot()`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/db-adapter.ts#L804-L813) performs `INSERT OR REPLACE INTO project_roots (root_path, name, created_at) VALUES (?, ?, ?)` to register or update a project root. The config file is the persistent source of truth for project registration — SQLite rows are not queried for registry population.
 
 ---
 ---

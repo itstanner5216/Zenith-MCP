@@ -25,9 +25,9 @@ const _dirname = path.dirname(_filename);
 // Paths
 // ---------------------------------------------------------------------------
 
-export const GRAMMARS_DIR = path.join(_dirname, '..', '..', 'grammars', 'grammars');
-export const QUERIES_DIR  = path.join(_dirname, '..', '..', 'grammars', 'queries');
-export const TS_WASM_PATH = path.join(_dirname, '..', '..', 'grammars', 'tree-sitter.wasm');
+const GRAMMARS_DIR = path.join(_dirname, '..', '..', 'grammars', 'grammars');
+const QUERIES_DIR  = path.join(_dirname, '..', '..', 'grammars', 'queries');
+const TS_WASM_PATH = path.join(_dirname, '..', '..', 'grammars', 'tree-sitter.wasm');
 
 // ---------------------------------------------------------------------------
 // Initialization & caching

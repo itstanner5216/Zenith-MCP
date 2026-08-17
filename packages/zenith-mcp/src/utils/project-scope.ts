@@ -195,15 +195,6 @@ export function isWithinProject(filePath: string, projectRoot: string): boolean 
 }
 
 /**
- * Get a stable project identifier for a file path.
- * Returns the resolved project root path, or null if no project found.
- */
-export function getProjectId(filePath: string, options?: ResolveOptions): string | null {
-  const root = resolveProjectRoot(filePath, options);
-  return root ?? null;
-}
-
-/**
  * Clear the internal project root cache. Call this when the filesystem changes
  * significantly (e.g., roots changed, new projects cloned, etc.).
  */

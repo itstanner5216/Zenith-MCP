@@ -13,7 +13,8 @@
 - `core/lib.ts` — `normalizeLineEndings()`, `createMinimalDiff()`
 - `core/edit-engine.ts` — `applyEditList()`, `syntaxWarn()`, `findMatch()` and the three match strategies
 - `core/stash.ts` — `stashEdits()`
-- `core/tree-sitter.ts` — `getLangForFile()`, `findSymbol()`, `checkSyntaxErrors()`
+- `core/tree-sitter.ts` — `getLangForFile()`, `checkSyntaxErrors()`
+- `core/indexed-symbols.ts` — `loadSymbolInFile()` (DB-backed symbol lookup)
 - `core/symbol-index.ts` — `getDb()`, `snapshotSymbol()`, `getSessionId()`
 - `core/project-context.ts` — `getProjectContext()`
 - `node:fs/promises` — `readFile`, `writeFile`, `rename`, `unlink`
@@ -148,9 +149,9 @@ This is critical: **a failing edit does not stop subsequent edits from being att
 
 1. Determine `nearLine` from `disambiguations.get(i).nearLine` or `edit.nearLine`
 2. `getLangForFile(filePath)` — extension-based language detection; `null` → error `"<tag>Unsupported file type."`
-3. `findSymbol(workingContent, langName, edit.symbol, { kindFilter: 'def', nearLine? })` — tree-sitter symbol lookup with `kindFilter: 'def'` (only definitions, not references)
+3. `loadSymbolInFile(filePath, edit.symbol, { kindFilter: 'def', nearLine? })` — DB-backed symbol lookup with `kindFilter: 'def'` (only definitions, not references). Indexes the file on demand.
 4. Three failure paths:
-   - `findSymbol` returns `null` (grammar exists but no tags query for the language) → error `"<tag>Symbol queries not available for <lang> (grammar present, tags query missing). Use block or content mode instead."`
+   - `loadSymbolInFile` returns `null` (no repo root found for the file) → error `"<tag>Symbol queries not available for <lang>. Use block or content mode instead."`
    - Empty array → error `"<tag>Symbol not found."`
    - Multiple matches AND `nearLine` not set → error `"<tag>Multiple matches. Use nearLine."`
 5. `sym = symbolMatches[0]` (the closest to `nearLine` if provided, else the first match)
@@ -161,7 +162,7 @@ This is critical: **a failing edit does not stop subsequent edits from being att
 
 **Key details:**
 - `kindFilter: 'def'` means only top-level/method/function definitions are matched — references to the symbol elsewhere in the file are not matched
-- Dot-qualified names (e.g., `Class.method`) are supported by `findSymbol` natively
+- Dot-qualified names (e.g., `Class.method`) are supported by `loadSymbolInFile` (parent-chain verification via line-range containment)
 - The `originalText` capture happens BEFORE the splice, so the snapshot reflects the pre-edit body
 - The snapshot is recorded in `pendingSnapshots` here but only persisted to the symbol-index DB later (after the file write succeeds)
 - A symbol that spans 0 lines or has invalid `line/endLine` would still be spliced — there is no defensive check
@@ -364,7 +365,7 @@ The disambiguation map's `nearLine` overrides `edit.nearLine` when both are pres
 
 2. **`edits[]` mode-specific fields are all marked `.optional()`** — the schema accepts an edit like `{ mode: "block" }` with no other fields. The runtime check inside `applyEditList` produces a per-edit error, but the schema allows it through. Schema-level validation could reject malformed edits before they reach the engine.
 
-3. **`nearLine` semantics differ across modes** — in block mode it's a tiebreaker over multiple anchor matches; in content mode strategies 1 and 2 it's a tiebreaker; in content mode strategy 3 it's a search-window restrictor (±50 lines); in symbol mode it's both required-when-multiple-matches AND a tiebreaker for `findSymbol`'s internal ranking. Same parameter name, different effective behavior per mode.
+3. **`nearLine` semantics differ across modes** — in block mode it's a tiebreaker over multiple anchor matches; in content mode strategies 1 and 2 it's a tiebreaker; in content mode strategy 3 it's a search-window restrictor (±50 lines); in symbol mode it's both required-when-multiple-matches AND a proximity sort key for `loadSymbolInFile`. Same parameter name, different effective behavior per mode.
 
 4. **`block_start` / `block_end` accept multi-line input** — the schema describes them as "First line of block." and "Last line of block.", but the engine treats multi-line strings as anchor + verification lines. A user passing a multi-line `block_start` thinking it's a single-string anchor will get behavior they didn't expect (intermediate lines become verification predicates).
 
@@ -382,7 +383,7 @@ The disambiguation map's `nearLine` overrides `edit.nearLine` when both are pres
 
 2. **Per-mode field requirements are enforced at runtime, not at schema time** — every mode-specific field is `.optional()`. A schema using a discriminated union (`z.discriminatedUnion('mode', [...])`) would catch missing fields at validation time and produce structured errors.
 
-3. **Non-null assertions in the engine** — `applyEditList` uses `edit.oldContent!`, `edit.newContent!`, `edit.symbol!`, `edit.newText!` with the TypeScript non-null assertion operator. If the validation chain ever changes and a missing field reaches these lines, the runtime will pass `undefined` into `findMatch` / `findSymbol` which will then throw a type-error or behave unpredictably. The schema-level validation should make these fields actually required for their mode.
+3. **Non-null assertions in the engine** — `applyEditList` uses `edit.oldContent!`, `edit.newContent!`, `edit.symbol!`, `edit.newText!` with the TypeScript non-null assertion operator. If the validation chain ever changes and a missing field reaches these lines, the runtime will pass `undefined` into `findMatch` / `loadSymbolInFile` which will then throw a type-error or behave unpredictably. The schema-level validation should make these fields actually required for their mode.
 
 4. **No write-verification step** — `write_file` stats the temp file and compares byte length before renaming. `edit_file` does not. A truncated write that nonetheless completes `writeFile` without error would proceed to rename with corrupted content.
 

@@ -7,9 +7,9 @@
 
 import type { Node } from 'web-tree-sitter';
 
-export type ImportBindingKind = 'named' | 'default' | 'namespace';
+type ImportBindingKind = 'named' | 'default' | 'namespace';
 
-export interface ImportBinding {
+interface ImportBinding {
     source: string;
     localName: string;
     importedName: string | null;
@@ -19,7 +19,7 @@ export interface ImportBinding {
     column: number;
 }
 
-export interface ImportStatementSpan {
+interface ImportStatementSpan {
     module: string;
     line: number;
     startLine: number;
@@ -71,16 +71,6 @@ export function extractImportStatements(rootNode: Node, langName: string): Impor
 
     statements.sort((a, b) => (a.span.startLine - b.span.startLine) || (a.span.endLine - b.span.endLine));
     return statements;
-}
-
-export function extractImportStatementSpans(rootNode: Node, langName: string): ImportStatementSpan[] {
-    return extractImportStatements(rootNode, langName).map(stmt => stmt.span);
-}
-
-export function extractImportBindings(rootNode: Node, langName: string): ImportBinding[] {
-    const bindings = extractImportStatements(rootNode, langName).flatMap(stmt => stmt.bindings);
-    bindings.sort((a, b) => (a.line - b.line) || (a.column - b.column));
-    return bindings;
 }
 
 function extractFromImportStatement(node: Node, source: string, bindings: ImportBinding[]): void {

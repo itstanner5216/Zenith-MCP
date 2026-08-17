@@ -502,7 +502,7 @@ Key pieces:
 - `packages/zenith-mcp/src/adapters/platforms/`
   - Per-client adapter implementations
 - `packages/zenith-mcp/src/adapters/registry.ts`
-  - Adapter registry with `configureRegistry()`, `getAdapter()`, `listAdapters()`
+  - Adapter registry with `configureRegistry()`, `listAdapters()`
 - `packages/zenith-mcp/src/adapters/helpers/`
   - JSON5, TOML, YAML parsing and output format helpers
 
@@ -655,16 +655,6 @@ Generated local state to clean when needed:
 ---
 
 ## 14. Code Snippets
-
-### Find a Symbol
-
-```ts
-import { findSymbol } from '../core/tree-sitter.js';
-
-const matches = await findSymbol(sourceCode, 'javascript', 'AuthService.login', {
-  kindFilter: 'def',
-});
-```
 
 ### Rank Search Results
 

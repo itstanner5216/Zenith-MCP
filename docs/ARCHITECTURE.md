@@ -148,7 +148,7 @@ export function createFilesystemServer(ctx: FilesystemContext): McpServer
 - **`BM25Index` class**: Full BM25 implementation with entropy-weighted IDF scoring and sigmoid TF saturation. Methods: `static tokenize(text)`, `build(docs)`, `search(query, topK)`.
 - `bm25RankResults()` — Rank lines by BM25 relevance within a character budget.
 - `bm25PreFilterFiles()` — Pre-filter files using BM25 on path + content snippets.
-- Ripgrep integration: `ripgrepSearch()` (JSON-mode with sensitive file filtering), `ripgrepFindFiles()`, `ripgrepCountMatches()`.
+- Ripgrep integration: `ripgrepSearch()` (JSON-mode with sensitive file filtering), `ripgrepFindFiles()`.
 - Config-driven: `getCharBudget()` (10K–2M, default 400K), `getSearchCharBudget()`, `getDefaultExcludes()`, `getSensitivePatterns()`.
 - `isSensitive(filePath)` — Multi-strategy sensitive file detection.
 
@@ -165,7 +165,7 @@ Pure computation (no I/O). Applies edits in three modes:
 
 - **content mode**: `oldContent`/`newContent` with three-strategy matching: exact → trim-trailing-whitespace → indent-stripped within ±50-line window.
 - **block mode**: `block_start`/`block_end` boundary matching with disambiguation.
-- **symbol mode**: Tree-sitter `findSymbol()` lookup with `nearLine` disambiguation.
+- **symbol mode**: DB-backed `loadSymbolInFile()` lookup via the symbol-index with `nearLine` proximity sort.
 
 All edits in a file bundle succeed or fail atomically. Post-edit syntax error detection via `syntaxWarn()`.
 
@@ -184,7 +184,7 @@ All edits in a file bundle succeed or fail atomically. Post-edit syntax error de
 - Pure functional adapter pattern — all functions take `DbConnection` as first parameter.
 - Prepared statement cache (`Map<string, StatementSync>`) and nested transaction support via SAVEPOINTs.
 - Connection settings: WAL mode, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
-- **Schema modules**: `initSymbolSchema()`, `initGlobalSchema()`, `initStashSchema()`, `initBackupSchema()`.
+- **Schema modules**: `initSymbolSchema()`, `initStashSchema()`, `initBackupSchema()`.
 
 ### 5.8 `core/project-context.ts` — Project Root Resolution
 
@@ -384,7 +384,7 @@ Adapters in `src/adapters/platforms/` auto-configure external MCP clients to reg
 |-----------|------|---------|
 | `base.ts` | `adapters/` | `MCPConfigAdapter` abstract base class |
 | `platforms/` | `adapters/` | Per-client adapter implementations |
-| `registry.ts` | `adapters/` | Registry with `configureRegistry()`, `getAdapter()`, `listAdapters()` |
+| `registry.ts` | `adapters/` | Registry with `configureRegistry()`, `listAdapters()` |
 | `helpers/` | `adapters/` | JSON5, TOML, YAML parsing and output format helpers |
 
 - Adapters back up before modifying configuration files.
@@ -591,19 +591,20 @@ pnpm clean
 
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| TypeScript | ^5.8.2 | Primary language |
-| Node.js | ≥ 22.0.0 | Runtime (required for native `node:sqlite`) |
-| pnpm | 11.2.1 | Package manager |
-| Turborepo | ^2.5.0 | Monorepo build orchestration |
+| TypeScript | ^7.0.2 | Primary language |
+| Node.js | ^26.3.0 | Runtime (required for native `node:sqlite`) |
+| pnpm | 11.22.0 | Package manager |
+| Turborepo | ^2.10.10 | Monorepo build orchestration |
 | Express | ^5.2.1 | HTTP server framework |
-| MCP SDK | ^1.25.2 | Protocol implementation (patched) |
-| web-tree-sitter | ^0.26.8 | Code parsing (WASM) |
-| Zod | ^4.3.6 | Schema validation |
-| Vitest | ^4.1.5 | Test framework |
-| glob | ^10.5.0 | File globbing |
-| minimatch | ^10.0.1 | Pattern matching |
-| diff | ^5.1.0 | Diff computation |
-| js-yaml | ^4.1.0 | YAML parsing |
+| express-rate-limit | ^8.6.2 | Rate limiting |
+| @modelcontextprotocol/sdk | 1.30.0 | Protocol implementation (patched) |
+| @modelcontextprotocol/server | 2.0.0 | HTTP/SSE transport server |
+| web-tree-sitter | ^0.26.12 | Code parsing (WASM) |
+| Zod | ^4.4.3 | Schema validation |
+| Vitest | ^4.1.10 | Test framework |
+| minimatch | ^10.2.6 | Pattern matching |
+| diff | ^9.0.0 | Diff computation |
+| js-yaml | ^5.3.0 | YAML parsing |
 | json5 | ^2.2.3 | JSON5 parsing |
 | jsonc-parser | ^3.3.1 | JSONC parsing |
 | @iarna/toml | — | TOML parsing |

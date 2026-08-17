@@ -99,13 +99,6 @@ const TOOL_REGISTRY: Array<{
 ];
 
 /**
- * Exposed list of every tool name the server knows about, in registration order.
- * Used by entrypoints that need to advertise the available tools (e.g. for
- * health checks or schema dumps) without having to import every tool module.
- */
-export const ALL_TOOL_NAMES: ReadonlyArray<string> = TOOL_REGISTRY.map(t => t.name);
-
-/**
  * Default server instructions string. Each entrypoint passes this (or its own
  * override) into its SDK-specific `new McpServer(..., { instructions })` call.
  */

@@ -171,7 +171,7 @@ function findScoreCoreCount(sortedScores: number[], maxK: number): number {
  * marginally-redundant material), and the bounded representative core. Defined
  * and owned HERE; only later engines consume it.
  */
-export interface SageRankMetadata {
+interface SageRankMetadata {
   readonly scores: readonly number[];
   readonly rankedIndices: readonly number[];
   readonly coverageOrder: readonly number[];

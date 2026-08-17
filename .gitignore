@@ -58,3 +58,9 @@ lcov.info
 
 # turbo dot files 
 .turbo
+
+# Archives / backups — sandbox artifacts must never land in git
+*.zip
+*.tar.xz
+*.tar.gz
+*.bak
