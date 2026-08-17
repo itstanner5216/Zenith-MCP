@@ -214,7 +214,7 @@ export function findMarkerRoot(absPath: string): string | null
 
 **Source**: [`detection/boundaries.ts`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/core/detection/boundaries.ts)
 
-Keeps detected roots from escaping the sandbox the user granted. Unlike a prior short-circuit-guard design, a path with **no** containing allowed dir is not rejected — allowed dirs are hints unless sandbox enforcement is on (see [sandbox-mode-note.md](sandbox-mode-note.md)).
+Keeps detected roots from escaping the sandbox the user granted. Unlike a prior short-circuit-guard design, a path with **no** containing allowed dir is not rejected — allowed dirs are hints unless sandbox enforcement is on.
 
 Algorithm:
 1. If no `allowedDirectories` → return candidate as-is.
@@ -520,7 +520,6 @@ Every stash operation routes through `ProjectContext.getStashDb()`:
 
 ### Sandbox Mode
 
-See [sandbox-mode-note.md](sandbox-mode-note.md) for the opt-in enforcement model and planned extensions.
 
 ---
 
