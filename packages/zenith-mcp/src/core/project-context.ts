@@ -702,22 +702,6 @@ export function getProjectContext(ctx: FsContext): ProjectContext {
     return instance;
 }
 
-/**
- * Refresh the ProjectContext for the given session when MCP roots change.
- * ctx is REQUIRED — every roots change happens within a session context.
- * If you're calling this without a ctx, you have a bug upstream.
- */
-export function onRootsChanged(ctx: FsContext): void {
-    const instance = _instances.get(ctx);
-    if (instance) {
-        instance.refresh();
-    } else {
-        // No ProjectContext for this ctx yet — that's fine, it will be
-        // created on first tool call and will pick up the new dirs then.
-        console.error("onRootsChanged: no ProjectContext for this session yet (will be created on first use)");
-    }
-}
-
 /** Reset the context — for test isolation only. */
 export function resetProjectContext(ctx?: FsContext): void {
     if (ctx) {
