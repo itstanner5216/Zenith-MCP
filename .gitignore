@@ -70,3 +70,6 @@ lcov.info
 .claude/settings.json
 .codex/
 .circleci/
+
+# session working notes — registry lives here, never ships
+review/
