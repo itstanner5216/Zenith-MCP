@@ -8,9 +8,6 @@ overrides:
   hono: '>=4.12.25'
   vite: '>=8.0.16'
 
-patchedDependencies:
-  '@modelcontextprotocol/sdk@1.30.0': 57dd918466fcefee5d46ed4647167b2aedbf1bf2976d23477961ae533006f1d7
-
 importers:
 
   .:
@@ -36,9 +33,6 @@ importers:
       '@modelcontextprotocol/node':
         specifier: 2.0.0
         version: 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.12.27)
-      '@modelcontextprotocol/sdk':
-        specifier: 1.30.0
-        version: 1.30.0(patch_hash=57dd918466fcefee5d46ed4647167b2aedbf1bf2976d23477961ae533006f1d7)(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.4.3)
       '@modelcontextprotocol/server':
         specifier: 2.0.0
         version: 2.0.0
@@ -76,6 +70,9 @@ importers:
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
+      '@modelcontextprotocol/sdk':
+        specifier: 1.30.0
+        version: 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.4.3)
       '@types/emscripten':
         specifier: ^1.41.5
         version: 1.41.5
@@ -1847,7 +1844,7 @@ snapshots:
     optionalDependencies:
       hono: 4.12.27
 
-  '@modelcontextprotocol/sdk@1.30.0(patch_hash=57dd918466fcefee5d46ed4647167b2aedbf1bf2976d23477961ae533006f1d7)(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.4.3)':
+  '@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@7.2.0)(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.27)
       ajv: 8.20.0
