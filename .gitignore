@@ -51,23 +51,28 @@ lcov.info
 .chunk/sidecar.json
 .chunk/sidecar.*.json
 
-.env
-turbo.json
-.codeqlignore
-.npmrc
+*.env
+*.codeqlignore
+*.npmrc
+*.mcp
+**node_modules
+*/docs/project-scoping
+*/docs/tool_audit
+*/docs/concepts
+*/docs/plans
+*/packages/zenith-toon/tsconfig.tsbuildinfo
+*/packages/zenith-toon/node_modules
+*/packages/zenith-toon/dist
+*/packages/zenith-mcp/tsconfig.tsbuildinfo
+*/packages/zenith-mcp/node_modules
+*/packages/zenith-mcp/dist
+*/packages/zenith-mcp/coverage
+*/packages/zenith-mcp/src/server/consolidated-http.ts
+
+# Agent dot directories
+.codex
+.claude
 .mcp
-node_modules
-docs/project-scoping
-docs/tool_audit
-docs/concepts
-docs/plans
-packages/zenith-toon/tsconfig.tsbuildinfo
-packages/zenith-toon/vitest.config.ts
-packages/zenith-toon/node_modules
-packages/zenith-toon/dist
-packages/zenith-mcp/tsconfig.tsbuildinfo
-packages/zenith-mcp/node_modules
-packages/zenith-mcp/grammars
-packages/zenith-mcp/dist
-packages/zenith-mcp/coverage
-packages/zenith-mcp/src/server/consolidated-http.ts
+
+# turbo dot files 
+.turbo
