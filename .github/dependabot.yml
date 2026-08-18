@@ -42,7 +42,7 @@ updates:
       prefix: "deps"
 
     # @modelcontextprotocol/sdk is pinned with a pnpm patch in pnpm-workspace.yaml
-    # (patchedDependencies: "@modelcontextprotocol/sdk@1.29.0"). Bumping it here
+    # (patchedDependencies: "@modelcontextprotocol/sdk@1.30.0"). Bumping it here
     # would break `pnpm install` — upgrade manually and refresh the patch.
     ignore:
       - dependency-name: "@modelcontextprotocol/sdk"
@@ -60,7 +60,6 @@ updates:
         applies-to: version-updates
         patterns:
           - "@modelcontextprotocol/server"
-          - "@modelcontextprotocol/client"
 
       # Tree-sitter runtime + CLI + WASM grammars
       tree-sitter:
@@ -69,7 +68,6 @@ updates:
           - "web-tree-sitter"
           - "tree-sitter-cli"
           - "tree-sitter-*"
-          - "@repomix/tree-sitter-wasms"
 
       # Zod schema ecosystem
       zod:

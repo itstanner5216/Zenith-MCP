@@ -12,7 +12,8 @@
 **Key dependencies:**
 - `core/lib.ts` — `formatSize()` (used in list mode only)
 - `core/shared.ts` — `getDefaultExcludes()`, `isSensitive()`, `getSensitivePatterns()`
-- `core/tree-sitter.ts` — `isSupported()`, `getFileSymbols()`, `getFileSymbolSummary()`
+- `core/tree-sitter.ts` — `isSupported()`
+- `core/indexed-symbols.ts` — `loadFileDefinitions()`, `loadFileSymbolSummary()` (DB-backed)
 - `node:fs/promises` — `readdir`, `stat`
 - `minimatch` — glob pattern matching for excludes
 
@@ -159,12 +160,13 @@ src/utils/foo.ts  2.10 KB
    - **Default excludes:** drop if `entry.name === pattern` OR `minimatch(relativePath, pattern)` OR `minimatch(relativePath, '**/' + pattern)` — note `relativePath` here is from `rootPath`, NOT from the parent dir
 5. Symbol parsing phase (only if `showSymbols && fileEntries.length > 0`):
    - For each file: check `isSupported(fullPath)` (extension-based)
+   - Apply size cap: `fs.stat(fullPath)` — skip if `stats.size > MAX_FILE_SIZE (512 KB)` or stat fails
    - If `showSymbolNames`:
-     - `getFileSymbols(fullPath, { kindFilter: 'def' })` — full symbol parse
+     - `loadFileDefinitions(fullPath)` — DB-backed, indexes on demand, returns `IndexedSymbol[]`
      - Take first 50 symbols, format as `name (type)`
-     - Also fetch summary via `getFileSymbolSummary(fullPath)` (separate parse — see issues below)
+     - Also fetch summary via `loadFileSymbolSummary(fullPath)` (internally re-queries `loadFileDefinitions`)
    - Else:
-     - `getFileSymbolSummary(fullPath)` only — produces a string like `"3 functions, 2 classes"`
+     - `loadFileSymbolSummary(fullPath)` only — produces a string like `"3 functions, 2 classes"`
    - Errors caught and become `null` for that file
    - Results collected into `symbolResults: Map<filename, { summary, names }>`
 6. Sort `dirEntries` and `fileEntries` separately by `localeCompare` (numeric, case-insensitive)
@@ -189,32 +191,27 @@ src/utils/foo.ts  2.10 KB
      - Optional `  [name1 (type1), name2 (type2), ...]` suffix when `entry.symbolNames` is set
 3. Return all lines flattened
 
-### `getFileSymbolSummary` — Detailed Behavior
+### `loadFileDefinitions` — Detailed Behavior
 
-**Source:** `core/tree-sitter/symbols.ts`
+**Source:** `core/indexed-symbols.ts` (lines 99–106)
 
-1. `getLangForFile(filePath)` — `null` → return `null`
-2. `fs.stat(filePath)` — error → return `null`
-3. **Skip files larger than 256 KB** (`stat.size > 256 * 1024`)
-4. `fs.readFile(filePath, 'utf-8')` — error → return `null`
-5. Call `getSymbolSummaryString(source, langName)`
-6. Returns either `"3 functions, 1 class"`-style string or `null`
+1. Delegates to `loadFileSymbols(absPath, { kindFilter: 'def' })`.
+2. `loadFileSymbols` calls `findRepoRoot(absPath)` — returns `null` if outside a git repo.
+3. Opens the symbol-index DB via `getDb(repoRoot)`.
+4. Calls `ensureIndexFresh(db, repoRoot, [absPath])` to index the file on demand if it's stale or missing.
+5. Queries `getSymbolsInFile(db, relPath)` from `db-adapter.ts` — `SELECT name, kind, type, line, end_line AS endLine, column FROM symbols WHERE file_path = ? ORDER BY line`.
+6. Applies caller-supplied filters via `applyFilters(rows, opts)`.
 
-`getSymbolSummaryString`:
-- Parses symbols, filters to definitions
-- Counts each symbol type
-- Returns a comma-separated count list ordered by a hardcoded priority list (`class, interface, type, enum, function, method, module, key, section, selector, keyframes, media, variable, constant, property, object, mixin, extension, macro, resource, output, provider, local`); any types outside the list are appended at the end
-- Singular/plural via a hand-rolled `pluralize` (handles `s`-ending and `y`-ending words; defaults to `+s`)
+**Note:** `loadFileDefinitions` has no built-in file-size cap. The directory tool applies its own cap (`MAX_FILE_SIZE = 512 KB`) via a `fs.stat` check before calling this function.
 
-### `getFileSymbols` — Detailed Behavior
+### `loadFileSymbolSummary` — Detailed Behavior
 
-**Source:** `core/tree-sitter/symbols.ts`
+**Source:** `core/indexed-symbols.ts` (lines 203–231)
 
-1. `getLangForFile(filePath)` — `null` → return `null`
-2. `fs.readFile(filePath, 'utf-8')` — error → return `null`
-3. Call `getSymbols(source, langName, options)` — full tree-sitter parse with the supplied filter (`kindFilter: 'def'` in directory's case)
-
-**Note:** `getFileSymbols` does NOT have the 256 KB size guard that `getFileSymbolSummary` has. When `showSymbolNames` is true, both are called for the same file (see issue #1 below), but `getFileSymbols` will parse files of any size.
+1. Calls `loadFileDefinitions(absPath)` internally (which re-runs `ensureIndexFresh` and `getSymbolsInFile`).
+2. Counts each symbol type from the returned definitions.
+3. Returns a comma-separated count list ordered by a hardcoded priority list (`class, interface, type, enum, function, method, module, key, section, selector, keyframes, media, variable, constant, property, object, mixin, extension, macro, resource, output, provider, local`); any types outside the list are appended at the end.
+4. Singular/plural via a hand-rolled `pluralize`.
 
 ### Tree Mode Output Format
 
@@ -243,7 +240,7 @@ docs/
 |---|---|---|---|
 | `LIST_CAP` | 250 | top of file | Per-directory entry cap in list mode |
 | `TREE_MAX_ENTRIES` | 500 | top of file | Global entry cap in tree mode |
-| Symbol-summary file size cap | 256 KB | `getFileSymbolSummary` | Skip parsing files larger than this |
+| Symbol-summary file size cap | 512 KB | tree path `MAX_FILE_SIZE` | Skip parsing files larger than this |
 | Symbol-name first-N cap | 50 | tree path | Max symbol names returned per file |
 | Depth cap | 10 | Zod schema | `min(1).max(10)` for both modes |
 | Default depth (list) | 1 | tool handler | Top-level only |
@@ -286,17 +283,19 @@ The default-excludes filter in list mode also accepts an exact `entry.name === p
 When `showSymbols` is true:
 
 - Every file in every traversed directory is checked via `isSupported()` (extension lookup)
-- Supported files are read and parsed via tree-sitter
+- A `fs.stat` size check gates parsing: files larger than `MAX_FILE_SIZE` (512 KB) are skipped with no summary
+- Supported, in-budget files are indexed on demand via the DB-backed `ensureIndexFresh` path, then queried via `loadFileDefinitions` / `loadFileSymbolSummary`
 - A best-effort summary string is computed and attached to the entry
 - Errors are caught and become null
 
 When `showSymbolNames` is true:
 
 - Implies `showSymbols` (sets it to true)
-- For each supported file, **two parses occur**: `getFileSymbols` (no size cap) and `getFileSymbolSummary` (with 256 KB cap)
+- `loadFileDefinitions(fullPath)` returns definitions; first 50 are formatted as `name (type)`
+- `loadFileSymbolSummary(fullPath)` is then called, which internally re-calls `loadFileDefinitions` (a second DB query, not a second file read)
 - Symbol names are capped at 50 per file
 
-There is no caching across calls — every `directory tree` invocation re-parses every file.
+There is no result caching across calls — every `directory tree` invocation re-queries the symbol-index DB, though the DB itself caches indexed data.
 
 ---
 
@@ -352,7 +351,7 @@ Both modes append `[truncated]` when their respective caps are hit.
 
 ## Known Issues / Smells
 
-1. **`getFileSymbols` and `getFileSymbolSummary` are called sequentially when `showSymbolNames` is true** — both run their own `getLangForFile` and `fs.readFile`, parsing the same file twice. The 256 KB size guard in `getFileSymbolSummary` does NOT apply to the `getFileSymbols` call, so a 5 MB file would be fully read and parsed for names, then the summary call would short-circuit to `null` after the size check. This is wasteful and produces inconsistent output (names without a summary).
+1. **`loadFileDefinitions` and `loadFileSymbolSummary` are called sequentially when `showSymbolNames` is true** — `loadFileSymbolSummary` internally calls `loadFileDefinitions` again, resulting in two DB queries (`ensureIndexFresh` + `getSymbolsInFile`) for the same file. The 512 KB size cap is checked once before both calls, so very large files are correctly skipped. The double query is a mild inefficiency (DB hits, not file I/O) but produces consistent output (both names and summary always reflect the same indexed state).
 
 2. **Tree mode `readdir` has no try/catch** — list mode handles `readdir` failures gracefully with `[DENIED]`, but tree mode lets errors propagate. A single permission-denied subdirectory aborts the entire tree response. The tool throws to the MCP framework with whatever Node error the syscall produced.
 

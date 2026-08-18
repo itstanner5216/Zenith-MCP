@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HTTP_SERVER = path.resolve(__dirname, '../dist/server/http.js');
-const API_KEY = 'test-api-key-http-session-cleanup';
+const API_KEY = 'test-api-key-http-stateless';
 
 const INIT_REQUEST = {
     jsonrpc: '2.0',
@@ -17,8 +17,15 @@ const INIT_REQUEST = {
     params: {
         protocolVersion: '2025-03-26',
         capabilities: {},
-        clientInfo: { name: 'vitest-http-session-cleanup', version: '1.0.0' },
+        clientInfo: { name: 'vitest-http-stateless', version: '1.0.0' },
     },
+};
+
+const TOOLS_LIST_REQUEST = {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/list',
+    params: {},
 };
 
 function getFreePort() {
@@ -46,9 +53,6 @@ function writeMinimalConfig(homeDir, port) {
         [
             `Port: ${port}`,
             '',
-            '### Advanced',
-            'session_ttl_ms: 30000',
-            '',
         ].join('\n'),
         'utf8',
     );
@@ -64,7 +68,24 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
     }
 }
 
-describe('HTTP streamable initialize session cleanup', () => {
+// The SDK may answer a JSON-RPC POST as plain JSON or as a single-event SSE
+// body depending on negotiation; accept both shapes.
+async function parseRpcResponse(response) {
+    const contentType = response.headers.get('content-type') ?? '';
+    const text = await response.text();
+    if (contentType.includes('text/event-stream')) {
+        const dataLines = text
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice('data:'.length).trim())
+            .filter((line) => line.length > 0);
+        expect(dataLines.length).toBeGreaterThan(0);
+        return JSON.parse(dataLines[dataLines.length - 1]);
+    }
+    return JSON.parse(text);
+}
+
+describe('HTTP stateless MCP endpoint (2026-07-28, legacy stateless fallback)', () => {
     let child;
     let homeDir;
     let baseUrl;
@@ -72,7 +93,7 @@ describe('HTTP streamable initialize session cleanup', () => {
 
     beforeEach(async () => {
         const port = await getFreePort();
-        homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zenith-http-session-test-'));
+        homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zenith-http-stateless-test-'));
         writeMinimalConfig(homeDir, port);
         baseUrl = `http://127.0.0.1:${port}`;
         stderr = '';
@@ -112,9 +133,7 @@ describe('HTTP streamable initialize session cleanup', () => {
                 throw new Error(`HTTP server exited before health check passed: ${stderr}`);
             }
             try {
-                const response = await fetchWithTimeout(`${baseUrl}/health`, {
-                    headers: { Authorization: `Bearer ${API_KEY}` },
-                }, 500);
+                const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 500);
                 if (response.ok) return;
                 lastError = new Error(`health returned ${response.status}`);
             } catch (err) {
@@ -125,12 +144,17 @@ describe('HTTP streamable initialize session cleanup', () => {
         throw new Error(`Timed out waiting for HTTP server health: ${lastError?.message ?? 'unknown'}\n${stderr}`);
     }
 
-    async function getHealth() {
-        const response = await fetchWithTimeout(`${baseUrl}/health`, {
-            headers: { Authorization: `Bearer ${API_KEY}` },
+    function mcpPost(body, headers = {}) {
+        return fetchWithTimeout(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${API_KEY}`,
+                Accept: 'application/json, text/event-stream',
+                'Content-Type': 'application/json',
+                ...headers,
+            },
+            body: JSON.stringify(body),
         });
-        expect(response.status).toBe(200);
-        return await response.json();
     }
 
     it('returns 401 when /mcp is called without a bearer token', async () => {
@@ -151,7 +175,7 @@ describe('HTTP streamable initialize session cleanup', () => {
         const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
             method: 'POST',
             headers: {
-                Authorization: ['Bearer', 'invalid-token'].join(' '),
+                Authorization: 'Bearer invalid-token',
                 Accept: 'application/json, text/event-stream',
                 'Content-Type': 'application/json',
             },
@@ -159,73 +183,63 @@ describe('HTTP streamable initialize session cleanup', () => {
         });
 
         expect(response.status).toBe(401);
-        await expect(response.json()).resolves.toEqual({ error: 'Invalid or missing API key.' });
     });
 
-    it('allows a valid bearer token to reach /mcp', async () => {
-        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
-            method: 'POST',
-            headers: {
-                Authorization: ['Bearer', API_KEY].join(' '),
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(INIT_REQUEST),
-        });
-
-        // 406 comes from downstream MCP transport validation (missing Accept), proving auth passed.
-        expect(response.status).toBe(406);
-    });
-
-    it('removes the pre-registered session when initialize is rejected by non-throwing transport validation', async () => {
-        // Inferred from http.ts: isInitializeRequest only validates the JSON-RPC body.
-        // The SDK can still reject the request later for HTTP-level errors such as
-        // an Accept header that does not list both application/json and text/event-stream.
-        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${API_KEY}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(INIT_REQUEST),
-        });
-
-        expect(response.status).toBe(406);
-        expect(response.headers.get('mcp-session-id')).toBeNull();
-
-        const health = await getHealth();
-        expect(health.sessions).toBe(0);
-    }, 10000);
-
-    it('keeps a successfully initialized session and removes it on explicit teardown', async () => {
-        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${API_KEY}`,
-                Accept: 'application/json, text/event-stream',
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(INIT_REQUEST),
-        });
+    it('answers a 2025-era initialize without issuing a session id', async () => {
+        const response = await mcpPost(INIT_REQUEST);
 
         expect(response.status).toBe(200);
-        const sessionId = response.headers.get('mcp-session-id');
-        expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
-        const body = await response.text();
-        expect(body).toContain('"id":1');
+        expect(response.headers.get('mcp-session-id')).toBeNull();
 
-        const initializedHealth = await getHealth();
-        expect(initializedHealth.sessions).toBe(1);
+        const rpc = await parseRpcResponse(response);
+        expect(rpc.id).toBe(1);
+        expect(rpc.result).toBeDefined();
+        expect(rpc.result.serverInfo?.name).toBe('zenith-mcp');
+    });
 
-        const deleteResponse = await fetchWithTimeout(`${baseUrl}/mcp`, {
+    it('serves a bare tools/list with no prior handshake and no session header', async () => {
+        const response = await mcpPost(TOOLS_LIST_REQUEST);
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('mcp-session-id')).toBeNull();
+
+        const rpc = await parseRpcResponse(response);
+        expect(rpc.id).toBe(2);
+        expect(rpc.result).toBeDefined();
+        expect(Array.isArray(rpc.result.tools)).toBe(true);
+        expect(rpc.result.tools.length).toBeGreaterThan(0);
+    });
+
+    it('answers GET /mcp with 405 (2025 session operations are not served)', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${API_KEY}`,
+                Accept: 'text/event-stream',
+            },
+        });
+        expect(response.status).toBe(405);
+    });
+
+    it('answers DELETE /mcp with 405 (no sessions to tear down)', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/mcp`, {
             method: 'DELETE',
             headers: {
                 Authorization: `Bearer ${API_KEY}`,
-                'Mcp-Session-Id': sessionId,
+                'mcp-session-id': 'no-such-session',
             },
         });
-        expect(deleteResponse.status).toBe(200);
+        expect(response.status).toBe(405);
+    });
 
-        const closedHealth = await getHealth();
-        expect(closedHealth.sessions).toBe(0);
-    }, 10000);
+    it('reports a session-free health payload', async () => {
+        const response = await fetchWithTimeout(`${baseUrl}/health`);
+        expect(response.status).toBe(200);
+        const health = await response.json();
+        expect(health.status).toBe('ok');
+        expect(health.auth).toEqual({ mcp: 'api-key' });
+        expect(typeof health.baselineDirs).toBe('number');
+        expect(health).not.toHaveProperty('sessions');
+        expect(health).not.toHaveProperty('sessionTtlSeconds');
+    });
 });

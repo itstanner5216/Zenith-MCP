@@ -1,0 +1,8 @@
+ignores:
+  - eslint
+  - prettier
+  - typescript
+ignore-dirs:
+  - dist
+  - build
+  - node_modules

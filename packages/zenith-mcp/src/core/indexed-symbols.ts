@@ -76,7 +76,7 @@ export interface SymbolFilterOptions {
  * data unavailable" and fall back accordingly. Returns an empty array
  * when the file is supported but yields no symbols.
  */
-export async function loadFileSymbols(
+async function loadFileSymbols(
     absPath: string,
     opts: SymbolFilterOptions = {}
 ): Promise<IndexedSymbol[] | null> {

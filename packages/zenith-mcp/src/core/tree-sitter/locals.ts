@@ -8,7 +8,7 @@
 import type { Node } from 'web-tree-sitter';
 import { getCompiledModularQuery } from './runtime.js';
 
-export interface LocalSymbol {
+interface LocalSymbol {
     name: string;
     line: number;    // 1-based
     column: number;

@@ -1,7 +1,7 @@
 # Project Scoping & MCP Roots — Fix Plan
 
 **Date**: 2026-05-23  
-**Status**: Proposed fixes for real-world failures  
+**Status**: Executed (2026-07-14). This plan's proposals shipped in `ProjectContext` + `detection/`. See [project-context-detection-methods.md](project-context-detection-methods.md) for current behavior.  
 **Constraint**: Every fix must be fully automated. Zero user intervention. No flags, no config, no manual directory specification.  
 
 ---
@@ -119,7 +119,7 @@ When `ProjectContext.getRoot()` is called without a `filePath`, it falls through
 // project-context.ts:202-220
 _resolve(): void {
     this._resolved = true;
-    const root = resolveProjectRoot(process.cwd(), {   // ← HERE
+    const root = [the old root-resolution function](process.cwd(), {   // ← HERE
         allowedDirectories: this._ctx.getAllowedDirectories(),
         registryEntries: this._registry.listProjects(),
     });
@@ -153,7 +153,7 @@ _resolve(): void {
     // Try each allowed directory as a candidate — these are the actual
     // project dirs provided by the client via MCP roots or CLI args.
     for (const dir of allowedDirs) {
-        const root = resolveProjectRoot(dir, {
+        const root = [the old root-resolution function](dir, {
             allowedDirectories: allowedDirs,
             registryEntries,
         });
@@ -166,7 +166,7 @@ _resolve(): void {
 
     // Try process.cwd() as a fallback — may work if server was started
     // from inside a project directory.
-    const cwdRoot = resolveProjectRoot(process.cwd(), {
+    const cwdRoot = [the old root-resolution function](process.cwd(), {
         allowedDirectories: allowedDirs,
         registryEntries,
     });
@@ -260,14 +260,14 @@ Same pattern for `validateNewFilePath`: guard the `isPathWithinAllowedDirectorie
 
 ---
 
-## Issue 4: `resolveProjectRoot` Guard Short-Circuits When File Is Outside Allowed Dirs
+## Issue 4: `[the old root-resolution function]` Guard Short-Circuits When File Is Outside Allowed Dirs
 
 ### What Happens
 
 ```typescript
-// project-scope.ts:138-142
+// [the old project-scope module]:138-142
 if (options?.allowedDirectories?.length) {
-    const allowedRoot = getMostSpecificAllowedRoot(absPath, options.allowedDirectories);
+    const allowedRoot = [the old allowed-root guard](absPath, options.allowedDirectories);
     if (!allowedRoot) return setCached(cacheKey, null);  // ← SHORT CIRCUIT
 }
 ```
@@ -281,16 +281,16 @@ Combined with Issue 2 (`_resolve()` uses `process.cwd()`), this guard is what ma
 
 ### Root Cause
 
-[`project-scope.ts:139-141`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/utils/project-scope.ts#L139-L141) — The guard treats "file outside allowed dirs" as "no project" when it should mean "skip to the allowed-dirs-based resolution (Step 3)".
+[`[the old project-scope module]:139-141`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/[the old project-scope module]#L139-L141) — The guard treats "file outside allowed dirs" as "no project" when it should mean "skip to the allowed-dirs-based resolution (Step 3)".
 
 ### Fix
 
 **The guard should skip Steps 1-2 (file-based git/marker detection) but still try Step 3 (allowed-dirs fallback) and Step 4 (registry). The whole point of Step 3 is to handle the case where the file path itself isn't useful.**
 
 ```typescript
-// project-scope.ts — MODIFY resolveProjectRoot (lines 129-175)
+// [the old project-scope module] — MODIFY [the old root-resolution function] (lines 129-175)
 
-export function resolveProjectRoot(filePath: string, options?: ResolveOptions): string | null {
+export function [the old root-resolution function](filePath: string, options?: ResolveOptions): string | null {
     const absPath = path.resolve(filePath);
     const cacheKey = buildCacheKey(absPath, options);
 
@@ -301,7 +301,7 @@ export function resolveProjectRoot(filePath: string, options?: ResolveOptions): 
 
     // Check if the path is within any allowed directory
     const pathInsideAllowed = !options?.allowedDirectories?.length ||
-        !!getMostSpecificAllowedRoot(absPath, options.allowedDirectories);
+        !![the old allowed-root guard](absPath, options.allowedDirectories);
 
     // Steps 1-2 only run when the path is inside allowed directories
     // (or when no allowed directories are configured)
@@ -463,7 +463,7 @@ export function findRepoRoot(filePath: string): string | null {
 ### What Happens
 
 ```typescript
-// project-scope.ts:274-279
+// [the old project-scope module]:274-279
 let ceiling: string;
 try {
     const gitRoot = findRepoRoot(absPath);  // ← SECOND call to findRepoRoot
@@ -480,14 +480,14 @@ try {
 
 ### Root Cause
 
-[`project-scope.ts:275`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/utils/project-scope.ts#L275) — No result sharing between steps.
+[`[the old project-scope module]:275`](file:///home/tanner/Projects/Zenith-MCP/packages/zenith-mcp/src/[the old project-scope module]#L275) — No result sharing between steps.
 
 ### Fix
 
 **Pass the git root from Step 1 into Step 2 as a parameter instead of re-detecting it.**
 
 ```typescript
-// project-scope.ts — MODIFY _resolveFromMarkers signature and resolveProjectRoot
+// [the old project-scope module] — MODIFY _resolveFromMarkers signature and [the old root-resolution function]
 
 function _resolveFromMarkers(absPath: string, gitRoot?: string | null): string | null {
     // Use the pre-detected git root as ceiling instead of re-detecting
@@ -503,7 +503,7 @@ function _resolveFromMarkers(absPath: string, gitRoot?: string | null): string |
     return candidates[0] ?? null;
 }
 
-// In resolveProjectRoot, pass gitRoot to _resolveFromMarkers:
+// In [the old root-resolution function], pass gitRoot to _resolveFromMarkers:
 // Step 1: detect git root (once)
 let rawGitRoot: string | null = null;
 try {
@@ -541,7 +541,7 @@ refresh(): void {
         this._isGlobal = false;
         this._resolved = false;
     }
-    clearProjectScopeCache();
+    [the old cache-clear function]();
     this._syncRegistry();
     if (!this._explicit) {
         this._resolve();
@@ -807,7 +807,7 @@ Resolution Ladder (updated):
 
 ### Implementation
 
-**New file**: `packages/zenith-mcp/src/utils/process-tree.ts`
+**New file**: `packages/zenith-mcp/src/[the old process-tree module]`
 
 ```typescript
 import fs from 'fs';
@@ -922,7 +922,7 @@ export function getProcessTreeCwds(): Array<{ cwd: string; source: string }> {
 // project-context.ts — REPLACE _resolve() (lines 202-220)
 // This REPLACES the fix from Issue 2 — this is the full version.
 
-import { getProcessTreeCwds } from '../utils/process-tree.js';
+import { getProcessTreeCwds } from '../[the old process-tree module]';
 
 _resolve(): void {
     this._resolved = true;
@@ -934,7 +934,7 @@ _resolve(): void {
     // Priority 1: Try each allowed directory (from MCP roots / CLI args).
     // These are the ACTUAL project dirs the client told us about.
     for (const dir of allowedDirs) {
-        const root = resolveProjectRoot(dir, resolveOpts);
+        const root = [the old root-resolution function](dir, resolveOpts);
         if (root) {
             this._boundRoot = root;
             this._isGlobal = false;
@@ -947,7 +947,7 @@ _resolve(): void {
     try {
         const treeCwds = getProcessTreeCwds();
         for (const { cwd, source } of treeCwds) {
-            const root = resolveProjectRoot(cwd, resolveOpts);
+            const root = [the old root-resolution function](cwd, resolveOpts);
             if (root) {
                 console.error(`Project detected via process tree: ${root} (source: ${source})`);
                 this._boundRoot = root;
@@ -966,18 +966,18 @@ _resolve(): void {
 }
 ```
 
-**Also add process-tree walk to `resolveProjectRoot` as Step 0:**
+**Also add process-tree walk to `[the old root-resolution function]` as Step 0:**
 
-The process-tree walk can also be used INSIDE `resolveProjectRoot` itself, so that even per-file resolution benefits from it when the file's own path doesn't match anything.
+The process-tree walk can also be used INSIDE `[the old root-resolution function]` itself, so that even per-file resolution benefits from it when the file's own path doesn't match anything.
 
-Add it to `project-scope.ts`:
+Add it to `[the old project-scope module]`:
 
 ```typescript
-// project-scope.ts — ADD Step 0 inside resolveProjectRoot, before Step 1
+// [the old project-scope module] — ADD Step 0 inside [the old root-resolution function], before Step 1
 
 import { getProcessTreeCwds } from './process-tree.js';
 
-// Inside resolveProjectRoot, after the allowedDirectories guard:
+// Inside [the old root-resolution function], after the allowedDirectories guard:
 
     // Step 0: Try matching the file against process-tree CWDs.
     // If a parent process has a CWD that is a project root containing
@@ -989,7 +989,7 @@ import { getProcessTreeCwds } from './process-tree.js';
             const treeCwds = getProcessTreeCwds();
             for (const { cwd } of treeCwds) {
                 const treeRoot = findRepoRoot(cwd);
-                if (treeRoot && isWithinProject(absPath, treeRoot)) {
+                if (treeRoot && [the old path-containment check](absPath, treeRoot)) {
                     return setCached(cacheKey, clampToAllowed(treeRoot, absPath, options.allowedDirectories) ?? treeRoot);
                 }
             }
@@ -1010,7 +1010,7 @@ PID 3481534   (bash)          cwd: /home/tanner/Projects/Zenith-MCP  ← OR THIS
 PID 3481600   (node)          cwd: /home/tanner  ← server's own cwd (WRONG)
 ```
 
-The process-tree walk reads `/proc/3481534/cwd` → `/home/tanner/Projects/Zenith-MCP`, passes that to `resolveProjectRoot`, which finds the `.git` directory and returns the correct project root. This works even when:
+The process-tree walk reads `/proc/3481534/cwd` → `/home/tanner/Projects/Zenith-MCP`, passes that to `[the old root-resolution function]`, which finds the `.git` directory and returns the correct project root. This works even when:
 - No CLI directory flags were passed
 - MCP roots aren't supported by the client
 - The server's own `process.cwd()` is wrong

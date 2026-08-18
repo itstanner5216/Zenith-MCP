@@ -20,7 +20,6 @@ const CONFIG_INDEX = '../dist/config/index.js';
 const ADAPTERS_INDEX = '../dist/adapters/index.js';
 const RETRIEVAL_INDEX = '../dist/retrieval/index.js';
 const PROJECT_CONTEXT = '../dist/core/project-context.js';
-const ROOTS_UTILS = '../dist/core/roots-utils.js';
 const SERVER_MOD = '../dist/core/server.js';
 
 function makeMockCtx(overrides = {}) {
@@ -281,59 +280,5 @@ describe('validateDirectories', () => {
     it('passes when given an empty array', async () => {
         const mod = await importServer();
         await expect(mod.validateDirectories([])).resolves.toBeUndefined();
-    });
-});
-
-describe('updateAllowedDirectoriesFromRoots', () => {
-    let mod;
-    let ctx;
-    let onRootsChanged;
-    let getValidRootDirectories;
-
-    async function setup(customCtx) {
-        onRootsChanged = vi.fn();
-        getValidRootDirectories = vi.fn(async (roots) =>
-            roots.map(r => r.uri.replace('file://', ''))
-        );
-        const result = await getToolMocks({
-            [PROJECT_CONTEXT]: () => ({ onRootsChanged, getProjectContext: vi.fn(() => ({ initProject: vi.fn(), registerSessionRoot: vi.fn() })) }),
-            [ROOTS_UTILS]: () => ({ getValidRootDirectories }),
-        });
-        mod = result.mod;
-        ctx = customCtx ?? makeMockCtx();
-    }
-
-    it('updates allowed directories from valid roots', async () => {
-        await setup();
-        await mod.updateAllowedDirectoriesFromRoots(
-            [{ uri: 'file:///project/a' }, { uri: 'file:///project/b' }],
-            ctx,
-        );
-        // With the merge behavior (Issue 5): existing dirs + new roots
-        const existing = ctx.getAllowedDirectories();
-        const expectedMerged = [...new Set([...existing, '/project/a', '/project/b'])];
-        expect(ctx.setAllowedDirectories).toHaveBeenCalledWith(expectedMerged);
-    });
-
-    it('calls onRootsChanged with context after updating roots', async () => {
-        await setup();
-        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///project/a' }], ctx);
-        expect(onRootsChanged).toHaveBeenCalledWith(ctx);
-    });
-
-    it('does not call setAllowedDirectories with empty validated roots', async () => {
-        await setup();
-        getValidRootDirectories.mockResolvedValue([]);
-        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///invalid' }], ctx);
-        expect(ctx.setAllowedDirectories).not.toHaveBeenCalled();
-    });
-
-    it('logs when no valid root directories are provided', async () => {
-        const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-        await setup();
-        getValidRootDirectories.mockResolvedValue([]);
-        await mod.updateAllowedDirectoriesFromRoots([{ uri: 'file:///invalid' }], ctx);
-        expect(consoleSpy).toHaveBeenCalledWith('No valid root directories provided by client');
-        consoleSpy.mockRestore();
     });
 });

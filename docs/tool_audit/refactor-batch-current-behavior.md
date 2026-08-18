@@ -10,8 +10,9 @@
 **Tool file:** `packages/zenith-mcp/src/tools/refactor_batch.ts` (1281 lines)
 
 **Key dependencies:**
-- `core/symbol-index.ts` — `getDb()`, `indexDirectory()`, `ensureIndexFresh()`, `indexFile()`, `impactQuery()`, `getSessionId()`, `findRepoRoot()`, `snapshotSymbol()`, `getVersionHistory()`, `getVersionText()`
-- `core/tree-sitter.ts` — `getLangForFile()`, `findSymbol()`, `checkSyntaxErrors()`
+- `core/symbol-index.ts` — `getDb()`, `indexDirectory()`, `ensureIndexFresh()`, `indexFile()`, `impactQuery()`, `getSessionId()`, `snapshotSymbol()`, `getVersionHistory()`, `getVersionText()`
+- `core/tree-sitter.ts` — `getLangForFile()`, `checkSyntaxErrors()`
+- `core/indexed-symbols.ts` — `loadSymbolInFile()` (DB-backed symbol lookup)
 - `core/edit-engine.ts` — `applyEditList()`, `syntaxWarn()`, `Edit` type
 - `core/lib.ts` — `normalizeLineEndings()`
 - `core/db-adapter.ts` — `getFileCount()`, `getFilePaths()`, `findSymbolFiles()`, `getFileHash()`
@@ -118,8 +119,7 @@ This tool maintains in-memory caches keyed by `${repoRoot}::${sessionId}` (or `:
 1. If `!args.target` → return `'target required for query.'` (as content, not thrown).
 2. If `args.fileScope` is provided → `resolvedScope = await ctx.validatePath(args.fileScope)`.
 3. Get allowed directories. If neither `resolvedScope` nor any allowed dir is set → `throw 'No allowed directories configured.'`.
-4. Pick `rootHint = resolvedScope ?? allowedDirs[0]`.
-5. `repoRoot = pc.getRoot(rootHint)`; throw `'No project root.'` if null.
+4. `repoRoot = pc.getWorkingRoot(resolvedScope)` — never null (when no hint is available — i.e. no user-supplied `fileScope` — resolves hint-free; `allowedDirs[0]` is not evidence).
 6. Open the project symbol DB.
 7. Indexing decision:
    - If `getFileCount(db) === 0` OR `!args.fileScope` → run **synchronous** `indexDirectory(db, repoRoot, repoRoot, { maxFiles: 5000 })`.
@@ -152,7 +152,7 @@ This tool maintains in-memory caches keyed by `${repoRoot}::${sessionId}` (or `:
 
 1. If `!args.selection?.length && !args.loadMore` → `'selection required for loadDiff (or use loadMore=true to continue).'`
 2. Require at least one allowed directory → `throw` otherwise.
-3. `repoRoot = pc.getRoot(allowedDirs[0])`; throw if null.
+3. `repoRoot = pc.getWorkingRoot()` — never null, resolves hint-free (no user-supplied path evidence in this mode).
 4. Open the DB; compute session cache key.
 5. Build `workList: WorkItem[]`:
    - **`loadMore=true`**: if no cached `remaining` → `'Nothing to continue.'`. Otherwise `workList = cached.remaining.slice()` and `contextLines = cached.contextLines ?? DEFAULT_CONTEXT`.
@@ -164,7 +164,7 @@ This tool maintains in-memory caches keyed by `${repoRoot}::${sessionId}` (or `:
    - `ctx.validatePath(absPath)` — skip on failure.
    - `fs.readFile` — skip on failure.
    - `getLangForFile(validPath)` — skip if null.
-   - `findSymbol(source, langName, symbol, { kindFilter: 'def' })` — skip if no matches.
+   - `loadSymbolInFile(validPath, symbol, { kindFilter: 'def' })` — DB-backed, indexes on demand; skip if no matches.
    - For each match, push an occurrence record with `{symbol, relFile, absPath, source, sourceLines, line, endLine, workIndex}`.
 7. **Outlier flagging stub:** group occurrences by symbol name. For groups of >= 2, build a `structs` array (currently always empty — there's a `// TODO: Populate actual SymbolStructure from AST` comment) and call `findModal(structs)`. With empty `structs`, `findModal` returns `null`, so the flagging block is effectively a no-op today.
 8. Emit blocks:
@@ -289,7 +289,7 @@ function symbolName2(...) { ... new body ... }
    - String entry: `symName = entry`, `file = undefined`.
    - Object entry: `symName = entry.symbol`, `file = entry.file`.
    - If `file` provided, use as the only candidate file. Else `findSymbolFiles(db, symName, 'def')` to enumerate definitions; if empty, add to `skipped[]`.
-   - For each candidate file: `validatePath`, `readFile`, `getLangForFile`, `findSymbol(... kindFilter: 'def')`. Push every match as a `ReapplyTarget` with `{symbol, absPath, relFile, source, line, endLine}`.
+   - For each candidate file: `validatePath`, `readFile`, `getLangForFile`, `loadSymbolInFile(absPath, symName, { kindFilter: 'def' })`. Push every match as a `ReapplyTarget` with `{symbol, absPath, relFile, source, line, endLine}`.
    - If no matches added across all candidates, push to `skipped[]`.
 6. If `!targets.length` → `'Reapplied 0 targets.${skipped ? ` (skipped ${N})` : ''}'`.
 7. **Outlier gate:** stub (same as `loadDiff`). `structs` is always empty, so `findModal` returns `null` and no outliers are flagged. The `ack` parameter is therefore inactive in practice.
@@ -328,8 +328,7 @@ function symbolName2(...) { ... new body ... }
 1. Require `args.symbol` → `'symbol required for history.'`.
 2. If `args.file` provided: `resolvedFile = await ctx.validatePath(args.file)`.
 3. Require allowed dirs OR a resolved file.
-4. Pick `rootHint = resolvedFile ?? allowedDirs[0]`.
-5. `repoRoot = pc.getRoot(rootHint)`; throw if null.
+4. `repoRoot = pc.getWorkingRoot(resolvedFile)` — never null (when no user-supplied `file` is provided, resolves hint-free).
 6. Open DB; compute session id.
 7. If `resolvedFile`, compute `relPath = path.relative(repoRoot, resolvedFile)`.
 8. `rows = getVersionHistory(db, args.symbol, sessionId, relPath)`.
@@ -353,7 +352,7 @@ function symbolName2(...) { ... new body ... }
 1. Require `args.symbol` → `'symbol required for restore.'`.
 2. Require `args.file` → `'file required for restore.'`.
 3. `absPath = await ctx.validatePath(args.file)`.
-4. `repoRoot = findRepoRoot(absPath) || pc.getRoot()`. Throw if null. **Note:** This uses a different resolution than other branches — `findRepoRoot` directly inspects the path's ancestors for a git/marker root, bypassing the project-context registry.
+4. `repoRoot = pc.getWorkingRoot(absPath)` — never null. Uses the same resolution ladder as every other branch: registry → detection → never null (workspace fallback).
 5. Open DB; compute sessionId; `relPath = path.relative(repoRoot, absPath)`.
 6. If `args.version === undefined`:
    - List versions (same format as `history` but file-filtered): `v${i} ${hash8} ${ISO}` (no file_path column).
@@ -365,7 +364,7 @@ function symbolName2(...) { ... new body ... }
 8. Read current file (with line-ending normalization). On failure → `${symbol}: file not found — ${relPath}.`
 9. **Staleness check:** compare MD5 of current content to `getFileHash(db, relPath)`. If differ, set `fileChanged = true` (used for the warning suffix). Failure silently swallowed.
 10. `langName = getLangForFile(absPath)`. If null → `${symbol}: unsupported language for ${relPath}.`
-11. `matches = await findSymbol(content, langName, args.symbol, { kindFilter: 'def' })`. If empty → `${symbol}: not found in ${relPath}.`
+11. `matches = await loadSymbolInFile(absPath, args.symbol, { kindFilter: 'def' })` — DB-backed via the symbol-index. If empty → `${symbol}: not found in ${relPath}.`
 12. **Disambiguation** (when multiple matches):
     - First try matching by `versionEntry.line`.
     - If not found OR sym still equals `firstMatch`: body-similarity heuristic — compute overlap between each candidate's current body lines and the restored text lines (treating each as a `Set` of trimmed lines). Pick the highest-overlap candidate.
@@ -382,7 +381,7 @@ function symbolName2(...) { ... new body ... }
 - The disambiguation heuristic for multiple-match symbols (overloads, redefinitions) uses naive set-based overlap, not a proper diff or AST comparison. Symbols with similar-but-not-identical bodies may swap.
 - The pre-overwrite snapshot is unconditional on success; even a "restore back to current content" creates a new version row.
 - The staleness check uses `getFileHash(db, relPath)`. This hash is populated by indexing operations; a never-indexed file has no stored hash and the staleness check silently passes.
-- `findRepoRoot` is preferred over `pc.getRoot()` here. The difference is subtle: `findRepoRoot` walks the path's ancestors for `.git` etc., ignoring any explicit project registration. A user with overlapping projects may see different roots between `restore` and `history`.
+- `getWorkingRoot` provides a consistent root across all modes. The restore/history root discrepancy that existed when `restore` used `findRepoRoot` while `history` used the project-context ladder is resolved.
 - Multi-line ending normalization runs ONLY on the read of the current file (`normalizeLineEndings(...)`), not on the restored text. If the snapshot was taken from CRLF content but the current file is LF, the splice produces mixed endings.
 - `syntaxWarn` (the looser per-edit warning) is NOT run; only `checkSyntaxErrors` is. The two produce different output formats.
 
@@ -444,12 +443,12 @@ Unused fields are silently ignored — the Zod `.strict()` constraint catches un
 
 ## Path Validation Behavior
 
-- `query`: `fileScope` is validated (twice). `pc.getRoot(rootHint)` derives the project root.
+- `query`: `fileScope` is validated (twice). `pc.getWorkingRoot(resolvedScope)` derives the project root (never null).
 - `loadDiff`: every `absPath = path.join(repoRoot, filePath)` is validated; failures cause the work item to be silently skipped (no per-item error reporting).
 - `apply`: relies on the cached occurrences' already-validated `absPath`. There is no re-validation per apply call — a file moved out of the allowed dir after `loadDiff` would still be written to.
 - `reapply`: every candidate file is validated per-call; failures silently skip.
 - `history`: `file` is validated only when provided.
-- `restore`: `file` is required and validated. The `repoRoot` resolution uses `findRepoRoot` first (path ancestor walk), then falls back to `pc.getRoot()`.
+- `restore`: `file` is required and validated. `pc.getWorkingRoot(absPath)` uses the registry → detection ladder, consistent with all other modes.
 
 There is no allowed-directory sandbox check beyond what `validatePath` enforces.
 
@@ -483,7 +482,7 @@ There is no allowed-directory sandbox check beyond what `validatePath` enforces.
 
 13. **`reapply` doesn't populate `_payloadCache`** — only the initial `apply` does. A symbol that succeeded via `reapply` cannot itself be re-`reapply`-ed without going through `apply` first.
 
-14. **`restore` uses `findRepoRoot` instead of the project-context ladder** — a project explicitly registered via `pc.initProject(...)` but not at a git/marker boundary may have its restore operate against a different repo root than `history`.
+14. **`restore` now uses the same `getWorkingRoot` ladder as all other modes** — root resolution is consistent across `query`, `loadDiff`, `apply`, `reapply`, `history`, and `restore`.
 
 15. **`restore` version index is array-position, not stable id** — `version: 0` means "oldest currently-stored," not "the first version ever taken." Versions deleted from the DB shift indices.
 
@@ -529,7 +528,7 @@ There is no allowed-directory sandbox check beyond what `validatePath` enforces.
 
 11. **`_retryState` is purely cosmetic** — the "locked" message does not prevent further apply attempts.
 
-12. **Tool returns user-error messages as `content`, not thrown errors** — `target required for query.`, `payload required for apply.`, etc. are returned as text content. Other errors (`'No allowed directories configured.'`, `'No project root.'`) are thrown. Inconsistent error contract.
+12. **Tool returns user-error messages as `content`, not thrown errors** — `target required for query.`, `payload required for apply.`, etc. are returned as text content. Other errors (`'No allowed directories configured.'`) are thrown. Inconsistent error contract. (The `'No project root.'` throw no longer exists — `getWorkingRoot` never returns null.)
 
 13. **`apply` per-group syntax check vs full-file syntax check have different error formats** — per-group: `Syntax error in NAME: line L:C`. Full-file: `Group NAME failed: parse errors at L:C, L:C`. Two paths to the same conceptual failure.
 
@@ -547,7 +546,7 @@ There is no allowed-directory sandbox check beyond what `validatePath` enforces.
 
 20. **`restore` pre-overwrite snapshot uses `sym.line` from current file** — saved as the snapshot's line, but the actual identity of `sym` may be a different overload than the originally snapshotted one. The version chain becomes mixed.
 
-21. **`restore` `findRepoRoot` vs `pc.getRoot` divergence** — see Params #14.
+21. **`restore` root resolution is now consistent** — uses `getWorkingRoot` like every other mode; see Params #14.
 
 22. **`restore` newline normalization is inconsistent** — current file is normalized; restored text is not. Mixed-ending splices possible.
 

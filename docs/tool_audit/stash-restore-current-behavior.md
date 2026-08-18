@@ -90,7 +90,7 @@ created_at  INTEGER       -- Date.now() at insert
 
 Database location is resolved via `getProjectContext(ctx).getStashDb(filePath)`:
 
-1. Resolve the project root via the project-context ladder (git → MCP roots → markers → registry → global).
+1. Resolve the project root via the project-context tier ladder (explicit → registry → detected → global). Detected tier uses git→marker boundary detection clamped to allowed directories.
 2. If a project root is detected, open the project-scoped DB and report `isGlobal: false`.
 3. Otherwise open the global DB at `~/.zenith-mcp/` and report `isGlobal: true`.
 
@@ -245,7 +245,7 @@ This means the third call to `consumeAttempt` returns `false` AND deletes the st
    - On error, attempt `fs.unlink(tempPath)` (errors silently swallowed) and re-throw.
 9. `clearStash(ctx, args.stashId, entry.filePath ?? undefined)` — the stash is removed only on a successful real apply.
 10. Snapshot symbols (best-effort):
-    - Resolve repo root via `getProjectContext(ctx).getRoot(validPath)` (falls back to `path.dirname(validPath)`).
+    - Resolve repo root via `getProjectContext(ctx).getWorkingRoot(validPath)` — never null (falls back to `~/.zenith-mcp/workspace` when no project is detected).
     - Open the project DB.
     - For each `pendingSnapshot` returned by `applyEditList`, call `snapshotSymbol(db, snap.symbol, relPath, snap.originalText, sessionId, snap.line)` if `snap.symbol` is defined.
     - Any exception is silently swallowed (`/* best-effort */`).

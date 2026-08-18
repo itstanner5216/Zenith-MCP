@@ -25,7 +25,8 @@
     "lint": "turbo run lint"
   },
   "devDependencies": {
+    "depcheck": "^1.4.7",
     "turbo": "^2.10.10",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   }
 }

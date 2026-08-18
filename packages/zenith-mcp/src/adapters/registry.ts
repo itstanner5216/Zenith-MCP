@@ -77,12 +77,6 @@ export function configureRegistry(backupDir?: string) {
   _registry = new AdapterRegistry(backupDir);
 }
 
-export function getAdapter(toolName: string) {
-  return _getRegistry().get(toolName);
-}
-
 export function listAdapters() {
   return _getRegistry().all();
 }
-
-export { AdapterRegistry };

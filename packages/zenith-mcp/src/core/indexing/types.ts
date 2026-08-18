@@ -36,7 +36,7 @@ export interface AnchorRow {
     text: string;               // first ~80 chars of the anchor line
 }
 
-export interface ImportRow {
+interface ImportRow {
     module: string;
     importedNames: string[];
     line: number;
@@ -54,7 +54,7 @@ export interface ImportBindingRow {
     column: number;
 }
 
-export interface InjectionRow {
+interface InjectionRow {
     hostLang: string;
     injectedLang: string;
     startLine: number;

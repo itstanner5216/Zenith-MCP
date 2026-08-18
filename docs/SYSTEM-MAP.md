@@ -1,6 +1,6 @@
 # POLARIS — System Map
 
-*A one-page navigation aid for the AST-intelligence layer in `packages/zenith-mcp`. Verified against on-disk code on 2026-07-15, not transcribed from the plan. Plan: `docs/concepts/AST_INTELLIGENCE_SYNTHESIS.md`; latest handoff: `docs/SESSION-HANDOFF-2026-07-15.md`.*
+*A one-page navigation aid for the AST-intelligence layer in `packages/zenith-mcp`. Verified against on-disk code on 2026-07-15, not transcribed from the plan.*
 
 > **Build state at map time — mid Wave 2.3.** Waves 0–1 (oracles, v4 repairs, store identity) and the Wave 2 contract freeze are **complete**. The session factory (Task 2.1) and the v4 read set (Task 2.2) are **built and proven**. Of Task 2.3, the evidence lattice, the literal floor, and the **first composer (`fileModel`) are done**; the other six question composers are stubbed — they run the full entry protocol then return a typed `unavailable` (`question_kind_unsupported`). Anything marked **(planned)** below is not yet composed. Note: `db-adapter.ts` and `polaris-v4-reads.test.js` were edited hours *after* the 01:55 handoff, so the on-disk state is slightly ahead of that document.
 
