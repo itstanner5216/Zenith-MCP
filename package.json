@@ -24,7 +24,8 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "changeset": "changeset",
-    "version-packages": "changeset version"
+    "version-packages": "changeset version",
+    "release:publish": "pnpm publish -r --access public --no-git-checks"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",
