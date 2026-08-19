@@ -22,9 +22,12 @@
     "start": "pnpm --filter zenith-mcp run start",
     "start:http": "pnpm --filter zenith-mcp run start:http",
     "dev": "turbo run dev",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "changeset": "changeset",
+    "version-packages": "changeset version"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.0",
     "turbo": "^2.10.5",
     "typescript": "^6.0.3"
   }
