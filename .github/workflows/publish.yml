@@ -10,9 +10,8 @@ name: Publish to npm
 #   - Manual (workflow_dispatch) with a selectable mode + optional dry-run.
 #   - Automatic on GitHub Release publish -> always a production publish.
 #
-# Authentication uses npm Trusted Publishing (OIDC) by default, which requires
-# no long-lived secrets. If a repository secret named NPM_TOKEN is present it is
-# used instead as a fallback.
+# Authentication: a single repository secret named NPM_TOKEN (an npm "Automation"
+# access token). Granular/classic automation tokens both work.
 
 on:
   workflow_dispatch:
@@ -49,7 +48,6 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write # required for npm Trusted Publishing (OIDC)
 
 env:
   NODE_VERSION: "26"
@@ -59,7 +57,6 @@ jobs:
   publish:
     name: Publish (${{ github.event_name == 'release' && 'production' || inputs.mode }})
     runs-on: ubuntu-latest
-    environment: npm-publish
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,10 +93,6 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
 
-      # Trusted Publishing needs a recent npm CLI (>= 11.5.1).
-      - name: Upgrade npm (for Trusted Publishing / OIDC)
-        run: npm install --global npm@latest
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -118,6 +111,11 @@ jobs:
           DRY_RUN: ${{ steps.params.outputs.dry_run }}
         run: |
           set -euo pipefail
+
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is not set. Add it under Settings -> Secrets and variables -> Actions." >&2
+            exit 1
+          fi
 
           echo "Mode:      $MODE"
           echo "Dist-tag:  $DIST_TAG"
