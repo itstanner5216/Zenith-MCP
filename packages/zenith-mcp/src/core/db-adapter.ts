@@ -394,6 +394,8 @@ export function initStashSchema(conn: DbConnection): void {
             attempts INTEGER DEFAULT 0,
             created_at INTEGER
         );
+        CREATE INDEX IF NOT EXISTS idx_stash_created_at ON stash(created_at);
+        CREATE INDEX IF NOT EXISTS idx_stash_file_id ON stash(file_path, id DESC);
     `);
 }
 
@@ -769,12 +771,69 @@ export function deleteStash(conn: DbConnection, id: number): void {
         .run(id);
 }
 
+/** Delete stash rows older than the supplied timestamp. */
+export function pruneExpiredStash(conn: DbConnection, beforeTimestamp: number): number {
+    return Number(prepareOrCache(conn, 'DELETE FROM stash WHERE created_at <= ?')
+        .run(beforeTimestamp).changes);
+}
+
+export type StashListQuery = {
+    filePath?: string;
+    type?: string;
+    sinceTimestamp?: number;
+    /** 1-based inclusive newest-first start position. Defaults to 1. */
+    start?: number;
+    /** 1-based inclusive newest-first end position. Defaults to 10. */
+    end?: number;
+};
+
+export type StashRow = {
+    id: number;
+    type: string;
+    file_path: string | null;
+    payload: string;
+    attempts: number;
+    created_at: number;
+};
+
 /**
- * SQL: SELECT * FROM stash ORDER BY id
+ * Query stash rows newest-first using source-true 1-based inclusive positions.
+ * No zero-based offset coordinate is exposed or accepted anywhere in this API.
  */
-export function listStash(conn: DbConnection): { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[] {
-    return prepareOrCache(conn, 'SELECT * FROM stash ORDER BY id')
-        .all() as { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[];
+export function listStash(conn: DbConnection, query: StashListQuery = {}): StashRow[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (query.filePath) {
+        clauses.push('file_path = ?');
+        params.push(query.filePath);
+    }
+    if (query.type) {
+        clauses.push('type = ?');
+        params.push(query.type);
+    }
+    if (query.sinceTimestamp !== undefined) {
+        clauses.push('created_at > ?');
+        params.push(query.sinceTimestamp);
+    }
+
+    const start = Math.max(1, Math.trunc(query.start ?? 1));
+    const end = Math.max(start, Math.trunc(query.end ?? 10));
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const sql = `
+        WITH ranked AS (
+            SELECT
+                id, type, file_path, payload, attempts, created_at,
+                ROW_NUMBER() OVER (ORDER BY id DESC) AS position
+            FROM stash${where}
+        )
+        SELECT id, type, file_path, payload, attempts, created_at
+        FROM ranked
+        WHERE position BETWEEN ? AND ?
+        ORDER BY position
+    `;
+
+    return prepareOrCache(conn, sql).all(...params, start, end) as StashRow[];
 }
 
 // ---------------------------------------------------------------------------

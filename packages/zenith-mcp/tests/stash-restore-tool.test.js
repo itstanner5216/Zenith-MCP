@@ -28,6 +28,10 @@ function mkCtx(repoDir, sessionId) {
             if (path.isAbsolute(p)) return p;
             return path.join(repoDir, p);
         },
+        validateNewFilePath: async (p) => {
+            if (path.isAbsolute(p)) return p;
+            return path.join(repoDir, p);
+        },
     };
 }
 
@@ -127,7 +131,7 @@ describe('stashRestore — list mode', () => {
         expect(t).not.toContain('[edit]');
     });
 
-    it('routes list to correct project DB via file parameter', async () => {
+    it('uses file as an exact path filter while routing to the correct project DB', async () => {
         const core = await importStashCore();
         core.stashEntry(ctx, 'edit', path.join(dir, 'target.js'), { edits: [], failedIndices: [] });
         core.stashEntry(ctx, 'edit', path.join(dir, 'other.js'), { edits: [], failedIndices: [] });
@@ -135,7 +139,7 @@ describe('stashRestore — list mode', () => {
         const result = await handler({ mode: 'list', file: path.join(dir, 'target.js') });
         const t = text(result);
         expect(t).toContain('target.js');
-        expect(t).toContain('other.js');
+        expect(t).not.toContain('other.js');
     });
 
     it('returns empty when type filter matches nothing', async () => {
@@ -153,6 +157,64 @@ describe('stashRestore — list mode', () => {
 
         const result = await handler({ mode: 'list' });
         expect(text(result)).toContain('attempt 1/2');
+    });
+
+    it('defaults to the 10 newest entries when range is omitted', async () => {
+        const core = await importStashCore();
+        for (let i = 0; i < 30; i++) {
+            core.stashEntry(ctx, 'edit', path.join(dir, `f-${i}.js`), { edits: [], failedIndices: [] });
+        }
+
+        const result = await handler({ mode: 'list' });
+        const t = text(result);
+        const rows = t.split('\n').filter(line => /^#\d+ /.test(line));
+        expect(rows).toHaveLength(10);
+        expect(t).toContain('f-29.js');
+        expect(t).toContain('f-20.js');
+        expect(t).not.toContain('f-19.js');
+    });
+
+    it('accepts a numeric range as newest N entries', async () => {
+        const core = await importStashCore();
+        for (let i = 0; i < 30; i++) {
+            core.stashEntry(ctx, 'edit', path.join(dir, `f-${i}.js`), { edits: [], failedIndices: [] });
+        }
+
+        const result = await handler({ mode: 'list', range: 15 });
+        const t = text(result);
+        const rows = t.split('\n').filter(line => /^#\d+ /.test(line));
+        expect(rows).toHaveLength(15);
+        expect(t).toContain('f-29.js');
+        expect(t).toContain('f-15.js');
+        expect(t).not.toContain('f-14.js');
+    });
+
+    it('accepts a 1-based inclusive positional range like 10-23', async () => {
+        const core = await importStashCore();
+        for (let i = 0; i < 30; i++) {
+            core.stashEntry(ctx, 'edit', path.join(dir, `f-${i}.js`), { edits: [], failedIndices: [] });
+        }
+
+        const result = await handler({ mode: 'list', range: '10-23' });
+        const t = text(result);
+        const rows = t.split('\n').filter(line => /^#\d+ /.test(line));
+        expect(rows).toHaveLength(14);
+        expect(t).toContain('f-20.js');
+        expect(t).toContain('f-7.js');
+        expect(t).not.toContain('f-21.js');
+        expect(t).not.toContain('f-6.js');
+    });
+
+    it('does not list entries older than 48 hours', async () => {
+        const core = await importStashCore();
+        const now = 1_800_000_000_000;
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        core.stashEntry(ctx, 'edit', path.join(dir, 'expired.js'), { edits: [], failedIndices: [] });
+        clock.mockReturnValue(now + (48 * 60 * 60 * 1000));
+
+        const result = await handler({ mode: 'list' });
+        expect(text(result)).toMatch(/empty/i);
+        clock.mockRestore();
     });
 });
 
