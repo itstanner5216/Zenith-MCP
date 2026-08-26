@@ -55,7 +55,7 @@ jobs:
         # your codebase is analyzed, see https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/codeql-code-scanning-for-compiled-languages
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v7.0.0
+      uses: actions/checkout@v7
 
     # Add any setup steps before running the `github/codeql-action/init` action.
     # This includes steps like installing compilers or runtimes (`actions/setup-node`
@@ -64,18 +64,18 @@ jobs:
     #   uses: actions/setup-example@v1
 
     # Initializes the CodeQL tools for scanning.
+        # Exclude legacy/archived test stubs and test result artifacts
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
-
-        # Exclude legacy/archived test stubs and test result artifacts
-        paths-ignore:
-          - '**/tests/_legacy_old_arch/**'
-          - '**/_legacy_old_arch/**'
-          - 'test-results/**'
-          - '**/*.junit.xml'
+        config: |
+          paths-ignore:
+            - '**/tests/_legacy_old_arch/**'
+            - '**/_legacy_old_arch/**'
+            - 'test-results/**'
+            - '**/*.junit.xml'
         # If you wish to specify custom queries, you can do so here or in a config file.
         # By default, queries listed here will override any specified in a config file.
         # Prefix the list here with "+" to use these queries and those in the config file.
