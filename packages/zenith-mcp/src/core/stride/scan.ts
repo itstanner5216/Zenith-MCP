@@ -34,7 +34,15 @@ export const K_NULL = 5;
 
 export const KIND_NAMES: readonly StrideKind[] = ['object', 'array', 'string', 'number', 'boolean', 'null'];
 
-/** Events the scanner emits, in document order. Offsets are absolute. */
+/**
+ * Events the scanner emits, in document order. Offsets are absolute.
+ *
+ * `depth` counts open containers, including the enclosing one that an interior
+ * scan names through `scanStructure`'s `inside` argument. So the root of a
+ * whole-document scan is at depth 0, and a direct member of the container an
+ * interior scan was pointed inside is at depth 1 whether that container is an
+ * object or an array.
+ */
 export interface ScanVisitor {
     /** A container opened. `start` is the offset of `{` or `[`. */
     enter(kind: 0 | 1, start: number, depth: number): void;
@@ -82,6 +90,15 @@ const P_STRING = 1;
 const P_TOKEN = 2;
 
 /**
+ * `starts` entry for the one level an interior scan is told it begins inside.
+ * That container's opening bracket lies before `from`, so the scan holds no
+ * offset for it and must never emit one. Negative on purpose: were it ever to
+ * reach a span it would be an obvious impossibility rather than a plausible
+ * byte 0.
+ */
+const START_BEFORE_RANGE = -1;
+
+/**
  * Scan [from, to) of `source`, emitting structural events to `visitor`.
  *
  * The scanner accepts the JSON grammar and additionally tolerates trailing
@@ -89,12 +106,30 @@ const P_TOKEN = 2;
  * than throwing — a truncated or concatenated document is still worth
  * navigating up to the point it stops making sense, and I1 is preserved
  * because everything emitted before that point is real.
+ *
+ * `inside` names the kind of the container the range begins INSIDE — `K_OBJECT`
+ * or `K_ARRAY` — for the interior scans resolve.ts and shape.ts run across a
+ * container's own span from `container.start + 1`. That range excludes the
+ * opening bracket, so with an empty stack the scanner has no container at all:
+ * an object's member names arrive as string scalars instead of `key` events
+ * (classifying a string as a name needs a known-object level beneath it), the
+ * second member is rejected as a trailing value (the first completed a root),
+ * and the container's own closing brace is a mismatched bracket. `inside`
+ * supplies that one level, and supplies its objectness, which no byte at
+ * `from - 1` can reveal — the checkpoint routes in resolve.ts begin part-way
+ * into a container, where the preceding byte is a comma or a colon rather than
+ * a bracket.
+ *
+ * Omitted — the default — the range begins at a value's first byte, the stack
+ * starts empty, and the first value is the root at depth 0. That is the
+ * whole-document scan index.ts runs, unchanged in every respect.
  */
 export function scanStructure(
     source: StrideSource,
     from: number,
     to: number,
     visitor: ScanVisitor,
+    inside?: 0 | 1,
 ): ScanResult {
     // Container stack. Parallel typed arrays, grown geometrically; one object
     // per nesting level would make deep documents allocate per level.
@@ -105,8 +140,31 @@ export function scanStructure(
     let counts = new Float64Array(cap);     // children seen so far
     let keySeen: Array<Set<string> | null> = new Array<Set<string> | null>(cap).fill(null);
 
-    let depth = 0;
-    let maxDepth = 0;
+    // The stack level the range opens at: one when `inside` handed us an
+    // enclosing container, zero when the range begins at a value's first byte.
+    // It is a floor rather than only a starting count, because no level below it
+    // was opened by this scan and so no level below it may be reported. Named in
+    // full because the chunk callback below binds `base` to a byte offset, and a
+    // depth compared against a byte offset would typecheck perfectly.
+    const baseDepth = inside === undefined ? 0 : 1;
+    if (inside !== undefined) {
+        const obj = inside === K_OBJECT;
+        isObj[0] = obj ? 1 : 0;
+        // At `container.start + 1` an object's interior begins where a member
+        // name begins, so the first string at this level is a key. That makes a
+        // member-name boundary the precondition for scanning an object
+        // interior: entered at a value boundary instead, every name would pair
+        // with the preceding member's value.
+        awaitKey[0] = obj ? 1 : 0;
+        starts[0] = START_BEFORE_RANGE;
+        // No duplicate-key set for this level: the check needs every key of the
+        // object, and an interior scan may begin part-way in, so a clean result
+        // here would be a claim the scan cannot support.
+        keySeen[0] = null;
+    }
+
+    let depth = baseDepth;
+    let maxDepth = baseDepth;
     let duplicateKeys = false;
 
     let phase = P_VALUE;
@@ -246,7 +304,12 @@ export function scanStructure(
                     }
                     depth--;
                     keySeen[d] = null;
-                    visitor.exit(wantObj ? 0 : 1, starts[d] ?? at, at + 1, d, counts[d] ?? 0);
+                    // A level below `baseDepth` was opened before `from`. The
+                    // scan holds no start offset for it, so it closes silently
+                    // rather than emit a span it would have to invent (I1).
+                    if (d >= baseDepth) {
+                        visitor.exit(wantObj ? 0 : 1, starts[d] ?? at, at + 1, d, counts[d] ?? 0);
+                    }
                     if (depth > 0) counts[depth - 1] = (counts[depth - 1] ?? 0) + 1;
                     else rootDone = true;
                     i++;
@@ -296,12 +359,14 @@ export function scanStructure(
     }
 
     // Unclosed containers: close them at the end of input so their children
-    // stay addressable, and record the truncation honestly.
-    if (depth > 0 && errorAt < 0) {
+    // stay addressable, and record the truncation honestly. The floor is
+    // `baseDepth` rather than 0 because an interior scan's own enclosing level
+    // being open at `to` is that scan's premise, not a truncation it found.
+    if (depth > baseDepth && errorAt < 0) {
         errorAt = starts[depth - 1] ?? consumed;
         errorMessage = `Unclosed container opened at byte ${errorAt}; document ends at ${consumed}.`;
     }
-    while (depth > 0) {
+    while (depth > baseDepth) {
         const d = depth - 1;
         depth--;
         visitor.exit(isObj[d] === 1 ? 0 : 1, starts[d] ?? 0, consumed, d, counts[d] ?? 0);
