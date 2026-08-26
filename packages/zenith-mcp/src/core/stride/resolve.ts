@@ -232,7 +232,6 @@ export class Resolver {
         let pendingKeyStart = -1;
         let pendingKeyEnd = -1;
         let found: Member | null = null;
-        let openStart = -1;
 
         const take = (start: number, end: number, kind: StrideKind): boolean => {
             const key = isObject && pendingKeyStart >= 0
@@ -248,19 +247,20 @@ export class Resolver {
             return false;
         };
 
-        scanStructure(source, fromByte, node.end, {
-            enter(_k, start, d) { if (d === 1) openStart = start; },
-            exit(kind, start, end, d) {
-                if (d === 1) {
-                    void openStart;
-                    if (take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
-                }
-            },
-            key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
-            scalar(kind, start, end, d) {
-                if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
-            },
-        }, isObject ? 0 : 1);
+        try {
+            scanStructure(source, fromByte, node.end, {
+                enter() { /* the span is taken on exit, when the end is known */ },
+                exit(kind, start, end, d) {
+                    if (d === 1 && take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
+                },
+                key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
+                scalar(kind, start, end, d) {
+                    if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
+                },
+            }, isObject ? 0 : 1);
+        } catch (e) {
+            rethrowUnlessStop(e);
+        }
 
         return found;
     }
@@ -316,16 +316,20 @@ export class Resolver {
             return out.length >= limit;
         };
 
-        scanStructure(source, fromByte, node.end, {
-            enter() { /* the span is taken on exit, when the end is known */ },
-            exit(kind, start, end, d) {
-                if (d === 1 && take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
-            },
-            key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
-            scalar(kind, start, end, d) {
-                if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
-            },
-        }, isObject ? 0 : 1);
+        try {
+            scanStructure(source, fromByte, node.end, {
+                enter() { /* the span is taken on exit, when the end is known */ },
+                exit(kind, start, end, d) {
+                    if (d === 1 && take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
+                },
+                key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
+                scalar(kind, start, end, d) {
+                    if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
+                },
+            }, isObject ? 0 : 1);
+        } catch (e) {
+            rethrowUnlessStop(e);
+        }
 
         return out;
     }
@@ -392,16 +396,20 @@ export class Resolver {
             return false;
         };
 
-        scanStructure(source, fromByte, node.end, {
-            enter() { /* taken on exit */ },
-            exit(kind, start, end, d) {
-                if (d === 1 && take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
-            },
-            key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
-            scalar(kind, start, end, d) {
-                if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
-            },
-        }, isObject ? 0 : 1);
+        try {
+            scanStructure(source, fromByte, node.end, {
+                enter() { /* taken on exit */ },
+                exit(kind, start, end, d) {
+                    if (d === 1 && take(start, end, kind === K_OBJECT ? 'object' : 'array')) throw STOP;
+                },
+                key(start, end, d) { if (d === 1) { pendingKeyStart = start; pendingKeyEnd = end; } },
+                scalar(kind, start, end, d) {
+                    if (d === 1 && take(start, end, KIND_NAMES[kind] ?? 'null')) throw STOP;
+                },
+            }, isObject ? 0 : 1);
+        } catch (e) {
+            rethrowUnlessStop(e);
+        }
 
         return found;
     }
@@ -413,6 +421,20 @@ export class Resolver {
  * branch in the hot loop; a sentinel throw costs nothing until it happens.
  */
 const STOP = Symbol('stride.stop');
+
+/**
+ * Absorb the early-exit sentinel and nothing else.
+ *
+ * The walks above stop by throwing STOP out of a scanner visitor, so every one
+ * of them has to be driven inside a `try`. Absorbing the whole `catch` instead
+ * would swallow the two throws that must reach the caller: a `StrideError` from
+ * the source (an over-long slice, a closed file descriptor) and any genuine
+ * scanner failure. Identity against the module-private symbol is the narrowest
+ * possible test — nothing outside this file can produce that value.
+ */
+function rethrowUnlessStop(e: unknown): void {
+    if (e !== STOP) throw e;
+}
 
 function toMember(k: ChildRef, ordinal: number): Member {
     return { ordinal, key: k.key, start: k.start, end: k.end, kind: k.kind, node: k.node };
