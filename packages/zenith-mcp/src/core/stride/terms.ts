@@ -37,10 +37,12 @@
 // bytes; emitting fewer costs answers.
 //
 // Indexed reads below use `?? 0` where the index is provably inside the array —
-// a loop bound or a 0..255 byte value used against a 256-entry table. Zero is
-// also the fail-safe value for both tables (class 0 = "not part of a token"),
-// so an impossible read would end a token rather than silently extend it into
-// neighbouring bytes.
+// a loop bound, or a 0..255 byte value used against the 256-entry class table.
+// Zero is also the fail-safe value in both roles: byte 0x00 and class 0 both
+// mean "not part of a token", so an impossible read would end a token rather
+// than silently extend it into neighbouring bytes. No read here carries a
+// count, an offset or a frequency, so there is no arithmetic for a fallback to
+// corrupt.
 // ---------------------------------------------------------------------------
 
 import { unescapeToken, tokenToIndex } from './pointer.js';
