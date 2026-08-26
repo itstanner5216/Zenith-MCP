@@ -26,32 +26,65 @@
 // A scalar inside a record is found by scanning that record — a few hundred
 // bytes — not by having stored it during the build.
 //
+// Two decisions govern the build, and they are decisions about separate things:
+//
+//   "Do I record my own members one by one?"  Asked of a container about
+//   itself, answered by its width against DENSE_CHILD_LIMIT. Yes up to that
+//   width; past it the members are reduced to checkpoints.
+//
+//   "Does this member get an index node of its own?"  Asked of the PARENT when
+//   the member is entered. Only a parent that is recording densely can answer
+//   "which node is my member i" — resolve.ts reads a member's node id out of
+//   its parent's dense table and has no other route to it — so a node under a
+//   bulk container could never be found again. That is what makes descent stop
+//   at a bulk collection instead of following it all the way down, and it is
+//   the difference between an index that is a small fraction of the document
+//   (I6) and one that is twice its size.
+//
+// A container only proves itself bulk part-way through, by which time its first
+// members already have nodes. Those become unreachable the moment the dense
+// table is dropped, so they are given back — see `discardDescendants`.
+//
 // Nothing here allocates an object per JSON value. Node handles are views
 // materialised on demand from parallel typed arrays.
 // ---------------------------------------------------------------------------
 
 import {
-    STRIDE_DEFAULT, STRIDE_MAX, STRIDE_RESCAN_BYTES,
+    DENSE_CHILD_LIMIT, STRIDE_DEFAULT, STRIDE_MAX, STRIDE_RESCAN_BYTES,
     type StrideKind,
 } from './types.js';
 import type { StrideSource } from './source.js';
 import { scanStructure, KIND_NAMES, K_OBJECT, K_ARRAY } from './scan.js';
 
-/** A container is indexed member-by-member up to this width. */
-const EAGER_CHILD_LIMIT = 1024;
-
-/** Hard ceiling on eagerly indexed nodes, so index memory cannot run away. */
-const MAX_EAGER_NODES = 250_000;
+/**
+ * Hard ceiling on indexed nodes, so index memory cannot run away even on a
+ * document that is genuinely structure all the way down. Hitting it sets
+ * `truncatedIndex`: a capped structural index is an incomplete one, and saying
+ * so is the difference between bounded memory (I6) and silently lost coverage
+ * (I7).
+ */
+const MAX_INDEX_NODES = 250_000;
 
 /** Checkpoints kept per wide container. The stride doubles rather than exceed it. */
 const CHECKPOINT_CAP = 16_384;
 
-/** Members of a wide object that get a hash-table entry. Beyond this, lookup scans. */
+/**
+ * Members of wide objects that get a hash-table entry, summed over the whole
+ * document. 262,144 entries at 12 bytes each is a 3.1 MB ceiling whatever the
+ * document does, so this table can never be the thing that breaks I6. Past the
+ * cap a lookup falls back to a walk: slower, and still exhaustive.
+ */
 const KEY_INDEX_CAP = 262_144;
 
 export const F_DENSE = 1;
 export const F_CHECKPOINT = 2;
-/** Set when the container is wider than the key hash table could cover. */
+/**
+ * Set when the key hash table ran out of room before it could cover every
+ * member that qualifies for an entry. Members the table deliberately skips —
+ * those a lookup can walk to within STRIDE_RESCAN_BYTES of the container's
+ * first byte — are not partiality; they are the table declining to pay for a
+ * shortcut past a distance the stride already covers.
+ */
 const F_PARTIAL_KEYS = 4;
 
 /** Everything the index knows about one indexed node, materialised on demand. */
@@ -289,6 +322,12 @@ export class StrideIndex {
     /**
      * Byte offset of the checkpoint at or before member `ordinal`, with the
      * ordinal that offset actually names. Returns null when `id` has none.
+     *
+     * The offset is a RESUMABLE MEMBER BOUNDARY: for an array element the first
+     * byte of the value, for an object member the first byte of the NAME. An
+     * object interior scanned from a value boundary pairs every name with the
+     * preceding member's value, so this boundary is what a caller may hand to
+     * `scanStructure`, and nothing else is.
      */
     checkpointBefore(id: number, ordinal: number): { offset: number; ordinal: number } | null {
         const off = this.nCkOff[id] ?? -1;
@@ -303,7 +342,8 @@ export class StrideIndex {
 
     /**
      * The last checkpoint at or before byte offset `at`, for mapping a raw
-     * match position back to the member that contains it.
+     * match position back to the member that contains it. Same boundary
+     * guarantee as `checkpointBefore`.
      */
     checkpointAtByte(id: number, at: number): { offset: number; ordinal: number } | null {
         const off = this.nCkOff[id] ?? -1;
@@ -322,8 +362,10 @@ export class StrideIndex {
 
     /**
      * Ordinal of a member of a wide object by name, or -1. Uses the hash table
-     * when the object is covered by it; the caller falls back to a scan when
-     * `hasPartialKeys` is set and this misses.
+     * when the object is covered by it; the caller falls back to a walk when
+     * this misses, as it does by design for every member lying within
+     * STRIDE_RESCAN_BYTES of the container's first byte — reaching those by
+     * walking is the re-scan the stride was tuned against, not a penalty.
      */
     lookupWideKey(id: number, key: string): number {
         const off = this.nKeyIdxOff[id] ?? -1;
@@ -359,10 +401,17 @@ export class StrideIndex {
         // closes, at which point they are committed as dense children or
         // reduced to checkpoints.
         interface Frame {
+            /** -1 when this container is outside the skeleton and has no node. */
             nodeId: number;
             kind: number;
             start: number;
-            eager: boolean;          // ancestors permit member-by-member indexing
+            /**
+             * Still recording one entry per member. This is the container's own
+             * question — "record my members densely?" — and nothing else. Whether
+             * a member gets an index node of its own is a separate question, put
+             * to the PARENT at `enter`.
+             */
+            dense: boolean;
             count: number;           // members seen so far
             // dense staging
             dStart: number[];
@@ -371,6 +420,12 @@ export class StrideIndex {
             dNode: number[];
             dKeyOff: number[];
             dKeyLen: number[];
+            /**
+             * Resumable scan boundary of each staged member — see `addChild`.
+             * Only the reduction to checkpoints reads it, and only the entries
+             * it keeps survive the container proving itself bulk.
+             */
+            dBoundary: number[];
             // checkpoint staging
             ckOffsets: number[];
             ckStride: number;
@@ -381,11 +436,23 @@ export class StrideIndex {
             // pending member name for the next value
             pendKeyOff: number;
             pendKeyLen: number;
+            /**
+             * Byte offset of the opening quote of the pending member name, or -1
+             * when no name is pending. This — not the value offset beside it — is
+             * where a resumed scan of an object has to start.
+             */
+            pendNameStart: number;
+            // Table sizes when this container was entered. The scan is a single
+            // forward pass, so every row allocated after these marks and before
+            // this container closes belongs to one of its descendants.
+            markNode: number;
+            markChild: number;
+            markCk: number;
+            markKi: number;
+            markKey: number;
         }
 
         const stack: Frame[] = [];
-        let pendingKeyOff = 0;
-        let pendingKeyLen = 0;
         let truncated = false;
 
         const appendKey = (raw: Buffer): { off: number; len: number } => {
@@ -427,42 +494,68 @@ export class StrideIndex {
         const result = scanStructure(source, 0, source.size, {
             enter(kind, start, depth) {
                 const parentFrame = stack.length > 0 ? stack[stack.length - 1] : undefined;
-                const parentEager = parentFrame === undefined ? true : parentFrame.eager;
-                const eager = parentEager && idx.nCounter < MAX_EAGER_NODES;
-                if (!eager && idx.nCounter >= MAX_EAGER_NODES) truncated = true;
+                // The second of the two decisions, and it belongs to the parent:
+                // a member's node id is only ever read out of its parent's dense
+                // table, so a node whose parent has stopped recording densely can
+                // never be reached again and would cost 70 bytes to say nothing.
+                // "The parent is still structure" is therefore the whole
+                // predicate — and it is what halts descent at a bulk collection
+                // rather than indexing every record inside it.
+                const parentIndexes = parentFrame === undefined
+                    ? true
+                    : parentFrame.nodeId >= 0 && parentFrame.dense;
+                const indexed = parentIndexes && idx.nCounter < MAX_INDEX_NODES;
+                // Only a node the ceiling actually refused is a truncation. A
+                // node the skeleton never wanted is the design working, and
+                // reporting that as truncation would make `truncatedIndex` mean
+                // nothing on every large document.
+                if (parentIndexes && !indexed) truncated = true;
 
                 let nodeId = -1;
-                if (eager) {
+                if (indexed) {
                     const parentId = parentFrame === undefined ? -1 : parentFrame.nodeId;
                     const slot = parentFrame === undefined ? -1 : parentFrame.count;
                     nodeId = newNode(kind, start, depth, parentId, slot);
                 }
                 stack.push({
-                    nodeId, kind, start, eager,
+                    nodeId, kind, start,
+                    // A container with no node has nowhere to commit member rows
+                    // to, so it records nothing at all; its members are recovered
+                    // by scanning its own span on demand.
+                    dense: nodeId >= 0,
                     count: 0,
-                    dStart: [], dEnd: [], dKind: [], dNode: [], dKeyOff: [], dKeyLen: [],
+                    dStart: [], dEnd: [], dKind: [], dNode: [], dKeyOff: [], dKeyLen: [], dBoundary: [],
                     ckOffsets: [], ckStride: STRIDE_DEFAULT,
                     kiHash: [], kiOrd: [], partialKeys: false,
-                    pendKeyOff: 0, pendKeyLen: 0,
+                    pendKeyOff: 0, pendKeyLen: 0, pendNameStart: -1,
+                    markNode: idx.nCounter, markChild: idx.cCounter, markCk: idx.ckCounter,
+                    markKi: idx.kiCounter, markKey: idx.keyLen,
                 });
-                pendingKeyOff = 0;
-                pendingKeyLen = 0;
             },
 
             key(start, end) {
                 const frame = stack.length > 0 ? stack[stack.length - 1] : undefined;
-                if (frame === undefined) return;
-                // A member name is only stored when somebody can use it: the
-                // container is eagerly indexed, or it is a wide object whose
-                // hash table still has room.
-                if (!frame.eager) { pendingKeyLen = 0; return; }
-                if (frame.count < EAGER_CHILD_LIMIT) {
+                if (frame === undefined || frame.nodeId < 0) return;
+                // Recorded whether or not the name itself is kept: the name's
+                // first byte is the only offset this object can be re-entered
+                // from (see `addChild`).
+                frame.pendNameStart = start;
+                if (frame.dense) {
                     const k = appendKey(source.slice(start, end));
-                    pendingKeyOff = k.off;
-                    pendingKeyLen = k.len;
                     frame.pendKeyOff = k.off;
                     frame.pendKeyLen = k.len;
-                } else if (idx.kiCounter + frame.kiHash.length < KEY_INDEX_CAP && frame.kiHash.length < KEY_INDEX_CAP) {
+                    return;
+                }
+                frame.pendKeyLen = 0;
+                // Past the dense limit a name is worth keeping only as a hash,
+                // and only where the hash saves work. A by-name lookup that
+                // misses this table walks from the container's first byte, and
+                // STRIDE_RESCAN_BYTES is the walk distance the stride is already
+                // tuned to accept. A member inside that distance therefore costs
+                // no more to reach by walking than by seeking, so an entry for it
+                // would be 12 bytes that buy nothing.
+                if (start - frame.start < STRIDE_RESCAN_BYTES) return;
+                if (idx.kiCounter + frame.kiHash.length < KEY_INDEX_CAP && frame.kiHash.length < KEY_INDEX_CAP) {
                     // Wide object: keep a hash, not the name. Names are re-read
                     // from the source when a lookup needs to confirm a hit.
                     const raw = source.slice(start, end);
@@ -470,10 +563,8 @@ export class StrideIndex {
                     const b = Buffer.from(text, 'utf8');
                     frame.kiHash.push(hashBytes(b, 0, b.length));
                     frame.kiOrd.push(frame.count);
-                    pendingKeyLen = 0;
                 } else {
                     frame.partialKeys = true;
-                    pendingKeyLen = 0;
                 }
             },
 
@@ -506,41 +597,87 @@ export class StrideIndex {
             },
         });
 
+        /**
+         * Keep every other checkpoint, doubling the stride. Exact rather than
+         * approximate: the offsets that remain still name members a fixed number
+         * of ordinals apart. Coarsening is the only reduction available, because
+         * an offset that was never recorded cannot be recovered without another
+         * pass over the document.
+         */
+        function halveCheckpoints(offsets: number[]): number[] {
+            return offsets.filter((_at, i) => i % 2 === 0);
+        }
+
+        /**
+         * Give back every index row allocated since `frame` was entered, apart
+         * from the frame's own node.
+         *
+         * A container that has just proved itself bulk is about to drop its dense
+         * table, and that table was the only route to its members' node ids. So
+         * every node, dense row, checkpoint, hash entry and name byte recorded
+         * for its subtree is unreachable from here on, and an unreachable row is
+         * pure footprint. Truncating the counters back to the entry marks is
+         * exact rather than approximate because the scan is a single forward
+         * pass: this container's ancestors staged their rows before its own node
+         * existed, its siblings have not been scanned yet, and its descendants
+         * are all closed. Nothing outside the discarded range refers into it.
+         */
+        function discardDescendants(frame: Frame): void {
+            idx.nCounter = frame.markNode;
+            idx.cCounter = frame.markChild;
+            idx.ckCounter = frame.markCk;
+            idx.kiCounter = frame.markKi;
+            idx.keyLen = frame.markKey;
+        }
+
         function addChild(frame: Frame, start: number, end: number, kind: number, nodeId: number): void {
             const ordinal = frame.count;
             frame.count++;
-            if (!frame.eager) return;
+            if (frame.nodeId < 0) return;
 
-            if (frame.count <= EAGER_CHILD_LIMIT && frame.ckOffsets.length === 0) {
+            // Where a scan that resumes at this member has to begin. For an
+            // ARRAY element that is the value's first byte. For an OBJECT member
+            // it is the first byte of the NAME, because an object interior
+            // entered at a value boundary reads that value as a name and the
+            // following name as its value: the member vanishes and every member
+            // after it is reported under its neighbour's name. A pending name
+            // missing here means the document is malformed at this point, which
+            // `errorAt` already reports, and the value's own start is then the
+            // only offset that exists.
+            const boundary = frame.kind === K_OBJECT && frame.pendNameStart >= 0
+                ? frame.pendNameStart
+                : start;
+            frame.pendNameStart = -1;
+
+            if (frame.dense) {
                 frame.dStart.push(start);
                 frame.dEnd.push(end);
                 frame.dKind.push(kind);
                 frame.dNode.push(nodeId);
                 frame.dKeyOff.push(frame.pendKeyOff);
                 frame.dKeyLen.push(frame.kind === K_OBJECT ? frame.pendKeyLen : 0);
+                frame.dBoundary.push(boundary);
                 frame.pendKeyLen = 0;
-                if (frame.count === EAGER_CHILD_LIMIT) {
-                    // The container just proved itself a bulk collection. Drop
-                    // the per-member table, keep every stride-th offset, and
-                    // stop treating descendants as skeleton.
-                    for (let i = 0; i < frame.dStart.length; i += frame.ckStride) {
-                        frame.ckOffsets.push(frame.dStart[i] ?? 0);
-                    }
+                if (frame.count > DENSE_CHILD_LIMIT) {
+                    // The container just proved itself a bulk collection rather
+                    // than structure. Reduce the per-member table to every
+                    // stride-th boundary and stop lending nodes to members —
+                    // including the ones already lent, which this table was the
+                    // only way to find.
+                    frame.ckOffsets = frame.dBoundary.filter((_at, i) => i % frame.ckStride === 0);
                     frame.dStart = []; frame.dEnd = []; frame.dKind = [];
                     frame.dNode = []; frame.dKeyOff = []; frame.dKeyLen = [];
-                    frame.eager = frame.kind === K_OBJECT || frame.kind === K_ARRAY;
+                    frame.dBoundary = [];
+                    frame.dense = false;
+                    discardDescendants(frame);
                 }
                 return;
             }
 
             // Checkpoint mode.
-            if (ordinal % frame.ckStride === 0) frame.ckOffsets.push(start);
+            if (ordinal % frame.ckStride === 0) frame.ckOffsets.push(boundary);
             if (frame.ckOffsets.length > CHECKPOINT_CAP) {
-                // Halve the resolution rather than grow without bound: keeping
-                // every other checkpoint doubles the stride and is exact.
-                const halved: number[] = [];
-                for (let i = 0; i < frame.ckOffsets.length; i += 2) halved.push(frame.ckOffsets[i] ?? 0);
-                frame.ckOffsets = halved;
+                frame.ckOffsets = halveCheckpoints(frame.ckOffsets);
                 frame.ckStride *= 2;
             }
             frame.pendKeyLen = 0;
@@ -548,7 +685,7 @@ export class StrideIndex {
 
         function commit(frame: Frame, id: number): void {
             const bytes = (idx.nEnd[id] ?? 0) - (idx.nStart[id] ?? 0);
-            if (frame.ckOffsets.length === 0) {
+            if (frame.dense) {
                 // Dense: one entry per member.
                 const n = frame.dStart.length;
                 if (n > 0) {
@@ -560,14 +697,16 @@ export class StrideIndex {
                     idx.cNode = growI32(idx.cNode, idx.cCounter);
                     idx.cKeyOff = growU32(idx.cKeyOff, idx.cCounter);
                     idx.cKeyLen = growU32(idx.cKeyLen, idx.cCounter);
-                    for (let i = 0; i < n; i++) {
-                        idx.cStart[base + i] = frame.dStart[i] ?? 0;
-                        idx.cEnd[base + i] = frame.dEnd[i] ?? 0;
-                        idx.cKind[base + i] = frame.dKind[i] ?? 0;
-                        idx.cNode[base + i] = frame.dNode[i] ?? -1;
-                        idx.cKeyOff[base + i] = frame.dKeyOff[i] ?? 0;
-                        idx.cKeyLen[base + i] = frame.dKeyLen[i] ?? 0;
-                    }
+                    // Bulk copy rather than element by element: a per-element
+                    // read of a staging array is `number | undefined`, and every
+                    // default that could be given for a missing span would be a
+                    // fabricated offset. `set` needs no default at all.
+                    idx.cStart.set(frame.dStart, base);
+                    idx.cEnd.set(frame.dEnd, base);
+                    idx.cKind.set(frame.dKind, base);
+                    idx.cNode.set(frame.dNode, base);
+                    idx.cKeyOff.set(frame.dKeyOff, base);
+                    idx.cKeyLen.set(frame.dKeyLen, base);
                     idx.nChildOff[id] = base;
                     idx.nChildLen[id] = n;
                 }
@@ -584,19 +723,15 @@ export class StrideIndex {
             if (count > 0) {
                 const perMember = Math.max(1, bytes / count);
                 const wanted = Math.max(1, Math.min(STRIDE_MAX, Math.round(STRIDE_RESCAN_BYTES / perMember)));
-                // Only ever coarsen: the offsets that were not recorded cannot
-                // be recovered without another pass over the document.
                 while (stride < wanted && frame.ckOffsets.length > 1) {
-                    const halved: number[] = [];
-                    for (let i = 0; i < frame.ckOffsets.length; i += 2) halved.push(frame.ckOffsets[i] ?? 0);
-                    frame.ckOffsets = halved;
+                    frame.ckOffsets = halveCheckpoints(frame.ckOffsets);
                     stride *= 2;
                 }
             }
             const base = idx.ckCounter;
             idx.ckCounter += frame.ckOffsets.length;
             idx.ck = growF64(idx.ck, idx.ckCounter);
-            for (let i = 0; i < frame.ckOffsets.length; i++) idx.ck[base + i] = frame.ckOffsets[i] ?? 0;
+            idx.ck.set(frame.ckOffsets, base);
             idx.nCkOff[id] = base;
             idx.nCkLen[id] = frame.ckOffsets.length;
             idx.nCkStride[id] = stride;
@@ -607,17 +742,12 @@ export class StrideIndex {
                 idx.kiCounter += frame.kiHash.length;
                 idx.kiHash = growU32(idx.kiHash, idx.kiCounter);
                 idx.kiOrd = growF64(idx.kiOrd, idx.kiCounter);
-                for (let i = 0; i < frame.kiHash.length; i++) {
-                    idx.kiHash[kb + i] = frame.kiHash[i] ?? 0;
-                    idx.kiOrd[kb + i] = frame.kiOrd[i] ?? 0;
-                }
+                idx.kiHash.set(frame.kiHash, kb);
+                idx.kiOrd.set(frame.kiOrd, kb);
                 idx.nKeyIdxOff[id] = kb;
                 idx.nKeyIdxLen[id] = frame.kiHash.length;
             }
         }
-
-        void pendingKeyOff;
-        void pendingKeyLen;
 
         idx.statsValue = {
             nodes: idx.nCounter,
