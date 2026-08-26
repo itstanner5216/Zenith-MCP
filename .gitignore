@@ -60,3 +60,23 @@ lcov.info
 .turbo
 
 /review/
+# Archives / backups — sandbox artifacts must never land in git
+*.zip
+*.tar.xz
+*.tar.gz
+*.bak
+
+# per-machine AI-tooling + vestigial CI configs — deliberately off git (2026-08-17)
+.chunk/
+.claude/settings.json
+.codex/
+.circleci/
+
+# session working notes — registry lives here, never ships
+review/
+
+# live-box local artifacts
+*.env
+*.npmrc
+*.codeqlignore
+*.mcp

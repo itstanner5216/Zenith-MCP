@@ -1,6 +1,6 @@
 // db-adapter-v1-tables.test.js
 //
-// Tests for all new db-adapter functions added in this PR (v0 → v3 schema
+// Tests for all new db-adapter functions added in this PR (v0 → v4 schema
 // migration, symbol extended columns, symbol_structures, anchors, imports,
 // injections, local_scopes, edge resolution, getFileFacts, getSchemaVersion).
 //
@@ -70,9 +70,9 @@ function addSymbol(db, opts = {}) {
 // ---------------------------------------------------------------------------
 
 describe('getSchemaVersion', () => {
-    it('returns 3 after initSymbolSchema (v0 → v3 migrations applied)', () => {
+    it('returns 4 after initSymbolSchema (v0 → v4 migrations applied)', () => {
         const db = makeDb();
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         closeDb(db);
     });
 
@@ -82,9 +82,9 @@ describe('getSchemaVersion', () => {
         // baseline) rather than throwing.
         const freshDb = openMemoryDb();
         expect(getSchemaVersion(freshDb)).toBe(0);
-        // After running the migration on the same connection it must report 3.
+        // After running the migration on the same connection it must report 4.
         initSymbolSchema(freshDb);
-        expect(getSchemaVersion(freshDb)).toBe(3);
+        expect(getSchemaVersion(freshDb)).toBe(4);
         closeDb(freshDb);
     });
 });
@@ -643,21 +643,21 @@ describe('getFileFacts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// initSymbolSchema idempotency (v3 migration can run twice safely)
+// initSymbolSchema idempotency (v4 migration can run twice safely)
 // ---------------------------------------------------------------------------
 
-describe('initSymbolSchema v3 migration idempotency', () => {
+describe('initSymbolSchema v4 migration idempotency', () => {
     it('calling initSymbolSchema twice does not throw', () => {
         const db = openMemoryDb();
         expect(() => {
             initSymbolSchema(db);
             initSymbolSchema(db);
         }).not.toThrow();
-        expect(getSchemaVersion(db)).toBe(3);
+        expect(getSchemaVersion(db)).toBe(4);
         closeDb(db);
     });
 
-    it('v1/v2/v3 tables exist after migration (symbol_structures, anchors, imports, import_bindings, injections, local_scopes)', () => {
+    it('v1/v2/v3/v4 tables and columns exist after migration', () => {
         const db = makeDb();
         // Verify tables exist by inserting a file + symbol and writing to each new table
         addFile(db, 'probe.ts');

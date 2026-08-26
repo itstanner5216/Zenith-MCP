@@ -97,19 +97,63 @@ describe('stash core — CRUD operations', () => {
         expect(entry).toBeNull();
     });
 
-    it('listStash returns all entries', () => {
+    it('listStash filters exactly by file path when one is supplied', () => {
         modules.stashEntry(ctx, 'edit', path.join(repoDir, 'a.js'), { edits: [] });
         modules.stashEntry(ctx, 'write', path.join(repoDir, 'b.js'), { content: 'hello' });
 
         const { entries } = modules.listStash(ctx, path.join(repoDir, 'a.js'));
-        expect(entries.length).toBeGreaterThanOrEqual(2);
-        expect(entries.some(e => e.type === 'edit')).toBe(true);
-        expect(entries.some(e => e.type === 'write')).toBe(true);
+        expect(entries).toHaveLength(1);
+        expect(entries[0].type).toBe('edit');
+        expect(entries[0].filePath).toBe(path.join(repoDir, 'a.js'));
     });
 
     it('listStash returns empty entries for clean repo', () => {
         const { entries } = modules.listStash(ctx, path.join(repoDir, 'clean.js'));
         expect(entries).toHaveLength(0);
+    });
+
+    it('listStash defaults to the 10 newest entries and supports positional slices', () => {
+        for (let i = 0; i < 30; i++) {
+            modules.stashEntry(ctx, 'edit', path.join(repoDir, `f-${i}.js`), { edits: [] });
+        }
+
+        const latest = modules.listStash(ctx);
+        expect(latest.entries).toHaveLength(10);
+        expect(latest.entries[0].filePath).toBe(path.join(repoDir, 'f-29.js'));
+        expect(latest.entries[9].filePath).toBe(path.join(repoDir, 'f-20.js'));
+
+        const slice = modules.listStash(ctx, undefined, { start: 10, end: 23 });
+        expect(slice.entries).toHaveLength(14);
+        expect(slice.entries[0].filePath).toBe(path.join(repoDir, 'f-20.js'));
+        expect(slice.entries[13].filePath).toBe(path.join(repoDir, 'f-7.js'));
+    });
+
+    it('treats entries older than 48 hours as expired on direct lookup', () => {
+        const now = 1_800_000_000_000;
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        const filePath = path.join(repoDir, 'expired.js');
+        const id = modules.stashEntry(ctx, 'edit', filePath, { edits: [] });
+        clock.mockReturnValue(now + (48 * 60 * 60 * 1000));
+
+        expect(modules.getStashEntry(ctx, id, filePath)).toBeNull();
+        clock.mockRestore();
+    });
+
+    it('one-shot cleanup physically removes expired rows after stash activation', async () => {
+        const now = 1_800_000_000_000;
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        const filePath = path.join(repoDir, 'expired-physical.js');
+        modules.stashEntry(ctx, 'edit', filePath, { edits: [] });
+        clock.mockReturnValue(now + (48 * 60 * 60 * 1000));
+
+        modules.scheduleStashCleanup(ctx, filePath);
+        await new Promise(resolve => setImmediate(resolve));
+
+        const pc = modules.getProjectContext(ctx);
+        const { db } = pc.getStashDb(filePath);
+        const adapter = await import('../dist/core/db-adapter.js');
+        expect(adapter.listStash(db, { filePath })).toHaveLength(0);
+        clock.mockRestore();
     });
 
     it('consumeAttempt returns false for nonexistent id', () => {

@@ -5,11 +5,8 @@ import { expandTilde } from './schema.js';
 import {
     DbConnection,
     openDb,
-    closeDb as adapterCloseDb,
     initBackupSchema,
     insertBackup,
-    getBackup,
-    pruneExpiredBackups
 } from '../core/db-adapter.js';
 
 // ---------------------------------------------------------------------------
@@ -34,14 +31,6 @@ function getDb(): DbConnection {
     initBackupSchema(conn);
     _db = conn;
     return conn;
-}
-
-/** Exported for test teardown / clean shutdown. */
-export function closeDb(): void {
-    if (_db !== null) {
-        adapterCloseDb(_db);
-        _db = null;
-    }
 }
 
 // withDb signature preserved so callers are unchanged.
@@ -103,40 +92,5 @@ export function backupFile(
             backupId: rowId,
             message: `Backup stored in SQLite (row ${rowId}). Expires in 24 hours.`,
         };
-    });
-}
-
-// ---------------------------------------------------------------------------
-// restoreBackup — retrieve backup content by ID
-// ---------------------------------------------------------------------------
-
-export function restoreBackup(backupId: string, mode: 'file' | 'sqlite'): string {
-    if (mode === 'file') {
-        if (!existsSync(backupId)) {
-            throw new Error(`Backup file not found at ${backupId}`);
-        }
-        return readFileSync(backupId, 'utf-8');
-    }
-
-    // mode === 'sqlite'
-    return withDb((conn) => {
-        const row = getBackup(conn, Number(backupId));
-
-        if (!row) {
-            throw new Error(`No SQLite backup found for row ID ${backupId}`);
-        }
-
-        return row.backup_content;
-    });
-}
-
-// ---------------------------------------------------------------------------
-// cleanupExpiredBackups — purge rows past their TTL
-// ---------------------------------------------------------------------------
-
-export function cleanupExpiredBackups(): number {
-    return withDb((conn) => {
-        const now = new Date().toISOString();
-        return pruneExpiredBackups(conn, now);
     });
 }

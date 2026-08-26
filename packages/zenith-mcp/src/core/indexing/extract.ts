@@ -97,12 +97,32 @@ export async function extractParsedFile(
             if (s.kind === 'def') {
                 const slice = bodySlice(source, s.line, s.endLine);
                 bHash = bodyHash(slice);
-                // Parent containment: smallest enclosing def
+                // Parent containment: smallest STRICTLY enclosing AST definition.
+                // Line spans alone cannot distinguish same-line nesting: for
+                // `type T = { p: string }`, both defs occupy line 1 and the old
+                // symmetric row test made T and p each other's parent. The cached
+                // selected nodes provide exact byte containment; only fall back to
+                // rows when a grammar did not produce a selectable definition node.
                 let bestParent: SymbolInfo | null = null;
                 let bestSpan = Infinity;
+                const childNodes = defNodes.get(`${s.name}:${s.line}:${s.column}`);
                 for (const d of defs) {
                     if (d === s) continue;
-                    if (d.line <= s.line && d.endLine >= s.endLine) {
+                    const parentNodes = defNodes.get(`${d.name}:${d.line}:${d.column}`);
+                    if (childNodes && parentNodes) {
+                        const strictlyContains =
+                            parentNodes.span.startIndex <= childNodes.span.startIndex
+                            && parentNodes.span.endIndex >= childNodes.span.endIndex
+                            && (parentNodes.span.startIndex < childNodes.span.startIndex
+                                || parentNodes.span.endIndex > childNodes.span.endIndex);
+                        if (!strictlyContains) continue;
+                        const span = parentNodes.span.endIndex - parentNodes.span.startIndex;
+                        if (span < bestSpan) { bestSpan = span; bestParent = d; }
+                    } else {
+                        const strictlyContains =
+                            d.line <= s.line && d.endLine >= s.endLine
+                            && (d.line < s.line || d.endLine > s.endLine);
+                        if (!strictlyContains) continue;
                         const span = d.endLine - d.line;
                         if (span < bestSpan) { bestSpan = span; bestParent = d; }
                     }
@@ -153,7 +173,7 @@ export async function extractParsedFile(
                 // indexes `lines` by the 0-based a.line — the row the anchor sits on.
                 const lineText = lines[a.line];
                 const text = lineText ? lineText.slice(0, 80) : '';
-                anchors.push({ parentSymbolKey: key, kind: a.kind, line: a.line + 1, priority: a.priority, text });
+                anchors.push({ parentSymbolKey: key, kind: a.kind, line: a.line + 1, endLine: a.endLine + 1, priority: a.priority, text });
             }
         }
 
@@ -213,7 +233,7 @@ export async function extractParsedFile(
                     if (span < bestSpan) { bestSpan = span; bestDef = def; }
                 }
             }
-            if (bestDef) edges.push({ containerDefKey: `${bestDef.name}:${bestDef.line}:${bestDef.column}`, referencedName: ref.name });
+            if (bestDef) edges.push({ containerDefKey: `${bestDef.name}:${bestDef.line}:${bestDef.column}`, referencedName: ref.name, referenceKind: ref.type });
         }
 
         return { relPath, hash, lang: langName, symbols, structures, anchors, imports, importBindings, injections: injectionRows, locals, edges };

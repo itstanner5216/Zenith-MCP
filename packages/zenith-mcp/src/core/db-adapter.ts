@@ -244,9 +244,9 @@ export function initSymbolSchema(conn: DbConnection): void {
             );
             CREATE INDEX IF NOT EXISTS idx_injections_file ON injections(file_path);
             CREATE INDEX IF NOT EXISTS idx_edges_callee ON edges(callee_symbol_id);
-            -- v3 remediation: project_roots is also a v1 addition (project-DB registry,
-            -- not the dormant initGlobalSchema variant). Idempotent CREATE; safe if a
-            -- prior partial run already added it.
+            -- v3 remediation: project_roots is also a v1 addition (project-DB
+            -- registry). Idempotent CREATE; safe if a prior partial run already
+            -- added it.
             CREATE TABLE IF NOT EXISTS project_roots (
                 root_path TEXT PRIMARY KEY,
                 name TEXT,
@@ -308,6 +308,31 @@ export function initSymbolSchema(conn: DbConnection): void {
             db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(3);
         });
     }
+
+    if (currentVersion < 4) {
+        // v3 → v4: preserve the reference kind already emitted by the tag queries,
+        // plus the full source range already computed for every control-flow anchor.
+        // Existing rows receive honest neutral backfills, and stored hashes are
+        // invalidated so normal freshness checks repopulate exact facts.
+        runTransaction(conn, () => {
+            const columnMigrations = [
+                "ALTER TABLE edges ADD COLUMN reference_kind TEXT NOT NULL DEFAULT 'unknown'",
+                'ALTER TABLE anchors ADD COLUMN end_line INTEGER',
+            ];
+            for (const sql of columnMigrations) {
+                try {
+                    db.exec(sql);
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw e;
+                }
+            }
+            db.exec("UPDATE edges SET reference_kind = COALESCE(reference_kind, 'unknown')");
+            db.exec('UPDATE anchors SET end_line = COALESCE(end_line, line)');
+            db.exec('UPDATE files SET hash = NULL');
+            db.prepare('INSERT INTO schema_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version').run(4);
+        });
+    }
 }
 
 /**
@@ -357,19 +382,6 @@ function normalizeSchemaVersionTable(db: DatabaseSync): number {
 }
 
 /**
- * Creates table: project_roots(root_path TEXT PRIMARY KEY, name TEXT, created_at INTEGER)
- */
-export function initGlobalSchema(conn: DbConnection): void {
-    handle(conn).exec(`
-        CREATE TABLE IF NOT EXISTS project_roots (
-            root_path TEXT PRIMARY KEY,
-            name TEXT,
-            created_at INTEGER
-        );
-    `);
-}
-
-/**
  * Creates table: stash(id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, file_path TEXT, payload TEXT NOT NULL, attempts INTEGER DEFAULT 0, created_at INTEGER)
  */
 export function initStashSchema(conn: DbConnection): void {
@@ -382,6 +394,8 @@ export function initStashSchema(conn: DbConnection): void {
             attempts INTEGER DEFAULT 0,
             created_at INTEGER
         );
+        CREATE INDEX IF NOT EXISTS idx_stash_created_at ON stash(created_at);
+        CREATE INDEX IF NOT EXISTS idx_stash_file_id ON stash(file_path, id DESC);
     `);
 }
 
@@ -438,14 +452,6 @@ export function getFilesByPrefix(conn: DbConnection, prefix: string): { path: st
 }
 
 /**
- * SQL: SELECT * FROM files
- */
-export function getAllFiles(conn: DbConnection): { path: string; hash: string; last_indexed: number }[] {
-    return prepareOrCache(conn, 'SELECT * FROM files')
-        .all() as { path: string; hash: string; last_indexed: number }[];
-}
-
-/**
  * SQL: DELETE FROM files
  */
 export function deleteAllFiles(conn: DbConnection): void {
@@ -468,15 +474,6 @@ export function getFileCount(conn: DbConnection): number {
 export function getFilePaths(conn: DbConnection): { path: string }[] {
     return prepareOrCache(conn, 'SELECT path FROM files')
         .all() as { path: string }[];
-}
-
-/**
- * SQL: SELECT * FROM files WHERE path = ?
- */
-export function getFile(conn: DbConnection, filePath: string): { path: string; hash: string; last_indexed: number } | null {
-    const row = prepareOrCache(conn, 'SELECT * FROM files WHERE path = ?')
-        .get(filePath) as { path: string; hash: string; last_indexed: number } | undefined;
-    return row ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,49 +570,6 @@ export function getCalleesFiltered(conn: DbConnection, symbolName: string, fileP
 }
 
 /**
- * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?
- */
-export function findSymbolDetails(conn: DbConnection, name: string, kind: string): { file_path: string; line: number; end_line: number; kind: string; type: string | null }[] {
-    return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ?')
-        .all(name, kind) as { file_path: string; line: number; end_line: number; kind: string; type: string | null }[];
-}
-
-/**
- * SQL: SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?
- */
-export function findSymbolDetailsScoped(conn: DbConnection, name: string, kind: string, filePrefix: string): { file_path: string; line: number; end_line: number; kind: string; type: string | null }[] {
-    return prepareOrCache(conn, 'SELECT file_path, line, end_line, kind, type FROM symbols WHERE name = ? AND kind = ? AND file_path LIKE ?')
-        .all(name, kind, filePrefix) as { file_path: string; line: number; end_line: number; kind: string; type: string | null }[];
-}
-
-/**
- * Returns definition symbols for structural comparison.
- * SQL base: SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def'
- * If type is provided: adds AND type = ?
- * If filePrefix is provided: adds AND file_path LIKE ?
- * Always ends with ORDER BY name
- */
-export function findStructuralCandidates(
-    conn: DbConnection,
-    opts?: { type?: string; filePrefix?: string }
-): { name: string; file_path: string; line: number; end_line: number }[] {
-    let sql = "SELECT name, file_path, line, end_line FROM symbols WHERE kind = 'def'";
-    const params: any[] = [];
-    if (opts?.type !== undefined) {
-        sql += " AND type = ?";
-        params.push(opts.type);
-    }
-    if (opts?.filePrefix !== undefined) {
-        sql += " AND file_path LIKE ?";
-        params.push(opts.filePrefix);
-    }
-    sql += " ORDER BY name";
-    return handle(conn)
-        .prepare(sql)
-        .all(...params) as { name: string; file_path: string; line: number; end_line: number }[];
-}
-
-/**
  * Get all symbols (defs and refs) for a single file with the full
  * tree-sitter symbol shape: name, kind, type, line, endLine, column.
  *
@@ -665,116 +619,11 @@ export function findSymbolsByNameInFile(
 // ---------------------------------------------------------------------------
 
 /**
- * SQL: INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)
+ * SQL: INSERT INTO edges (container_def_id, referenced_name, reference_kind) VALUES (?, ?, ?)
  */
-export function insertEdge(conn: DbConnection, containerDefId: number, referencedName: string): void {
-    prepareOrCache(conn, 'INSERT INTO edges (container_def_id, referenced_name) VALUES (?, ?)')
-        .run(containerDefId, referencedName);
-}
-
-/**
- * Get call graph edges between blocks in a single file.
- * Returns edges suitable for SageRank AST-aware ranking.
- * 
- * For each definition in the file that calls another definition in the same file,
- * returns an edge with:
- *   - from: index of caller in blockNames array
- *   - to: index of callee in blockNames array  
- *   - weight: 1.0 (or call count if multiple calls)
- *   - kind: 'call' | 'reference'
- * 
- * Also tracks external references (symbols called but not defined in this file).
- * 
- * SQL: 
- *   SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count
- *   FROM edges e
- *   JOIN symbols caller ON caller.id = e.container_def_id
- *   WHERE caller.file_path = ? AND caller.kind = 'def'
- *   GROUP BY caller.name, e.referenced_name
- */
-export function getFileBlockEdges(
-    conn: DbConnection,
-    filePath: string,
-    blockNames: string[]
-): {
-    edges: Array<{ from: number; to: number; weight: number; kind: 'call' | 'reference' }>;
-    externalRefs: Array<{ from: number; name: string; count: number }>;
-    stats: { internalEdges: number; externalRefs: number; totalCalls: number };
-} {
-    // Build name → index lookup
-    const nameToIndex = new Map<string, number>();
-    for (let i = 0; i < blockNames.length; i++) {
-        const blockName = blockNames[i];
-        if (blockName !== undefined) nameToIndex.set(blockName, i);
-    }
-
-    // Query all edges where the caller is a definition in this file
-    const rows = prepareOrCache(
-        conn,
-        `SELECT caller.name AS caller_name, e.referenced_name AS callee_name, COUNT(e.id) AS call_count
-         FROM edges e
-         JOIN symbols caller ON caller.id = e.container_def_id
-         WHERE caller.file_path = ? AND caller.kind = 'def'
-         GROUP BY caller.name, e.referenced_name`
-    ).all(filePath) as { caller_name: string; callee_name: string; call_count: number }[];
-
-    const edges: Array<{ from: number; to: number; weight: number; kind: 'call' | 'reference' }> = [];
-    const externalRefs: Array<{ from: number; name: string; count: number }> = [];
-    let totalCalls = 0;
-
-    for (const row of rows) {
-        const fromIdx = nameToIndex.get(row.caller_name);
-        const toIdx = nameToIndex.get(row.callee_name);
-        totalCalls += row.call_count;
-
-        if (fromIdx === undefined) {
-            // Caller not in our block list (shouldn't happen but be defensive)
-            continue;
-        }
-
-        if (toIdx !== undefined) {
-            // Internal edge: both caller and callee are in our blocks
-            edges.push({
-                from: fromIdx,
-                to: toIdx,
-                weight: row.call_count, // Raw call count; sqrt damping is TOON's responsibility
-                kind: 'call'
-            });
-        } else {
-            // External reference: callee is not defined in this file
-            externalRefs.push({
-                from: fromIdx,
-                name: row.callee_name,
-                count: row.call_count
-            });
-        }
-    }
-
-    return {
-        edges,
-        externalRefs,
-        stats: {
-            internalEdges: edges.length,
-            externalRefs: externalRefs.length,
-            totalCalls
-        }
-    };
-}
-
-/**
- * Get definitions in a file with their line ranges.
- * Used to map tree-sitter blocks to symbol names.
- * 
- * SQL: SELECT id, name, line, end_line, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line
- */
-export function getFileDefinitions(
-    conn: DbConnection,
-    filePath: string
-): Array<{ id: number; name: string; line: number; endLine: number; type: string | null }> {
-    return prepareOrCache(
-        conn,
-        `SELECT id, name, line, end_line AS endLine, type FROM symbols WHERE file_path = ? AND kind = 'def' ORDER BY line`
-    ).all(filePath) as Array<{ id: number; name: string; line: number; endLine: number; type: string | null }>;
+export function insertEdge(conn: DbConnection, containerDefId: number, referencedName: string, referenceKind: string = 'unknown'): void {
+    prepareOrCache(conn, 'INSERT INTO edges (container_def_id, referenced_name, reference_kind) VALUES (?, ?, ?)')
+        .run(containerDefId, referencedName, referenceKind);
 }
 
 /**
@@ -922,12 +771,69 @@ export function deleteStash(conn: DbConnection, id: number): void {
         .run(id);
 }
 
+/** Delete stash rows older than the supplied timestamp. */
+export function pruneExpiredStash(conn: DbConnection, beforeTimestamp: number): number {
+    return Number(prepareOrCache(conn, 'DELETE FROM stash WHERE created_at <= ?')
+        .run(beforeTimestamp).changes);
+}
+
+export type StashListQuery = {
+    filePath?: string;
+    type?: string;
+    sinceTimestamp?: number;
+    /** 1-based inclusive newest-first start position. Defaults to 1. */
+    start?: number;
+    /** 1-based inclusive newest-first end position. Defaults to 10. */
+    end?: number;
+};
+
+export type StashRow = {
+    id: number;
+    type: string;
+    file_path: string | null;
+    payload: string;
+    attempts: number;
+    created_at: number;
+};
+
 /**
- * SQL: SELECT * FROM stash ORDER BY id
+ * Query stash rows newest-first using source-true 1-based inclusive positions.
+ * No zero-based offset coordinate is exposed or accepted anywhere in this API.
  */
-export function listStash(conn: DbConnection): { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[] {
-    return prepareOrCache(conn, 'SELECT * FROM stash ORDER BY id')
-        .all() as { id: number; type: string; file_path: string | null; payload: string; attempts: number; created_at: number }[];
+export function listStash(conn: DbConnection, query: StashListQuery = {}): StashRow[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+
+    if (query.filePath) {
+        clauses.push('file_path = ?');
+        params.push(query.filePath);
+    }
+    if (query.type) {
+        clauses.push('type = ?');
+        params.push(query.type);
+    }
+    if (query.sinceTimestamp !== undefined) {
+        clauses.push('created_at > ?');
+        params.push(query.sinceTimestamp);
+    }
+
+    const start = Math.max(1, Math.trunc(query.start ?? 1));
+    const end = Math.max(start, Math.trunc(query.end ?? 10));
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const sql = `
+        WITH ranked AS (
+            SELECT
+                id, type, file_path, payload, attempts, created_at,
+                ROW_NUMBER() OVER (ORDER BY id DESC) AS position
+            FROM stash${where}
+        )
+        SELECT id, type, file_path, payload, attempts, created_at
+        FROM ranked
+        WHERE position BETWEEN ? AND ?
+        ORDER BY position
+    `;
+
+    return prepareOrCache(conn, sql).all(...params, start, end) as StashRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -991,20 +897,77 @@ export function upsertProjectRoot(
         .run(entry.rootPath, entry.name, entry.createdAt);
 }
 
+// ---------------------------------------------------------------------------
+// Project Observations — detection telemetry for promotion decisions.
+// Lives in the GLOBAL DB. Detection records what it saw; promotion policy
+// (ProjectContext) reads the distinct-session count. This is the
+// instrumentation that justifies (or refutes) each auto-promotion.
+// ---------------------------------------------------------------------------
+
 /**
- * SQL: SELECT * FROM project_roots ORDER BY created_at DESC
+ * Creates table: project_observations(root_path PK, method, first_seen,
+ * last_seen, session_count, last_session_id)
  */
-export function listProjectRoots(conn: DbConnection): { root_path: string; name: string; created_at: number }[] {
-    return prepareOrCache(conn, 'SELECT * FROM project_roots ORDER BY created_at DESC')
-        .all() as { root_path: string; name: string; created_at: number }[];
+export function initObservationSchema(conn: DbConnection): void {
+    handle(conn).exec(`
+        CREATE TABLE IF NOT EXISTS project_observations (
+            root_path TEXT PRIMARY KEY,
+            method TEXT NOT NULL,
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            session_count INTEGER NOT NULL DEFAULT 1,
+            last_session_id TEXT NOT NULL
+        );
+    `);
 }
 
 /**
- * SQL: SELECT root_path, name FROM project_roots
+ * Record a detection of an unregistered project root and return the number
+ * of DISTINCT sessions it has now been observed in. The distinct-session
+ * approximation: the counter only increments when the recording session
+ * differs from the last one recorded — repeat observations within one
+ * session are idempotent.
  */
-export function getAllProjectRootPaths(conn: DbConnection): { root_path: string; name: string }[] {
-    return prepareOrCache(conn, 'SELECT root_path, name FROM project_roots')
-        .all() as { root_path: string; name: string }[];
+export function recordProjectObservation(
+    conn: DbConnection,
+    entry: { rootPath: string; method: string; sessionId: string; now?: number }
+): number {
+    const now = entry.now ?? Date.now();
+    const existing = prepareOrCache(
+        conn,
+        'SELECT session_count, last_session_id FROM project_observations WHERE root_path = ?'
+    ).get(entry.rootPath) as { session_count: number; last_session_id: string } | undefined;
+
+    if (!existing) {
+        prepareOrCache(
+            conn,
+            'INSERT INTO project_observations (root_path, method, first_seen, last_seen, session_count, last_session_id) VALUES (?, ?, ?, ?, 1, ?)'
+        ).run(entry.rootPath, entry.method, now, now, entry.sessionId);
+        return 1;
+    }
+
+    const count = existing.last_session_id === entry.sessionId
+        ? existing.session_count
+        : existing.session_count + 1;
+    prepareOrCache(
+        conn,
+        'UPDATE project_observations SET method = ?, last_seen = ?, session_count = ?, last_session_id = ? WHERE root_path = ?'
+    ).run(entry.method, now, count, entry.sessionId, entry.rootPath);
+    return count;
+}
+
+/**
+ * SQL: SELECT * FROM project_observations ORDER BY last_seen DESC
+ */
+export function listProjectObservations(conn: DbConnection): {
+    root_path: string; method: string; first_seen: number;
+    last_seen: number; session_count: number; last_session_id: string;
+}[] {
+    return prepareOrCache(conn, 'SELECT * FROM project_observations ORDER BY last_seen DESC')
+        .all() as {
+            root_path: string; method: string; first_seen: number;
+            last_seen: number; session_count: number; last_session_id: string;
+        }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,17 +1145,18 @@ export function findSymbolStructuresByName(conn: DbConnection, name: string, kin
 // ---------------------------------------------------------------------------
 
 /**
- * SQL: INSERT INTO anchors (symbol_id, kind, line, text) VALUES (?, ?, ?, ?)
+ * SQL: INSERT INTO anchors (symbol_id, kind, line, end_line, text) VALUES (?, ?, ?, ?, ?)
  */
-export function insertAnchor(conn: DbConnection, row: { symbolId: number; kind: string; line: number; text: string }): void {
-    prepareOrCache(conn, 'INSERT INTO anchors (symbol_id, kind, line, text) VALUES (?, ?, ?, ?)').run(row.symbolId, row.kind, row.line, row.text);
+export function insertAnchor(conn: DbConnection, row: { symbolId: number; kind: string; line: number; endLine?: number; text: string }): void {
+    const endLine = row.endLine ?? row.line;
+    prepareOrCache(conn, 'INSERT INTO anchors (symbol_id, kind, line, end_line, text) VALUES (?, ?, ?, ?, ?)').run(row.symbolId, row.kind, row.line, endLine, row.text);
 }
 
 /**
- * SQL: SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line
+ * SQL: SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, COALESCE(a.end_line, a.line) AS endLine, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line
  */
-export function getAnchorsForFile(conn: DbConnection, filePath: string): Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; text: string }> {
-    return prepareOrCache(conn, `SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; text: string }>;
+export function getAnchorsForFile(conn: DbConnection, filePath: string): Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; endLine: number; text: string }> {
+    return prepareOrCache(conn, `SELECT a.symbol_id, s.name AS symbol_name, a.kind, a.line, COALESCE(a.end_line, a.line) AS endLine, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as Array<{ symbol_id: number; symbol_name: string; kind: string; line: number; endLine: number; text: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,8 +1341,8 @@ export interface FileFacts {
     defs: Array<{ id: number; name: string; line: number; endLine: number; type: string | null; visibility: string | null; captureTag: string | null }>;
     references: Array<{ name: string; type: string | null; line: number; endLine: number; column: number }>;
     edges: Array<{ callerLine: number; calleeLine: number; callCount: number }>;
-    referenceEdges: Array<{ callerLine: number; referencedName: string; referenceCount: number }>;
-    anchors: Array<{ symbol_name: string; kind: string; line: number; text: string }>;
+    referenceEdges: Array<{ callerLine: number; referencedName: string; referenceKind: string; referenceCount: number }>;
+    anchors: Array<{ symbol_name: string; kind: string; line: number; endLine: number; text: string }>;
     imports: Array<{ module: string; importedNames: string[]; line: number; startLine: number; endLine: number }>;
     importBindings: Array<{ source: string; localName: string; importedName: string | null; importKind: ImportBindingKind; isTypeOnly: boolean; line: number; column: number }>;
     injections: Array<{ injected_lang: string; start_line: number; end_line: number }>;
@@ -1413,14 +1377,15 @@ export function getFileFacts(conn: DbConnection, filePath: string): FileFacts {
          GROUP BY caller.id, callee.id`
     ).all(filePath, filePath) as FileFacts['edges'];
     const referenceEdges = prepareOrCache(conn,
-        `SELECT caller.line AS callerLine, e.referenced_name AS referencedName, COUNT(e.id) AS referenceCount
+        `SELECT caller.line AS callerLine, e.referenced_name AS referencedName,
+                e.reference_kind AS referenceKind, COUNT(e.id) AS referenceCount
          FROM edges e
          JOIN symbols caller ON caller.id = e.container_def_id
          WHERE caller.file_path = ? AND caller.kind = 'def'
-         GROUP BY caller.id, e.referenced_name
-         ORDER BY caller.line, e.referenced_name`
+         GROUP BY caller.id, e.referenced_name, e.reference_kind
+         ORDER BY caller.line, e.referenced_name, e.reference_kind`
     ).all(filePath) as FileFacts['referenceEdges'];
-    const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
+    const anchors = prepareOrCache(conn, `SELECT s.name AS symbol_name, a.kind, a.line, COALESCE(a.end_line, a.line) AS endLine, a.text FROM anchors a JOIN symbols s ON s.id = a.symbol_id WHERE s.file_path = ? ORDER BY a.line`).all(filePath) as FileFacts['anchors'];
     const imports = getImportsForFile(conn, filePath);
     const importBindings = getImportBindingsForFile(conn, filePath);
     const injections = prepareOrCache(conn, `SELECT injected_lang, start_line, end_line FROM injections WHERE file_path = ?`).all(filePath) as FileFacts['injections'];

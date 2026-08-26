@@ -3,15 +3,12 @@
 //
 // Contains:
 //   - SymbolInfo / SymbolFilterOptions types
-//   - getSymbols(), getDefinitions()
-//   - getSymbolSummary(), getSymbolSummaryString()
-//   - findSymbol(), getFileSymbols(), getFileSymbolSummary()
+//   - getSymbols() (internal), getDefinitions()
 //   - checkSyntaxErrors()
 //   - Symbol cache helpers (sourceHash, getCachedSymbols, setCachedSymbols)
 // ---------------------------------------------------------------------------
 
 import { Parser, Node } from 'web-tree-sitter';
-import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import {
     loadLanguage,
@@ -19,7 +16,6 @@ import {
     SYMBOL_CACHE_MAX,
     _symbolCache,
 } from './runtime.js';
-import { getLangForFile } from './languages.js';
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -380,7 +376,7 @@ function setCachedSymbols(hash: string, symbols: SymbolInfo[]): void {
  * @param options  - optional filters
  * @returns null if language not supported or no query
  */
-export async function getSymbols(source: string, langName: string, options: SymbolFilterOptions = {}): Promise<SymbolInfo[] | null> {
+async function getSymbols(source: string, langName: string, options: SymbolFilterOptions = {}): Promise<SymbolInfo[] | null> {
     // Check cache first
     const hash = sourceHash(langName + ':' + source);
     const cached = getCachedSymbols(hash);
@@ -518,184 +514,6 @@ function applyFilters(symbols: SymbolInfo[], options: SymbolFilterOptions): Symb
  */
 export async function getDefinitions(source: string, langName: string, options: SymbolFilterOptions = {}): Promise<SymbolInfo[] | null> {
     return getSymbols(source, langName, { ...options, kindFilter: 'def' });
-}
-
-/**
- * Get a summary count of symbols by type for a file.
- *
- * @param source   - the source code
- * @param langName - tree-sitter language name
- */
-export async function getSymbolSummary(source: string, langName: string): Promise<{ defs: Record<string, number>; refs: Record<string, number>; defTotal: number; refTotal: number } | null> {
-    const symbols = await getSymbols(source, langName);
-    if (!symbols) return null;
-
-    const defs: Record<string, number> = {};
-    const refs: Record<string, number> = {};
-    let defTotal = 0, refTotal = 0;
-
-    for (const sym of symbols) {
-        if (sym.kind === 'def') {
-            defs[sym.type] = (defs[sym.type] ?? 0) + 1;
-            defTotal++;
-        } else {
-            refs[sym.type] = (refs[sym.type] ?? 0) + 1;
-            refTotal++;
-        }
-    }
-
-    return { defs, refs, defTotal, refTotal };
-}
-
-/**
- * Format a symbol summary as a compact string for directory listings.
- * E.g. "3 functions, 1 class, 2 methods" — definitions only.
- * Returns null if no definitions found or language not supported.
- */
-export async function getSymbolSummaryString(source: string, langName: string): Promise<string | null> {
-    const summary = await getSymbolSummary(source, langName);
-    if (!summary || summary.defTotal === 0) return null;
-
-    const parts: string[] = [];
-    // Ordered by typical importance
-    const order = ['class', 'interface', 'type', 'enum', 'function', 'method', 'module',
-                   'key', 'section', 'selector', 'keyframes', 'media',
-                   'variable', 'constant', 'property', 'object', 'mixin', 'extension',
-                   'macro', 'resource', 'output', 'provider', 'local'];
-    const used = new Set<string>();
-
-    for (const t of order) {
-        if (summary.defs[t]) {
-            const count = summary.defs[t];
-            const label = count === 1 ? t : pluralize(t);
-            parts.push(`${count} ${label}`);
-            used.add(t);
-        }
-    }
-
-    // Any remaining types not in the order list
-    for (const [t, count] of Object.entries(summary.defs)) {
-        if (used.has(t)) continue;
-        const label = count === 1 ? t : pluralize(t);
-        parts.push(`${count} ${label}`);
-    }
-
-    return parts.length > 0 ? parts.join(', ') : null;
-}
-
-function pluralize(type: string): string {
-    if (type.endsWith('s')) return type + 'es';
-    if (type.endsWith('y')) return type.slice(0, -1) + 'ies';
-    return type + 's';
-}
-
-/**
- * Find a specific symbol by name in source code.
- *
- * Supports dot-qualified names like "MyClass.sendMessage" — splits on '.'
- * and checks that the symbol named 'sendMessage' is contained within
- * a symbol named 'MyClass'.
- *
- * If multiple matches exist and nearLine is provided, sorts by proximity.
- * Otherwise returns all matches (caller decides whether to reject or pick).
- *
- * @param source      - the source code
- * @param langName    - tree-sitter language name
- * @param symbolName  - exact name or dot-qualified name
- * @param options     - optional filters
- */
-export async function findSymbol(source: string, langName: string, symbolName: string, options: SymbolFilterOptions = {}): Promise<SymbolInfo[] | null> {
-    const kindFilter = options.kindFilter ?? 'def';
-
-    // Handle dot-qualified names: "MyClass.sendMessage"
-    const parts = symbolName.split('.');
-    const targetName = parts[parts.length - 1];  // innermost name
-    const parentNames = parts.slice(0, -1);       // qualifying parents
-
-    const { nameFilter: _, ...restOptions } = options;
-    const allSymbols = await getSymbols(source, langName, { ...restOptions, kindFilter });
-    if (!allSymbols) return null;
-
-    // Find direct matches on the target name
-    let matches = allSymbols.filter((s: SymbolInfo) => s.name === targetName);
-
-    // If qualified, filter to only those nested inside the parent symbol(s)
-    if (parentNames.length > 0 && matches.length > 0) {
-        // For each parent level, find the parent symbol and check containment
-        const allDefs = kindFilter === 'def' ? allSymbols :
-            await getSymbols(source, langName, { kindFilter: 'def' });
-        if (!allDefs) return matches; // can't verify parents, return unfiltered
-
-        matches = matches.filter((sym: SymbolInfo) => {
-            let current: SymbolInfo = sym;
-            // Walk outward through parent qualifiers
-            for (let i = parentNames.length - 1; i >= 0; i--) {
-                const parentName = parentNames[i];
-                // Find a definition that contains current's line range
-                const parent = allDefs.find((d: SymbolInfo) =>
-                    d.name === parentName &&
-                    d.line <= current.line &&
-                    d.endLine >= current.endLine &&
-                    d !== current
-                );
-                if (!parent) return false;
-                current = parent;
-            }
-            return true;
-        });
-    }
-
-    // Sort by proximity to nearLine if specified
-    if (matches.length > 1 && options.nearLine !== undefined) {
-        const nearLine = options.nearLine;
-        matches.sort((a: SymbolInfo, b: SymbolInfo) =>
-            Math.abs(a.line - nearLine) - Math.abs(b.line - nearLine)
-        );
-    }
-
-    return matches;
-}
-
-/**
- * Get symbols for a file by path. Reads the file, detects language, parses.
- * Convenience wrapper that handles the full file → symbols pipeline.
- *
- * @param filePath - absolute path to the file
- * @param options  - same options as getSymbols
- */
-export async function getFileSymbols(filePath: string, options: SymbolFilterOptions = {}): Promise<SymbolInfo[] | null> {
-    const langName = getLangForFile(filePath);
-    if (!langName) return null;
-
-    let source: string;
-    try {
-        source = await fs.readFile(filePath, 'utf-8');
-    } catch {
-        return null;
-    }
-
-    return getSymbols(source, langName, options);
-}
-
-/**
- * Get symbol summary string for a file by path.
- * Returns null if unsupported or no definitions found.
- */
-export async function getFileSymbolSummary(filePath: string): Promise<string | null> {
-    const langName = getLangForFile(filePath);
-    if (!langName) return null;
-
-    let source: string;
-    try {
-        const stat = await fs.stat(filePath);
-        // Skip large files — parsing a 2MB file for a directory listing isn't worth it
-        if (stat.size > 256 * 1024) return null;
-        source = await fs.readFile(filePath, 'utf-8');
-    } catch {
-        return null;
-    }
-
-    return getSymbolSummaryString(source, langName);
 }
 
 /**

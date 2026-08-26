@@ -46,7 +46,7 @@ export interface SourceBlock {
 // consume it directly: SageRank reads the narrower SourceFacts (edges); BMX+ reads
 // BmxScoringFacts (defs/edges). Any code reading payload.source.facts MUST guard on
 // `undefined` (Source.facts is optional). Adding fields here is invisible to the engines.
-export interface RawFileFacts {
+interface RawFileFacts {
   readonly path: string;
   readonly langName: string | null;
   readonly defs: ReadonlyArray<{
@@ -73,12 +73,14 @@ export interface RawFileFacts {
   readonly referenceEdges: ReadonlyArray<{
     readonly callerLine: number;      // resolved start line of the containing def
     readonly referencedName: string;  // raw referenced symbol name, resolved or unresolved
+    readonly referenceKind: string;   // tree-sitter reference capture kind; no MCP weighting
     readonly referenceCount: number;
   }>;
   readonly anchors: ReadonlyArray<{
     readonly symbolName: string;
     readonly kind: string;
     readonly line: number;
+    readonly endLine: number;
     readonly text: string;
   }>;
   readonly imports: ReadonlyArray<{
@@ -143,7 +145,7 @@ export interface Payload {
  * source content is weighed. Owned HERE; consumed by the feasibility check and
  * the render rebalancer, never re-computed downstream.
  */
-export type EntryMetadata = ReadonlyMap<number, number>;
+type EntryMetadata = ReadonlyMap<number, number>;
 
 /**
  * The entry point and FIRST engine. Its core process: weigh every line by its

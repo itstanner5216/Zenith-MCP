@@ -42,6 +42,7 @@ const LEGACY_ADVANCED_KEYS = new Set([
   "refactor_max_context",
   "refactor_version_ttl_hours",
   "session_ttl_ms",
+  "auto_promote_sessions",
   "default_excludes",
   "sensitive_patterns",
 ]);
@@ -223,37 +224,6 @@ export function saveConfig(config: ZenithConfig): void {
 
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, text, "utf-8");
-}
-
-// ---------------------------------------------------------------------------
-// migrateConfigFile
-// ---------------------------------------------------------------------------
-
-/**
- * One-shot migration: read the on-disk config, normalize any legacy format
- * patterns, and write the canonical form back.
- *
- * - Returns `"migrated"` if changes were made and written.
- * - Returns `"already_canonical"` if the file was already in canonical form.
- * - Returns `"no_file"` if no config file exists yet.
- * - Throws if the file cannot be read or written.
- *
- * Safe to call at any time — if the file is already canonical, it is not
- * touched.
- */
-export function migrateConfigFile(): "migrated" | "already_canonical" | "no_file" {
-  if (!existsSync(CONFIG_PATH)) return "no_file";
-
-  const text = readFileSync(CONFIG_PATH, "utf-8");
-  const raw = parseConfig(text);
-  const { normalized, wasMigrated } = normalizeLegacyRaw(raw);
-
-  if (!wasMigrated) return "already_canonical";
-
-  // Round-trip through the typed config so the output is fully canonical
-  const config = rawToConfig(normalized);
-  saveConfig(config);
-  return "migrated";
 }
 
 // ---------------------------------------------------------------------------

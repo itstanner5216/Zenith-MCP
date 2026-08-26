@@ -43,7 +43,6 @@ jobs:
 
       - name: Generate CI failure report
         if: steps.pr.outputs.number != ''
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -55,4 +54,3 @@ jobs:
         with:
           name: Git-Print-CI-Status
           path: Git-Print-CI-Status.md
-          if-no-files-found: warn

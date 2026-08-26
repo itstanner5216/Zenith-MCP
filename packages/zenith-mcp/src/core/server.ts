@@ -5,24 +5,19 @@
 //   - resolveInitialAllowedDirectories / validateDirectories  (CLI + HTTP)
 //   - TOOL_REGISTRY                                            (single source of truth)
 //   - registerEnabledTools(toolServer, ctx)                    (config load + tool wiring)
-//   - updateAllowedDirectoriesFromRoots(requestedRoots, ctx)   (roots-callback body)
 //
 // What this file deliberately does NOT do:
-//   - construct an McpServer (different SDKs have different constructor shapes)
-//   - call setNotificationHandler (different SDKs take different first args:
-//       v1 takes a Zod schema, v2 takes a method-name string)
-//   - call oninitialized / listRoots wiring (lives next to its own setNotificationHandler)
+//   - construct an McpServer (that is each entrypoint's job — HTTP builds one
+//       per request in its factory, stdio one per connection via serveStdio)
 //
-// Each entrypoint constructs its own McpServer using its preferred SDK, then
-// calls registerEnabledTools to load tools, then inlines its own roots wiring
-// (a 6-line block that calls updateAllowedDirectoriesFromRoots inside).
+// Each entrypoint constructs its own McpServer, then calls
+// registerEnabledTools to load tools against its process FilesystemContext.
 // ---------------------------------------------------------------------------
 
 import fs from "fs/promises";
 import path from "path";
 import { normalizePath, expandHome } from './path-utils.js';
-import { onRootsChanged, getProjectContext } from './project-context.js';
-import { getValidRootDirectories, parseRootUriPath } from './roots-utils.js';
+import { getProjectContext } from './project-context.js';
 import { type ToolServer, type ToolContext } from '../tools/types.js';
 import { type FilesystemContext } from './lib.js';
 
@@ -99,13 +94,6 @@ const TOOL_REGISTRY: Array<{
 ];
 
 /**
- * Exposed list of every tool name the server knows about, in registration order.
- * Used by entrypoints that need to advertise the available tools (e.g. for
- * health checks or schema dumps) without having to import every tool module.
- */
-export const ALL_TOOL_NAMES: ReadonlyArray<string> = TOOL_REGISTRY.map(t => t.name);
-
-/**
  * Default server instructions string. Each entrypoint passes this (or its own
  * override) into its SDK-specific `new McpServer(..., { instructions })` call.
  */
@@ -153,50 +141,44 @@ export function registerEnabledTools(toolServer: ToolServer, ctx: ToolContext): 
   }
 
   // ── Register only the tools that are enabled in config ───────────────
+  // Every handler is wrapped with the caller-environment ping: a server-side,
+  // model-free detection signal (process-tree cwds, TTL-cached, upgrade-from-
+  // global only). Tool schemas are untouched — the model carries ZERO
+  // responsibility for project detection, by design.
+  const pingedServer = withCallerEnvironmentPing(toolServer, ctx);
   for (const entry of TOOL_REGISTRY) {
     if (syncedConfig.tools[entry.name]) {
-      entry.register(toolServer, ctx);
+      entry.register(pingedServer, ctx);
     }
   }
 }
 
 /**
- * Applies a fresh roots list to the FilesystemContext. Called by each
- * entrypoint from inside its SDK-specific `setNotificationHandler` /
- * `oninitialized` blocks. Returns nothing; logs to stderr on the human path.
+ * Wrap a ToolServer so every tool call pings ProjectContext with caller
+ * environment evidence before the real handler runs. The walk is throttled
+ * (TTL cache inside the process-tree reader) and the ping is a no-op unless
+ * the session is currently in global fallback — path evidence, registry
+ * matches, and explicit bindings always outrank environment inference.
  *
- * Merges client roots with existing dirs (from CLI args) instead of replacing.
- * CLI-provided dirs are the baseline — roots ADD to them.
+ * The ping must NEVER break a tool call: detection failures are swallowed.
  */
-export async function updateAllowedDirectoriesFromRoots(
-  requestedRoots: Array<{ uri: string; name?: string }>,
-  ctx: FilesystemContext,
-): Promise<void> {
-  const validatedRootDirs = await getValidRootDirectories(requestedRoots);
-  if (validatedRootDirs.length > 0) {
-    // Merge with existing dirs instead of replacing.
-    // CLI-provided dirs are the baseline — roots ADD to them.
-    const existingDirs = ctx.getAllowedDirectories();
-    const merged = [...new Set([...existingDirs, ...validatedRootDirs])];
-    ctx.setAllowedDirectories(merged);
-
-    // Seed ProjectRegistry with root names from MCP roots for better detection.
-    // Uses registerSessionRoot (non-sticky, non-persisting) — does NOT block auto-switching.
-    const pc = getProjectContext(ctx);
-    for (const root of requestedRoots) {
-      if (root.name) {
-        const resolvedPath = await parseRootUriPath(root.uri);
-        if (resolvedPath && validatedRootDirs.includes(resolvedPath)) {
-          pc.registerSessionRoot(resolvedPath, root.name);
+export function withCallerEnvironmentPing(toolServer: ToolServer, ctx: ToolContext): ToolServer {
+  return {
+    registerTool<TArgs>(
+      name: string,
+      registration: Parameters<ToolServer['registerTool']>[1],
+      handler: (args: TArgs) => ReturnType<Parameters<ToolServer['registerTool']>[2]>
+    ): void {
+      toolServer.registerTool<TArgs>(name, registration, (args: TArgs) => {
+        try {
+          getProjectContext(ctx).pingCallerEnvironment();
+        } catch {
+          // Detection is best-effort by contract — never fail a tool call.
         }
-      }
-    }
-
-    onRootsChanged(ctx);
-    console.error(`Updated allowed directories from MCP roots: ${merged.length} total directories (${validatedRootDirs.length} from roots)`);
-  } else {
-    console.error("No valid root directories provided by client");
-  }
+        return handler(args);
+      });
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -41,10 +41,12 @@ describe('ProjectContext — registry-first resolution', () => {
         try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
     });
 
-    it('unregistered git repo path returns global (no heuristic promotion)', () => {
+    it('unregistered git repo under tmp stays global (junk-filtered — tmp never promotes)', () => {
         const pc = new ProjectContext(ctx);
         const root = pc.getRoot(path.join(repoDir, 'file.js'));
-        // Not registered in registry → global
+        // Unregistered AND under os.tmpdir() → junk filter blocks detection →
+        // global. Unregistered repos in real locations now bind via detection —
+        // see project-context-detection.test.js.
         expect(root).toBeNull();
         expect(pc.isGlobal).toBe(true);
     });
@@ -228,62 +230,5 @@ describe('ProjectContext — singleton', () => {
         const instance1 = getProjectContext(ctx);
         const instance2 = getProjectContext(ctx);
         expect(instance1).toBe(instance2);
-    });
-});
-
-describe('ProjectContext — onRootsChanged', () => {
-    it('refreshes singleton instance when roots change (preserves explicit binding)', async () => {
-        vi.resetModules();
-        const { getProjectContext, onRootsChanged } = await importProjectContext();
-        const ctx = { getAllowedDirectories: () => [], validatePath: async (p) => p };
-        const pc = getProjectContext(ctx);
-        pc._resolved = true;
-        pc._explicit = true;
-        onRootsChanged(ctx);
-        // Issue 8: explicit bindings are sticky — onRootsChanged must NOT override
-        // a project that was explicitly registered via initProject().
-        expect(pc._explicit).toBe(true);
-    });
-
-    it('refactor-batch path: getProjectContext via ctx is refreshed by onRootsChanged(ctx)', async () => {
-        vi.resetModules();
-        const { getProjectContext, onRootsChanged } = await importProjectContext();
-        // Simulate the ToolContext that refactor_batch.ts passes directly to getProjectContext
-        const ctx = {
-            getAllowedDirectories: () => [],
-            validatePath: async (p) => p,
-            sessionId: 'test-session',
-            validateNewFilePath: async (p) => p,
-            setAllowedDirectories: () => {},
-        };
-        // Obtain the context through ctx (as refactor_batch now does)
-        const pc = getProjectContext(ctx);
-        pc._resolved = true;
-        pc._explicit = true;
-
-        // onRootsChanged is called by server.ts with the same ctx object
-        onRootsChanged(ctx);
-
-        // Issue 8: The cached instance keyed by ctx must NOT have its explicit
-        // binding cleared — explicit bindings survive a roots-change.
-        expect(pc._explicit).toBe(true);
-        expect(pc._resolved).toBe(true); // refresh() skips re-resolve when explicit
-    });
-
-    it('wrapper object does NOT get refreshed by onRootsChanged(ctx)', async () => {
-        vi.resetModules();
-        const { getProjectContext, onRootsChanged } = await importProjectContext();
-        const ctx = { getAllowedDirectories: () => [], validatePath: async (p) => p };
-        // A separate wrapper object (old incorrect pattern)
-        const wrapper = { getAllowedDirectories: () => ctx.getAllowedDirectories() };
-        const pc = getProjectContext(wrapper);
-        pc._resolved = true;
-        pc._explicit = true;
-
-        // Calling onRootsChanged with the original ctx cannot reach the wrapper-keyed instance
-        onRootsChanged(ctx);
-
-        // The wrapper-keyed instance is NOT refreshed
-        expect(pc._explicit).toBe(true);
     });
 });

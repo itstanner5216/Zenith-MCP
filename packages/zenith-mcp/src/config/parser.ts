@@ -16,26 +16,26 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export interface SectionEntry {
+interface SectionEntry {
   type: "section";
   name: string;
   /** The raw line exactly as it appeared (e.g. `## Tools`). */
   raw: string;
 }
 
-export interface SubsectionEntry {
+interface SubsectionEntry {
   type: "subsection";
   name: string;
   raw: string;
 }
 
-export interface CommentEntry {
+interface CommentEntry {
   type: "comment";
   /** The full comment line including the leading `#`. */
   text: string;
 }
 
-export interface BlankEntry {
+interface BlankEntry {
   type: "blank";
 }
 
@@ -50,7 +50,7 @@ export interface KVEntry {
   inlineComment: string | null;
 }
 
-export type ConfigEntry =
+type ConfigEntry =
   | SectionEntry
   | SubsectionEntry
   | CommentEntry

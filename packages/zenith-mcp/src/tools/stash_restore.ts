@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { normalizeLineEndings, createMinimalDiff, findResumeOffset } from '../core/lib.js';
-import { getStashEntry, consumeAttempt, clearStash, listStash } from '../core/stash.js';
+import { getStashEntry, consumeAttempt, clearStash, listStash, scheduleStashCleanup } from '../core/stash.js';
 import { applyEditList, syntaxWarn } from '../core/edit-engine.js';
 import { getDb, snapshotSymbol, getSessionId, } from '../core/symbol-index.js';
 import { getProjectContext } from '../core/project-context.js';
@@ -18,7 +18,30 @@ type StashRestoreArgs = {
     dryRun?: boolean;
     file?: string;
     type?: 'edit' | 'write';
+    range?: number | string;
 };
+
+function parseListRange(range?: number | string): { start: number; end: number } {
+    if (range === undefined) return { start: 1, end: 10 };
+
+    if (typeof range === 'number') {
+        if (!Number.isSafeInteger(range) || range < 1) {
+            throw new Error('range must be a positive integer or an inclusive range like "10-30".');
+        }
+        return { start: 1, end: range };
+    }
+
+    const match = /^(\d+)\s*-\s*(\d+)$/.exec(range.trim());
+    if (!match) {
+        throw new Error('range must be a positive integer or an inclusive range like "10-30".');
+    }
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+        throw new Error('range must start at 1 or greater and end at or after its start.');
+    }
+    return { start, end };
+}
 
 export function register(server: ToolServer, ctx: ToolContext) {
     server.registerTool("stashRestore", {
@@ -34,27 +57,38 @@ export function register(server: ToolServer, ctx: ToolContext) {
             })).optional().describe("apply: disambiguation hints for ambiguous edits."),
             newPath: z.string().optional().describe("apply: redirect write to a different path."),
             dryRun: z.boolean().optional().default(false).describe("apply: preview the result without writing."),
-            file: z.string().optional().describe("list/read/restore: filter by file path."),
+            file: z.string().optional().describe("list: exact file path filter; read/restore/apply: DB routing hint. Relative and missing paths are normalized safely."),
             type: z.enum(['edit', 'write']).optional().describe("list: filter entries by type."),
+            range: z.union([
+                z.number().int().positive(),
+                z.string().regex(/^\d+\s*-\s*\d+$/),
+            ]).optional().describe("list only. Omit to return the 10 newest entries. A number N returns the newest N. A string like '10-30' returns that inclusive 1-based slice of newest-first history."),
         }),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: StashRestoreArgs) => {
+        const routedFile = args.file ? await ctx.validateNewFilePath(args.file) : undefined;
+
+        // Opportunistic one-shot maintenance: tool activation wakes cleanup,
+        // but there is no watcher, timer, or resident background process.
+        scheduleStashCleanup(ctx, routedFile);
+
         // =================================================================
         // LIST
         // =================================================================
         if (args.mode === 'list') {
-            const { entries, isGlobal } = listStash(ctx, args.file);
-            let filtered = entries;
-            if (args.type) {
-                filtered = entries.filter((e: { type: string }) => e.type === args.type);
-            }
-            if (!filtered.length) {
+            const { start, end } = parseListRange(args.range);
+            const { entries, isGlobal } = listStash(ctx, routedFile, {
+                type: args.type,
+                start,
+                end,
+            });
+            if (!entries.length) {
                 const msg = isGlobal ? 'Empty. (global)' : 'Empty.';
                 return { content: [{ type: 'text', text: msg }] };
             }
-            const lines = filtered.map((e: { id: number; type: string; filePath: string | null; attempts: number }) => `#${e.id} [${e.type}] ${e.filePath || '(no path)'} (attempt ${e.attempts}/2)`);
+            const lines = entries.map((e: { id: number; type: string; filePath: string | null; attempts: number }) => `#${e.id} [${e.type}] ${e.filePath || '(no path)'} (attempt ${e.attempts}/2)`);
             if (isGlobal)
-                lines.unshift('(global stash — no project detected)');
+                lines.unshift('(global stash — no project detected; newest first)');
             return { content: [{ type: 'text', text: lines.join('\n') }] };
         }
         // =================================================================
@@ -63,7 +97,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         if (args.mode === 'read') {
             if (!args.stashId)
                 throw new Error('stashId required.');
-            const entry = getStashEntry(ctx, args.stashId, args.file);
+            const entry = getStashEntry(ctx, args.stashId, routedFile);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found.`);
             if (entry.type === 'edit') {
@@ -89,10 +123,10 @@ export function register(server: ToolServer, ctx: ToolContext) {
         if (args.mode === 'restore') {
             if (!args.stashId)
                 throw new Error('stashId required for restore.');
-            const entry = getStashEntry(ctx, args.stashId, args.file);
+            const entry = getStashEntry(ctx, args.stashId, routedFile);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found.`);
-            clearStash(ctx, args.stashId, args.file);
+            clearStash(ctx, args.stashId, routedFile);
             return { content: [{ type: 'text', text: `Cleared.` }] };
         }
         // =================================================================
@@ -101,7 +135,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         if (args.mode === 'apply') {
             if (!args.stashId)
                 throw new Error('stashId required.');
-            const entry = getStashEntry(ctx, args.stashId, args.file);
+            const entry = getStashEntry(ctx, args.stashId, routedFile);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found or expired.`);
             if (!entry.filePath && entry.type === 'edit') {
@@ -154,7 +188,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 if (!args.dryRun && pendingSnapshots && pendingSnapshots.length > 0) {
                     try {
                         const pc = getProjectContext(ctx);
-                        const repoRoot = pc.getRoot(validPath) || path.dirname(validPath);
+                        const repoRoot = pc.getWorkingRoot(validPath); // never null — never refuse
                         const db = getDb(repoRoot);
                         const sessionId = ctx.sessionId ?? getSessionId();
                         const relPath = path.relative(repoRoot, validPath);

@@ -115,7 +115,7 @@ All source code is written in TypeScript and resides inside the respective packa
 | `core/edit-engine.ts` | Pure in-memory content/block/symbol edit verification and application |
 | `core/symbol-index.ts` | SQLite symbol DB, impact graph, version snapshots, patterns |
 | `core/db-adapter.ts` | Node.js native `node:sqlite` abstraction layer (pure functional adapter) |
-| `core/project-context.ts` | Project root resolution ladder (MCP roots → git → markers → registry → global) |
+| `core/project-context.ts` | Single routing authority: explicit binding → config-file registry (`~/.zenith-mcp/config`) → global fallback |
 | `core/project-registry.ts` | Explicit project matching/registration |
 | `core/stash.ts` | SQLite-backed edit/write stash API |
 | `core/compression.ts` | Compression budget math and subprocess bridge invocation |
@@ -502,7 +502,7 @@ Key pieces:
 - `packages/zenith-mcp/src/adapters/platforms/`
   - Per-client adapter implementations
 - `packages/zenith-mcp/src/adapters/registry.ts`
-  - Adapter registry with `configureRegistry()`, `getAdapter()`, `listAdapters()`
+  - Adapter registry with `configureRegistry()`, `listAdapters()`
 - `packages/zenith-mcp/src/adapters/helpers/`
   - JSON5, TOML, YAML parsing and output format helpers
 
@@ -655,16 +655,6 @@ Generated local state to clean when needed:
 ---
 
 ## 14. Code Snippets
-
-### Find a Symbol
-
-```ts
-import { findSymbol } from '../core/tree-sitter.js';
-
-const matches = await findSymbol(sourceCode, 'javascript', 'AuthService.login', {
-  kindFilter: 'def',
-});
-```
 
 ### Rank Search Results
 
