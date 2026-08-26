@@ -79,7 +79,14 @@ export interface ChildRef {
     readonly ordinal: number;
 }
 
-function growF64(a: Float64Array, need: number): Float64Array {
+// The buffer type argument on these four is `ArrayBuffer`, not the bare alias,
+// because that is what the storage actually is: every array below is born from
+// `new XArray(n)` in this module, which allocates a plain ArrayBuffer, and no
+// index array is ever adopted from outside. A bare `Float64Array` annotation
+// means `Float64Array<ArrayBufferLike>`, which additionally admits a
+// SharedArrayBuffer-backed view — a store this module cannot produce and whose
+// element writes would need synchronisation the build loop does not perform.
+function growF64(a: Float64Array<ArrayBuffer>, need: number): Float64Array<ArrayBuffer> {
     if (need <= a.length) return a;
     let n = a.length === 0 ? 1024 : a.length;
     while (n < need) n *= 2;
@@ -87,7 +94,7 @@ function growF64(a: Float64Array, need: number): Float64Array {
     out.set(a);
     return out;
 }
-function growI32(a: Int32Array, need: number): Int32Array {
+function growI32(a: Int32Array<ArrayBuffer>, need: number): Int32Array<ArrayBuffer> {
     if (need <= a.length) return a;
     let n = a.length === 0 ? 1024 : a.length;
     while (n < need) n *= 2;
@@ -95,7 +102,7 @@ function growI32(a: Int32Array, need: number): Int32Array {
     out.set(a);
     return out;
 }
-function growU32(a: Uint32Array, need: number): Uint32Array {
+function growU32(a: Uint32Array<ArrayBuffer>, need: number): Uint32Array<ArrayBuffer> {
     if (need <= a.length) return a;
     let n = a.length === 0 ? 1024 : a.length;
     while (n < need) n *= 2;
@@ -103,7 +110,7 @@ function growU32(a: Uint32Array, need: number): Uint32Array {
     out.set(a);
     return out;
 }
-function growU8(a: Uint8Array, need: number): Uint8Array {
+function growU8(a: Uint8Array<ArrayBuffer>, need: number): Uint8Array<ArrayBuffer> {
     if (need <= a.length) return a;
     let n = a.length === 0 ? 1024 : a.length;
     while (n < need) n *= 2;
