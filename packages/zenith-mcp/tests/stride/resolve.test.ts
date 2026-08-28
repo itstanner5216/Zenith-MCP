@@ -22,9 +22,33 @@
 // all-scalars fixture would only half cover.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The second half of this file is about the id routes instead.
+//
+// Reaching a member needs the container's index node id first, and resolve.ts
+// obtains it three fast ways — resumed from an already-resolved parent, threaded
+// out of `Member.node` during a descent, memoised by byte start — with a fourth,
+// `deriveIndexId`, that reads the index and nothing else. The fast three share
+// state across calls; the fourth shares none. So the property asserted here is
+// that they answer identically, over thousands of pointers, in several orders,
+// on documents that take every route the resolver has: a `Resolver` built with
+// `{ shortcuts: false }` uses only the fourth, and is the control.
+//
+// Equivalence between two of STRIDE's own routes could still be equivalence
+// between two wrong answers, so wherever a fixture is small enough to parse, a
+// third opinion comes from `JSON.parse` and a pointer walk written here: the
+// bytes at the resolved span must parse to the value at that pointer.
+//
+// The performance property is asserted as COUNTED INDEX WORK, not elapsed time.
+// The defect these tests exist for was cubic in depth — 341,630 dense-table
+// reads for one pointer at depth 512, measured — and a count is exact, is the
+// same on a loaded machine as an idle one, and names the regression directly
+// rather than through a threshold someone will later widen.
+// ---------------------------------------------------------------------------
+
 import { describe, expect, it } from 'vitest';
 import { StrideIndex } from '../../src/core/stride/index.js';
-import { Resolver, type Member } from '../../src/core/stride/resolve.js';
+import { RESOLVE_ID_CACHE_MAX, Resolver, type Member } from '../../src/core/stride/resolve.js';
 import { BufferSource } from '../../src/core/stride/source.js';
 import { scanStructure, K_ARRAY, K_OBJECT } from '../../src/core/stride/scan.js';
 import { StrideError, type StrideKind, type StrideNode } from '../../src/core/stride/types.js';
@@ -396,4 +420,754 @@ describe('locate() on a checkpointed container', () => {
             'a byte between two members belongs to the container, not to either neighbour',
         ).toBe('');
     }, 60_000);
+});
+
+// ── the id routes: equivalence, cost and bound ────────────────────────────
+
+/** Deterministic PRNG, so a shuffled pointer order is the same run to run. */
+function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return (): number => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+/** `items` in a reproducible shuffled order. */
+function shuffled(items: readonly string[], seed: number): string[] {
+    const out = items.slice();
+    const random = mulberry32(seed);
+    for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        const high = out[i];
+        const low = out[j];
+        // Both indices are inside the array; the guard is what
+        // `noUncheckedIndexedAccess` needs rather than a case that can occur.
+        if (high === undefined || low === undefined) continue;
+        out[i] = low;
+        out[j] = high;
+    }
+    return out;
+}
+
+/** One document plus every pointer worth comparing over it. */
+interface Subject {
+    readonly label: string;
+    readonly text: string;
+    /** Pointers to compare — resolvable, unresolvable, and not pointers at all. */
+    readonly pointers: readonly string[];
+    /** True when the document is also small enough to check against `JSON.parse`. */
+    readonly parseable: boolean;
+    /**
+     * Pointers the document HOLDS A VALUE AT that STRIDE cannot currently
+     * reach. Pinned rather than skipped: the oracle below requires each of them
+     * to keep failing, so the pin has to be deleted the moment the underlying
+     * defect is fixed instead of quietly outliving it.
+     *
+     * There is exactly one entry-worthy cause today, and it is not in this file.
+     * `index.ts` distinguishes an array element from an object member by a
+     * stored name length of zero, so `denseChildren` reports a member LEGALLY
+     * NAMED THE EMPTY STRING as `key: null` — indistinguishable from an element.
+     * `memberByKey`'s dense route compares against that null and finds nothing,
+     * so `"/"` cannot address the empty-named member of any container small
+     * enough to be indexed densely (at most DENSE_CHILD_LIMIT, 32). It resolves
+     * correctly in a checkpointed container, where the name is re-read from the
+     * source, which is why `wideObjectSubject` covers I8's `"/"` case for real.
+     * Confirmed present before the change this file's second half tests, and
+     * reported rather than worked around: the sentinel is index.ts's to fix.
+     */
+    readonly knownUnreachable: readonly string[];
+}
+
+/**
+ * Everything `resolve` decided about one pointer, as a single line: node
+ * identity, span, kind, depth, parent and count for a success, and the closed
+ * failure code plus both strings a caller acts on for a failure. A line rather
+ * than an object so a mismatch prints as the field that moved.
+ */
+function describeResolution(resolver: Resolver, pointer: string): string {
+    try {
+        const node = resolver.resolve(pointer);
+        return `ok pointer=${JSON.stringify(node.pointer)} span=${node.start}..${node.end}`
+            + ` kind=${node.kind} depth=${node.depth}`
+            + ` parent=${node.parent === null ? '<root>' : JSON.stringify(node.parent)}`
+            + ` count=${node.count}`;
+    } catch (e) {
+        if (e instanceof StrideError) {
+            return `fail ${e.failure} at=${e.at === null ? '-' : e.at}`
+                + ` message=${e.message} recovery=${e.recovery}`;
+        }
+        return `threw ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`;
+    }
+}
+
+/**
+ * Reference-token split, written here rather than imported from pointer.ts: an
+ * oracle that borrows the parser it is checking is not an oracle. Null for
+ * anything that is not a JSON Pointer at all.
+ */
+function splitPointer(pointer: string): string[] | null {
+    if (pointer === '') return [];
+    if (!pointer.startsWith('/')) return null;
+    return pointer.slice(1).split('/').map((t) => t.replace(/~1/g, '/').replace(/~0/g, '~'));
+}
+
+/** RFC 6901 array index, or -1. Leading zeros, signs and `-` are not indices. */
+function arrayIndexOf(token: string): number {
+    return /^(?:0|[1-9][0-9]*)$/.test(token) ? Number(token) : -1;
+}
+
+/** Escape one member name into a reference token, for building fixture pointers. */
+function pointerToken(key: string): string {
+    return key.replace(/~/g, '~0').replace(/\//g, '~1');
+}
+
+/** The kind STRIDE gives a value, derived from the parsed value instead. */
+function kindOfValue(value: unknown): StrideKind {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'array';
+    switch (typeof value) {
+        case 'object': return 'object';
+        case 'string': return 'string';
+        case 'number': return 'number';
+        case 'boolean': return 'boolean';
+        default: return 'null';
+    }
+}
+
+/** The member/element count STRIDE reports, derived from the parsed value. */
+function countOfValue(value: unknown): number {
+    if (Array.isArray(value)) return value.length;
+    if (typeof value === 'object' && value !== null) return Object.keys(value).length;
+    return 0;
+}
+
+/** The value a token list names inside a parsed document, or a miss. */
+function valueAtTokens(root: unknown, tokens: readonly string[]): { found: boolean; value: unknown } {
+    let at: unknown = root;
+    for (const token of tokens) {
+        if (Array.isArray(at)) {
+            const i = arrayIndexOf(token);
+            if (i < 0 || i >= at.length) return { found: false, value: undefined };
+            const next: unknown = at[i];
+            at = next;
+            continue;
+        }
+        if (typeof at === 'object' && at !== null) {
+            if (!Object.prototype.hasOwnProperty.call(at, token)) return { found: false, value: undefined };
+            const next: unknown = Reflect.get(at, token);
+            at = next;
+            continue;
+        }
+        return { found: false, value: undefined };
+    }
+    return { found: true, value: at };
+}
+
+/**
+ * The index, wrapped so that every read of a dense child table is counted.
+ *
+ * `denseChildren` is the accessor every id route has to go through — the
+ * threaded route reads one per level of a whole descent, the derivation reads
+ * one per level on every single call — so its call count IS the shape of the
+ * cost, exactly and with no clock in it. Counting the property access rather
+ * than the invocation is the same number here: every call site in resolve.ts
+ * reads the method and calls it immediately.
+ */
+function countingIndex(index: StrideIndex): { readonly index: StrideIndex; reads: () => number } {
+    let reads = 0;
+    const counted = new Proxy(index, {
+        get(target, property, receiver) {
+            if (property === 'denseChildren') reads++;
+            return Reflect.get(target, property, receiver);
+        },
+    });
+    return { index: counted, reads: (): number => reads };
+}
+
+/**
+ * Size of a resolver's byte-start memo.
+ *
+ * Reached by reflection because the memo is private and has to stay private,
+ * while I6 is a claim about this map's size specifically: a bound nothing can
+ * observe is a bound nothing can be held to. -1 when the field is not a Map,
+ * which fails the assertions below rather than passing them quietly.
+ */
+function memoSize(resolver: Resolver): number {
+    const memo: unknown = Reflect.get(resolver, 'ids');
+    return memo instanceof Map ? memo.size : -1;
+}
+
+function buildSubject(subject: Subject, tag: string): { source: BufferSource; index: StrideIndex } {
+    const source = new BufferSource(Buffer.from(subject.text, 'utf8'), `${tag}:${subject.label}`);
+    const index = StrideIndex.build(source);
+    expect(index.stats.errorAt, `${subject.label}: the generated fixture must be well-formed JSON`).toBe(-1);
+    return { source, index };
+}
+
+// ── subjects ──────────────────────────────────────────────────────────────
+
+/**
+ * A spine that alternates object and array levels, so a descent alternates
+ * between the by-name and the by-ordinal route, and every level carries a second
+ * member so a pointer can leave the spine as well as follow it. Each level is
+ * two members wide — inside DENSE_CHILD_LIMIT — so every level is dense and the
+ * derivation has a full dense chain to descend, which is the case the threading
+ * replaces and therefore the case that has to agree.
+ */
+function alternatingSpine(depth: number): Subject {
+    let text = '"leaf"';
+    for (let i = depth - 1; i >= 0; i--) {
+        text = i % 2 === 0 ? `{"a":${text},"sib":${i}}` : `[${text},${i}]`;
+    }
+    const pointers: string[] = ['', '/', '/x', 'not-a-pointer', '/a/'];
+    let at = '';
+    for (let i = 0; i < depth; i++) {
+        const isObject = i % 2 === 0;
+        pointers.push(isObject ? `${at}/sib` : `${at}/1`);
+        pointers.push(`${at}/nope`, `${at}/01`, `${at}/-`, `${at}/2`);
+        at = isObject ? `${at}/a` : `${at}/0`;
+        pointers.push(at);
+    }
+    pointers.push(`${at}/past-the-leaf`);
+    return { label: `alternating spine of ${depth} levels`, text, pointers, parseable: true, knownUnreachable: [] };
+}
+
+/**
+ * An object far past DENSE_CHILD_LIMIT and far past STRIDE_RESCAN_BYTES, so it
+ * is checkpointed AND covered by the member-name hash table for everything
+ * except its first 12 KiB — the two by-name routes at once. Member 0 is named
+ * the empty string, which is what `"/"` addresses; every 89th name carries a
+ * `~`, a `/`, an escaped quote and a multi-byte character.
+ */
+function wideObjectSubject(count: number): Subject {
+    const keyFor = (i: number): string => (i === 0 ? '' : i % 89 === 0 ? `k~/${i}"é` : `key-${i}`);
+    const parts: string[] = [];
+    for (let i = 0; i < count; i++) {
+        parts.push(`${JSON.stringify(keyFor(i))}:{"n":${i},"pad":${JSON.stringify('p'.repeat(24))}}`);
+    }
+    const pointers: string[] = ['', '/', '/absent', '/KEY-1', `/key-${count}`, '/key--1', '/~2'];
+    // Early ordinals sit inside the walk the stride is tuned for and carry no
+    // hash entry by design; later ones are reached by the hash probe. Both
+    // groups are sampled, because they are different routes to the same answer.
+    for (const i of [0, 1, 2, 31, 32, 33, 89, 178, 500, 1000, 1500, count - 89, count - 1]) {
+        const token = pointerToken(keyFor(i));
+        pointers.push(`/${token}`, `/${token}/n`, `/${token}/pad`, `/${token}/absent`, `/${token}/0`);
+    }
+    // Checkpointed, so the empty-named member IS reachable here: this subject is
+    // where I8's `"/"` case is actually covered.
+    return { label: `wide object of ${count} members`, text: `{${parts.join(',')}}`, pointers, parseable: true, knownUnreachable: [] };
+}
+
+/**
+ * A bulk array: past DENSE_CHILD_LIMIT, so it is checkpointed and NO element has
+ * an index node of its own. Every interior pointer here is reached by the
+ * bounded re-scan rather than by node id, which is exactly the coverage a memo
+ * must not turn into "not found".
+ */
+function bulkArraySubject(count: number): Subject {
+    const parts: string[] = [];
+    for (let i = 0; i < count; i++) {
+        parts.push(`{"n":${i},"tags":[${i},${i + 1}],"pad":${JSON.stringify('q'.repeat(16))}}`);
+    }
+    const pointers: string[] = ['', `/${count}`, '/-', '/01', '/007', '/n', '/1e3'];
+    for (const i of [0, 1, 31, 32, 33, 63, 64, 512, 1000, count - 2, count - 1]) {
+        pointers.push(`/${i}`, `/${i}/n`, `/${i}/tags`, `/${i}/tags/0`, `/${i}/tags/1`, `/${i}/tags/2`, `/${i}/absent`, `/${i}/n/0`);
+    }
+    return { label: `bulk array of ${count} records`, text: `[${parts.join(',')}]`, pointers, parseable: true, knownUnreachable: [] };
+}
+
+/**
+ * One document that takes every route at once: a dense root, dense sub-objects,
+ * a bulk array whose records are not indexed, a wide object, a short spine, a
+ * member of every scalar kind, both empty containers, and names that exercise
+ * RFC 6901 escaping — the empty name, `~`, `/`, the literal texts `~0` and `~1`,
+ * and a multi-byte character. `/~` is included on purpose: it is a pointer whose
+ * token carries an escape RFC 6901 does not define, so it addresses the member
+ * named `~` while the node reports the canonical `/~0`, and any shortcut that
+ * confused the two would show up here.
+ */
+function heterogeneousSubject(): Subject {
+    const bulk = Array.from({ length: 70 }, (_v, i) => `{"i":${i},"tag":"t${i}"}`).join(',');
+    const wide = Array.from({ length: 90 }, (_v, i) => `"w${i}":${i}`).join(',');
+    const text = '{'
+        + '"":"empty name",'
+        + '"~":"tilde","a/b":"slash","~0":"literal tilde-zero","~1":"literal tilde-one","é":"multi-byte",'
+        + '"obj":{"one":1,"two":{"three":[1,2,3]}},'
+        + '"arr":[10,[20,21],{"k":30}],'
+        + `"bulk":[${bulk}],`
+        + `"wide":{${wide}},`
+        + '"deep":{"a":{"a":{"a":{"a":"bottom"}}}},'
+        + '"str":"text","num":12345,"neg":-0.5,"exp":1e21,"t":true,"f":false,"nil":null,'
+        + '"emptyObj":{},"emptyArr":[]'
+        + '}';
+    const pointers: string[] = [
+        '', '/', '/~0', '/a~1b', '/~00', '/~01', '/é', '/~', '/~/x', '/~2', '/a/b',
+        '/obj', '/obj/one', '/obj/two', '/obj/two/three', '/obj/two/three/0', '/obj/two/three/2',
+        '/obj/two/three/3', '/obj/two/three/-', '/obj/two/three/01', '/obj/absent',
+        '/arr', '/arr/0', '/arr/1', '/arr/1/0', '/arr/1/1', '/arr/2', '/arr/2/k', '/arr/3', '/arr/-', '/arr/01',
+        '/bulk', '/bulk/0', '/bulk/0/i', '/bulk/0/tag', '/bulk/35', '/bulk/35/i', '/bulk/69',
+        '/bulk/69/tag', '/bulk/70', '/bulk/0/absent', '/bulk/0/i/0',
+        '/wide', '/wide/w0', '/wide/w45', '/wide/w89', '/wide/w90',
+        '/deep', '/deep/a', '/deep/a/a', '/deep/a/a/a', '/deep/a/a/a/a', '/deep/a/a/a/a/a',
+        '/str', '/str/0', '/num', '/neg', '/exp', '/t', '/f', '/nil',
+        '/emptyObj', '/emptyObj/x', '/emptyArr', '/emptyArr/0',
+        '/absent', 'nope', '/obj/two/three/0/deeper',
+    ];
+    // The root is 20 members wide, so it is indexed densely, and its empty-named
+    // member is therefore unreachable by pointer — see `knownUnreachable`.
+    return { label: 'heterogeneous document', text, pointers, parseable: true, knownUnreachable: ['/'] };
+}
+
+/**
+ * Containers reached through pointers that carry an escape RFC 6901 does not
+ * define, several levels deep.
+ *
+ * `~2` decodes to itself, so `"/~"` addresses the member named `~` while the
+ * node that comes back reports the canonical `"/~0"`. The resolution cache is
+ * keyed by the pointer the CALLER asked for, so after `"/~"` it holds an entry
+ * whose key and whose node's pointer differ — and `resolve` resumes from cached
+ * parents. Every mixture of canonical and aliased segments is here, with real
+ * members under each, because "the answer must not depend on which spelling
+ * happened to be cached" is the property the resume has to keep.
+ */
+function aliasSubject(): Subject {
+    const text = '{"~":{"~":{"x":1},"y":2},"a/b":{"c":3},"~0":{"d":4},"~1":{"e":5}}';
+    const pointers: string[] = [
+        '',
+        '/~0', '/~', '/~0/~0', '/~/~', '/~0/~', '/~/~0',
+        '/~0/~0/x', '/~/~/x', '/~0/~/x', '/~/~0/x', '/~/~/y',
+        '/~0/y', '/~/y', '/~0/absent', '/~/absent',
+        '/a~1b', '/a~1b/c', '/a/b', '/a/b/c', '/a~1b/absent',
+        '/~00', '/~00/d', '/~0/d', '/~01', '/~01/e', '/~1', '/~1/e',
+        '/~2', '/~2/x', '/~/~/x/deeper',
+    ];
+    return { label: 'members behind non-canonical escapes', text, pointers, parseable: true, knownUnreachable: [] };
+}
+
+/** The documents that are nothing but edges: empty, scalar, and empty-named. */
+function edgeSubjects(): Subject[] {
+    const edgePointers = [
+        '', '/', '//', '///', '/0', '/1', '/-', '/01', '/x', '/~0', '/~1', '/~00', '/~01',
+        '/~2', 'x', '/0/0', '/x/y/z',
+    ];
+    const docs: ReadonlyArray<readonly [string, string]> = [
+        ['empty object', '{}'],
+        ['empty array', '[]'],
+        ['bare null', 'null'],
+        ['bare string', '"just a string"'],
+        ['bare number', '1e-6'],
+        ['bare true', 'true'],
+        ['empty names all the way down', '{"":{"":{"":1}}}'],
+        ['names that look like escapes', '{"~":1,"a/b":2,"~0":3,"~1":4,"~01":5}'],
+        ['nested empty arrays', '[[[[]]]]'],
+        ['one element', '[42]'],
+    ];
+    return docs.map(([label, text]) => ({
+        label,
+        text,
+        pointers: edgePointers,
+        parseable: true,
+        // Three nested empty-named members, each in a container one member wide
+        // and so indexed densely — see `knownUnreachable`.
+        knownUnreachable: text === '{"":{"":{"":1}}}' ? ['/', '//', '///'] : [],
+    }));
+}
+
+/**
+ * A tree every level of which is at most DENSE_CHILD_LIMIT wide, so every node
+ * is indexed, dense, and reached by a distinct byte start — one memo entry each.
+ * Pointers come out in pre-order, so a parent is always resolved before its
+ * children and the resume path is the one under load.
+ */
+function denseTree(fanout: readonly number[]): { text: string; pointers: string[] } {
+    const pointers: string[] = [''];
+    const build = (level: number, at: string): string => {
+        const width = fanout[level];
+        if (width === undefined) return '0';
+        const parts: string[] = [];
+        for (let i = 0; i < width; i++) {
+            const child = `${at}/k${i}`;
+            pointers.push(child);
+            parts.push(`"k${i}":${build(level + 1, child)}`);
+        }
+        return `{${parts.join(',')}}`;
+    };
+    const text = build(0, '');
+    return { text, pointers };
+}
+
+// ── equivalence ───────────────────────────────────────────────────────────
+
+/**
+ * Resolve every pointer of a subject twice over — once through the id shortcuts
+ * and once through the derivation alone — and require the two to agree on every
+ * field, in four orders, on a resolver that has just been built and on one that
+ * has already been through all four. Returns the number of comparisons made.
+ */
+function assertRoutesAgree(subject: Subject): number {
+    const { index } = buildSubject(subject, 'equiv');
+    const pointers = subject.pointers;
+
+    // The control. `shortcuts: false` takes every index node id from
+    // `deriveIndexId`, which reads the index and shares nothing at all with the
+    // resume, the threading or the memo.
+    const control = new Resolver(index, { shortcuts: false });
+    const expected = new Map<string, string>();
+    for (const pointer of pointers) expected.set(pointer, describeResolution(control, pointer));
+
+    // A control with no accumulated state, over a sample, so a disagreement
+    // cannot be hiding inside the control's own pointer cache.
+    for (let i = 0; i < pointers.length; i += 5) {
+        const pointer = pointers[i];
+        if (pointer === undefined) continue;
+        const want = expected.get(pointer);
+        if (want === undefined) continue;
+        expect(
+            describeResolution(new Resolver(index, { shortcuts: false }), pointer),
+            `${subject.label}: the control must not depend on its own cache to resolve ${JSON.stringify(pointer)}`,
+        ).toBe(want);
+    }
+
+    const orders: ReadonlyArray<readonly [string, readonly string[]]> = [
+        ['top-down, as generated', pointers],
+        ['bottom-up', pointers.slice().reverse()],
+        ['shuffled', shuffled(pointers, 0x5771de)],
+        ['each pointer twice in a row', pointers.flatMap((p) => [p, p])],
+    ];
+
+    let comparisons = 0;
+    // One resolver carried through every order as well as a fresh one per
+    // order, because the shortcuts are the parts of this module that depend on
+    // what happened before, and the cold and the loaded cases are different.
+    const carried = new Resolver(index);
+    for (const [order, sequence] of orders) {
+        const fresh = new Resolver(index);
+        for (const pointer of sequence) {
+            const want = expected.get(pointer);
+            if (want === undefined) continue;
+            expect(
+                describeResolution(fresh, pointer),
+                `${subject.label} [${order}, fresh resolver]: ${JSON.stringify(pointer)} must resolve identically with the id shortcuts on and off`,
+            ).toBe(want);
+            expect(
+                describeResolution(carried, pointer),
+                `${subject.label} [${order}, resolver carried through every order]: ${JSON.stringify(pointer)} must resolve identically with the id shortcuts on and off`,
+            ).toBe(want);
+            comparisons += 2;
+        }
+    }
+    return comparisons;
+}
+
+/**
+ * Check the same pointers against a third opinion that shares no code with
+ * STRIDE: `JSON.parse` of the whole document, walked by the token splitter
+ * above. The bytes at the span STRIDE returns must parse to the value that walk
+ * arrives at, and a pointer must resolve exactly when that walk finds something.
+ */
+function assertAgreesWithJsonParse(subject: Subject): number {
+    if (!subject.parseable) return 0;
+    const { source, index } = buildSubject(subject, 'oracle');
+    const parsed: unknown = JSON.parse(subject.text);
+    const resolver = new Resolver(index);
+    let checked = 0;
+    for (const pointer of subject.pointers) {
+        const tokens = splitPointer(pointer);
+        if (tokens === null) continue;              // not a pointer; nothing to compare
+        const truth = valueAtTokens(parsed, tokens);
+        let node: StrideNode | null = null;
+        try {
+            node = resolver.resolve(pointer);
+        } catch (e) {
+            expect(e, `${subject.label}: ${JSON.stringify(pointer)} must fail as a StrideError, not as a bare throw`).toBeInstanceOf(StrideError);
+        }
+        if (subject.knownUnreachable.includes(pointer)) {
+            expect(
+                node,
+                `${JSON.stringify(pointer)} in the ${subject.label} is pinned as unreachable by index.ts's zero-length-name sentinel; it now resolves, so delete the pin`,
+            ).toBeNull();
+            expect(
+                truth.found,
+                `${JSON.stringify(pointer)} is only worth pinning if the document really does hold a value there`,
+            ).toBe(true);
+            checked++;
+            continue;
+        }
+        expect(
+            node !== null,
+            `${subject.label}: ${JSON.stringify(pointer)} must resolve exactly when JSON.parse has a value there`,
+        ).toBe(truth.found);
+        checked++;
+        if (node === null || !truth.found) continue;
+        expect(
+            JSON.parse(source.slice(node.start, node.end).toString('utf8')),
+            `${subject.label}: the bytes STRIDE spanned for ${JSON.stringify(pointer)} are not the value JSON.parse holds there`,
+        ).toEqual(truth.value);
+        expect(
+            node.kind,
+            `${subject.label}: kind of ${JSON.stringify(pointer)} disagrees with the parsed value`,
+        ).toBe(kindOfValue(truth.value));
+        expect(
+            node.count,
+            `${subject.label}: count of ${JSON.stringify(pointer)} disagrees with the parsed value`,
+        ).toBe(countOfValue(truth.value));
+    }
+    return checked;
+}
+
+function allSubjects(): Subject[] {
+    return [
+        alternatingSpine(128),
+        wideObjectSubject(2000),
+        bulkArraySubject(3000),
+        heterogeneousSubject(),
+        aliasSubject(),
+        ...edgeSubjects(),
+    ];
+}
+
+describe('the fast id routes answer what the derivation answers', () => {
+    it('agrees on every field for every pointer, over several documents and several orders', () => {
+        let comparisons = 0;
+        let pointers = 0;
+        const subjects = allSubjects();
+        for (const subject of subjects) {
+            comparisons += assertRoutesAgree(subject);
+            pointers += subject.pointers.length;
+        }
+        // Reported, because "the two routes agree" is only worth something
+        // alongside how much was put to them.
+        console.log(`[equivalence] ${subjects.length} documents, ${pointers} distinct pointer requests, ${comparisons} shortcut-vs-derivation comparisons`);
+        expect(
+            comparisons,
+            'the comparison must actually have run over thousands of pointers, or agreement means nothing',
+        ).toBeGreaterThan(5000);
+    }, 120_000);
+
+    it('agrees with JSON.parse about the span, kind and count at every pointer that resolves', () => {
+        let checked = 0;
+        for (const subject of allSubjects()) checked += assertAgreesWithJsonParse(subject);
+        console.log(`[oracle] ${checked} pointers checked against JSON.parse of the whole document`);
+        expect(checked, 'the oracle must have checked the whole pointer set').toBeGreaterThan(500);
+    }, 120_000);
+
+    it('resolves the pointers RFC 6901 is most often got wrong identically on both routes', () => {
+        // Called out separately from the sweep above because these are the cases
+        // I8 names, and a sweep that happened to drop one of them would still be
+        // a green sweep.
+        const escapes = heterogeneousSubject();
+        const { source, index } = buildSubject(escapes, 'i8');
+        const fast = new Resolver(index);
+        const control = new Resolver(index, { shortcuts: false });
+        const cases: ReadonlyArray<readonly [string, string, string]> = [
+            ['', 'the whole document', escapes.text],
+            ['/~0', 'the member named "~"', '"tilde"'],
+            ['/a~1b', 'the member named "a/b"', '"slash"'],
+            ['/~00', 'the member named "~0", not the member named "~"', '"literal tilde-zero"'],
+            ['/~01', 'the member named "~1", not the member named "/"', '"literal tilde-one"'],
+        ];
+        for (const [pointer, what, bytes] of cases) {
+            const answer = describeResolution(fast, pointer);
+            expect(
+                answer,
+                `${JSON.stringify(pointer)} is ${what}, and both id routes must say so identically`,
+            ).toBe(describeResolution(control, pointer));
+            const node = fast.resolve(pointer);
+            expect(
+                source.slice(node.start, node.end).toString('utf8'),
+                `${JSON.stringify(pointer)} is ${what} and must span exactly its bytes`,
+            ).toBe(bytes);
+        }
+
+        // `"/"` is the member named the empty string and NOT the document —
+        // asserted against a checkpointed container, because in a dense one it
+        // is currently unreachable for a reason that belongs to index.ts (see
+        // `Subject.knownUnreachable`).
+        const wide = wideObjectSubject(2000);
+        const built = buildSubject(wide, 'i8-empty-name');
+        expect(
+            built.index.isCheckpointed(built.index.rootId),
+            'the container has to be on the checkpoint route for this to be the case it claims to be',
+        ).toBe(true);
+        const wideFast = new Resolver(built.index);
+        const wideControl = new Resolver(built.index, { shortcuts: false });
+        const slash = wideFast.resolve('/');
+        expect(
+            describeResolution(wideFast, '/'),
+            '"/" must resolve identically with the id shortcuts on and off',
+        ).toBe(describeResolution(wideControl, '/'));
+        expect(
+            slash.pointer,
+            '"/" is the member named the empty string, not the document',
+        ).toBe('/');
+        expect(
+            built.source.slice(slash.start, slash.end).toString('utf8'),
+            '"/" must span the value of the empty-named member, not the document',
+        ).toBe('{"n":0,"pad":"pppppppppppppppppppppppp"}');
+        expect(
+            wideFast.resolve('').pointer,
+            '"" is the whole document',
+        ).toBe('');
+        expect(
+            wideFast.resolve('').start === 0 && wideFast.resolve('').end === Buffer.byteLength(wide.text, 'utf8'),
+            '"" must span the whole document, which is what distinguishes it from "/"',
+        ).toBe(true);
+    }, 60_000);
+
+    it('still reaches a member the index never indexed, before and after the memo has churned', () => {
+        // A record inside a bulk collection has no index node, so its own
+        // members are found by re-scanning its bytes. The memo remembers that
+        // absence as -1, and -1 has to keep meaning "re-scan for it" rather than
+        // "not there" — including after the memo has been filled and evicted
+        // many times over by unrelated pointers.
+        const subject = bulkArraySubject(3000);
+        const { index } = buildSubject(subject, 'partial');
+        const resolver = new Resolver(index);
+        const interiors = ['/0/n', '/1/tags/1', '/1500/n', '/2999/tags/0', '/2999/pad'];
+        const before = interiors.map((p) => describeResolution(resolver, p));
+        for (const [i, answer] of before.entries()) {
+            expect(
+                answer.startsWith('ok '),
+                `${JSON.stringify(interiors[i] ?? '')} names a member of an unindexed record and must resolve`,
+            ).toBe(true);
+        }
+        for (let i = 0; i < 3000; i++) resolver.resolve(`/${i}`);
+        for (let i = 0; i < 3000; i += 3) resolver.resolve(`/${i}/tags`);
+        for (const [i, answer] of before.entries()) {
+            const pointer = interiors[i] ?? '';
+            expect(
+                describeResolution(resolver, pointer),
+                `${JSON.stringify(pointer)} must resolve to the same node after the memo has churned as before it`,
+            ).toBe(answer);
+        }
+    }, 120_000);
+});
+
+describe('the cost of resolving along a spine', () => {
+    it('costs dense-table reads linear in depth for a whole top-down descent, not cubic', () => {
+        // Asserted as counted index work rather than elapsed time: the defect
+        // this replaces grew at a measured 2^3.05 per doubling of depth, and a
+        // count catches that exactly, on any machine, under any load.
+        let previous: { depth: number; reads: number } | null = null;
+        for (const depth of [64, 128, 256, 512]) {
+            const subject = alternatingSpine(depth);
+            const spine = subject.pointers.filter((p) => p === '' || /^(?:\/a|\/0)+$/.test(p));
+            const counted = countingIndex(StrideIndex.build(
+                new BufferSource(Buffer.from(subject.text, 'utf8'), `scale:${depth}`),
+            ));
+            const resolver = new Resolver(counted.index);
+            for (const pointer of spine) resolver.resolve(pointer);
+            const reads = counted.reads();
+            expect(
+                spine.length,
+                `depth ${depth}: the spine must be every prefix of the deepest pointer`,
+            ).toBe(depth + 1);
+            // One read per level is what threading costs. Four times that is
+            // room for a future route that consults a parent's table twice,
+            // and is still 300x under the 131,000 a quadratic single resolve
+            // would need at depth 512.
+            expect(
+                reads,
+                `depth ${depth}: a top-down descent over ${spine.length} pointers must not read more than 4 dense tables per level, and read ${reads}`,
+            ).toBeLessThanOrEqual(4 * depth + 4);
+            if (previous !== null) {
+                expect(
+                    reads / previous.reads,
+                    `depth ${previous.depth} -> ${depth}: doubling the depth must at most 2.5x the index work; quadratic would be 4x and the defect measured 8.3x`,
+                ).toBeLessThanOrEqual(2.5);
+            }
+            previous = { depth, reads };
+        }
+    }, 120_000);
+
+    it('costs dense-table reads linear in depth for one cold pointer at the bottom of a spine', () => {
+        for (const depth of [128, 512]) {
+            const subject = alternatingSpine(depth);
+            const deepest = subject.pointers.filter((p) => /^(?:\/a|\/0)+$/.test(p)).reduce((a, b) => (b.length > a.length ? b : a), '/a');
+            const counted = countingIndex(StrideIndex.build(
+                new BufferSource(Buffer.from(subject.text, 'utf8'), `cold:${depth}`),
+            ));
+            const resolver = new Resolver(counted.index);
+            const node = resolver.resolve(deepest);
+            expect(node.depth, `the deepest spine pointer at depth ${depth} must resolve to depth ${depth}`).toBe(depth);
+            expect(
+                counted.reads(),
+                `depth ${depth}: one cold resolve must not read more than 4 dense tables per level, and read ${counted.reads()}`,
+            ).toBeLessThanOrEqual(4 * depth + 4);
+        }
+    }, 120_000);
+
+    it('does far less index work than the derivation, so the shortcuts are not doing nothing', () => {
+        // The equivalence test would pass just as happily if every shortcut
+        // quietly fell through to the derivation. This is the assertion that
+        // says they did not.
+        const depth = 128;
+        const subject = alternatingSpine(depth);
+        const spine = subject.pointers.filter((p) => p === '' || /^(?:\/a|\/0)+$/.test(p));
+        const text = Buffer.from(subject.text, 'utf8');
+
+        const fast = countingIndex(StrideIndex.build(new BufferSource(text, 'ratio:fast')));
+        const fastResolver = new Resolver(fast.index);
+        for (const pointer of spine) fastResolver.resolve(pointer);
+
+        const slow = countingIndex(StrideIndex.build(new BufferSource(text, 'ratio:slow')));
+        const slowResolver = new Resolver(slow.index, { shortcuts: false });
+        for (const pointer of spine) slowResolver.resolve(pointer);
+
+        console.log(`[cost] depth ${depth} descent: ${fast.reads()} dense-table reads with the shortcuts, ${slow.reads()} without`);
+        expect(
+            fast.reads() * 100,
+            `a descent of depth ${depth} took ${fast.reads()} dense-table reads with the shortcuts and ${slow.reads()} without; the shortcuts must be worth at least 100x`,
+        ).toBeLessThanOrEqual(slow.reads());
+    }, 120_000);
+});
+
+describe('bounded memory (I6)', () => {
+    it('holds the byte-start memo at its stated bound however many distinct nodes it is shown', () => {
+        // 32 x 32 x 8 x 8 dense levels: 74,784 nodes, each with a byte start of
+        // its own, against a bound of 16,384.
+        const { text, pointers } = denseTree([32, 32, 8, 8]);
+        expect(
+            pointers.length,
+            `the fixture must present far more distinct nodes than the ${RESOLVE_ID_CACHE_MAX}-entry bound, or the bound is not under test`,
+        ).toBeGreaterThan(RESOLVE_ID_CACHE_MAX * 3);
+
+        const source = new BufferSource(Buffer.from(text, 'utf8'), 'bound');
+        const index = StrideIndex.build(source);
+        expect(index.stats.errorAt, 'the generated tree must be well-formed JSON').toBe(-1);
+        const resolver = new Resolver(index);
+        expect(memoSize(resolver), 'the byte-start memo must be reachable and empty to begin with').toBe(0);
+
+        let peak = 0;
+        for (const pointer of pointers) {
+            resolver.resolve(pointer);
+            const size = memoSize(resolver);
+            if (size > peak) peak = size;
+        }
+        expect(
+            peak,
+            `after ${pointers.length} distinct nodes the memo peaked at ${peak} entries, past its ${RESOLVE_ID_CACHE_MAX} bound`,
+        ).toBeLessThanOrEqual(RESOLVE_ID_CACHE_MAX);
+        expect(
+            peak,
+            `the memo must actually fill to its bound, or ${pointers.length} pointers never tested eviction`,
+        ).toBe(RESOLVE_ID_CACHE_MAX);
+
+        // Eviction must cost speed and nothing else: the entries evicted first
+        // are the ones this asks for again.
+        const control = new Resolver(index, { shortcuts: false });
+        for (let i = 0; i < pointers.length; i += 977) {
+            const pointer = pointers[i];
+            if (pointer === undefined) continue;
+            expect(
+                describeResolution(resolver, pointer),
+                `${JSON.stringify(pointer)} must resolve the same after its memo entry was evicted as before`,
+            ).toBe(describeResolution(control, pointer));
+        }
+        console.log(`[bound] ${pointers.length} distinct nodes resolved, memo peaked at ${peak} of ${RESOLVE_ID_CACHE_MAX} entries`);
+    }, 300_000);
 });
