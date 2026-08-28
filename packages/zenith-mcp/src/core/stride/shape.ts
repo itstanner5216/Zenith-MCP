@@ -150,6 +150,29 @@ const SIZE_BUCKETS_PER_OCTAVE = 4;
 const NOVELTY_VETO_FRACTION = 0.10;
 
 /**
+ * The rare-value veto's rarity test: a value carried by at most
+ * `max(2, min(RARE_DF_CAP, floor(n * RARE_DF_FRACTION)))` of n members is rare
+ * enough that the member holding it must survive collapse.
+ *
+ * The two-sided form is load-bearing in both directions. Without the FRACTION a
+ * value carried by 10 of 20 members would count as rare and the veto would keep
+ * everything. Without the CAP the threshold scales with the corpus, which is the
+ * measured failure the mechanism this was extracted from had to fix: at 5,000
+ * candidates a `floor(n * 0.1)` threshold called anything under 500 occurrences
+ * rare, the rare set flooded, "every line looks maximally unique", and the
+ * variance the signal exists to contribute vanished. A value carried by 10 of a
+ * million records is rare; one carried by 10 of 20 is the population.
+ *
+ * Note what this is NOT: `df === 1`. A gram unique to one member makes that
+ * member's SIGNATURE unique, so the keep-first rule already keeps it and a veto
+ * on uniqueness can never change an outcome. The reachable case — and the one
+ * worth vetoing — is a handful of members sharing one rare value, which share a
+ * signature and would otherwise collapse into each other.
+ */
+const RARE_DF_FRACTION = 0.02;
+const RARE_DF_CAP = 10;
+
+/**
  * Above this length a score list is a CORPUS CURVE, not a candidate list, and
  * the chord branch runs. 512 is one doubling above SHAPE_SAMPLE: a list a
  * caller assembled by hand, by paging, or from a search result page falls
@@ -166,7 +189,17 @@ const CLIFF_MAX_N = 512;
  */
 const CLIFF_MIN_FRACTION = 0.25;
 
-/** Weighted-gap firing floor, as specified: relGap * (absGap / range) >= 0.05. */
+/**
+ * Weighted-gap firing floor: `relGap * (absGap / range) >= 0.05`.
+ *
+ * The floor is only meaningful because `relGap` is measured against the score
+ * ABOVE the gap, which bounds the whole product into [0, 1]: on the reference
+ * cliff [9.2, 9.1, 8.9, 0.4, 0.3] the winning gap scores relGap 8.5/8.9 = 0.955
+ * times absGap/range 8.5/8.9 = 0.955, i.e. 0.91, and 0.05 is a twentieth of a
+ * perfect cliff. Measured against the score BELOW the gap instead, a drop toward
+ * zero drives relGap unbounded — the same cliff scores 8.5/0.4 = 21.25 times
+ * 0.955 = 20.3 — and 0.05 stops being a twentieth of anything.
+ */
 const GAP_FIRE = 0.05;
 
 /**
@@ -220,6 +253,16 @@ interface Tally {
  * function requests exactly `shape.sampled` members from the resolver however
  * large the container is. (The resolver's own checkpoint re-scan behind each
  * request is bounded separately, by the index stride — see index.ts.)
+ *
+ * `fields` describes the shape of the container's VALUES, one level down, not
+ * the container's own key-set. That is the reading the collections STRIDE exists
+ * for need: a 600 MB array of records, or a 600 MB object keyed by id, both have
+ * one answer worth a few hundred characters and it is the shape of a record. A
+ * consequence worth knowing: a small flat object of scalars reports one field
+ * per member at presence 1/n and `homogeneous: false`, because no key-set
+ * dominates when every member has a key-set of its own. That is a true statement
+ * about `{"a":1,"b":2}` and not a useful one — a container that small is read
+ * directly rather than censused.
  */
 export function censusOf(resolver: Resolver, node: StrideNode, opts?: CensusOptions): StrideShape {
     if (node.kind !== 'object' && node.kind !== 'array') {
@@ -305,8 +348,13 @@ function samplePositions(resolver: Resolver, node: StrideNode, total: number, bu
         return resolver.members(node, 0, total);
     }
 
+    // The head is rounded UP to one member — a census that samples no head is
+    // blind to exactly the records the head exists to catch. The tail then takes
+    // what is left of the budget rather than matching the head unconditionally:
+    // at budget 1, head 1 plus tail 1 would inspect two members for a caller who
+    // asked for one, and `sampled` would report a budget that was overrun.
     const head = Math.max(1, Math.floor(budget / HEAD_TAIL_DIVISOR));
-    const tail = head;
+    const tail = Math.min(head, budget - head);
     const interiorWant = budget - head - tail;
     const out: Member[] = resolver.members(node, 0, head);
 
@@ -333,7 +381,7 @@ function samplePositions(resolver: Resolver, node: StrideNode, total: number, bu
         // periodicity the prime was chosen to avoid. `sampled` reports the truth.
     }
 
-    for (const m of resolver.members(node, total - tail, tail)) out.push(m);
+    if (tail > 0) for (const m of resolver.members(node, total - tail, tail)) out.push(m);
     return out;
 }
 
@@ -706,7 +754,10 @@ function censusSupport(gram: string, byKey: Map<string, StrideField>, censusN: n
     const kind = gram.slice(cut + 1 + nameLen + 3);
     const dominant = field.kinds[0];
     if (dominant === kind) return Math.round(field.presence * censusN);
-    return field.kinds.includes(kind as StrideKind) ? 1 : 0;
+    // `some` rather than `includes`: the gram's kind arrives as a string sliced
+    // out of the gram, and asserting it into StrideKind to satisfy `includes`
+    // would be claiming a type nothing checked.
+    return field.kinds.some((k) => k === kind) ? 1 : 0;
 }
 
 /**
@@ -782,7 +833,21 @@ export interface RedundancyReport {
  * and the member's RAREST value as a de-collision channel. The rarest-value
  * channel is measured only over enumerated members for the same reason value
  * grams are: with an id member included every record would carry a unique rare
- * value and nothing would ever collapse.
+ * value and nothing would ever collapse. The measured failure this guards
+ * against is 90% of a population flagged redundant by a signature that carried
+ * the schema and nothing else.
+ *
+ * Two vetoes then override the keep-first rule, and each covers a case the other
+ * cannot:
+ *   - RARE VALUE. A member whose rarest value is carried by at most
+ *     `rareCeiling` siblings is kept even when an earlier member already claimed
+ *     its signature. This is the only rule that can keep the SECOND member of a
+ *     rare pair: members sharing one rare value share a signature by
+ *     construction, so keep-first would show one of them and predict the other.
+ *   - HIGHEST NOVELTY. The top of the novelty order is kept whatever its
+ *     signature, cut by this module's own `knee` rather than a magic number and
+ *     capped at NOVELTY_VETO_FRACTION so a flat curve cannot veto everything and
+ *     turn collapse into a no-op.
  */
 export function redundancyOf(
     resolver: Resolver,
@@ -797,6 +862,11 @@ export function redundancyOf(
     const novelty = scoreProfiles(profiles, pop, prior);
     const n = profiles.length;
 
+    // The rarity ceiling is measured over the population actually supplied, so a
+    // page of 20 candidates and a corpus of a million get thresholds that mean
+    // the same thing. See RARE_DF_FRACTION for why it is two-sided.
+    const rareCeiling = Math.max(2, Math.min(RARE_DF_CAP, Math.floor(n * RARE_DF_FRACTION)));
+
     const signatures: string[] = new Array<string>(n);
     const rare: boolean[] = new Array<boolean>(n);
     for (let i = 0; i < n; i++) {
@@ -805,7 +875,12 @@ export function redundancyOf(
         let rarest: string | null = null;
         let rarestDf = Number.POSITIVE_INFINITY;
         for (const g of p.values) {
-            const df = pop.df.get(g) ?? 0;
+            const df = pop.df.get(g);
+            // Every gram here was contributed to `df` by this member, so a miss
+            // is impossible. Were one to happen, treating the absent count as 0
+            // would read as "rarer than everything" and manufacture a veto out
+            // of a bookkeeping failure; skipping it can only suppress one.
+            if (df === undefined) continue;
             // Ties broken lexicographically so the signature is deterministic
             // regardless of the order the scanner produced the members in.
             if (df < rarestDf || (df === rarestDf && rarest !== null && g < rarest)) {
@@ -815,9 +890,11 @@ export function redundancyOf(
         }
         const bucket = p.bytes <= 0 ? 0 : Math.floor(Math.log2(p.bytes) * SIZE_BUCKETS_PER_OCTAVE);
         signatures[i] = `${p.structural.join('\u0001')}\u0002${p.fieldCount}\u0002${bucket}\u0002${rarest ?? ''}`;
-        // A value seen exactly once across every sibling, in a member whose
-        // values are otherwise an enumeration, IS the interesting record.
-        rare[i] = rarestDf === 1;
+        // A value carried by no more than a handful of siblings, in a member
+        // whose values are otherwise an enumeration, IS the interesting record —
+        // and the members sharing it share a signature, which is exactly the
+        // case where the keep-first rule alone would keep only the first of them.
+        rare[i] = rarestDf <= rareCeiling;
     }
 
     const noveltyAt = (i: number): number => novelty[i] ?? Number.NEGATIVE_INFINITY;
@@ -831,7 +908,14 @@ export function redundancyOf(
     // the module's own adaptive cutoff rather than a magic number. The cap keeps
     // a flat curve from vetoing the whole population and making this a no-op.
     const descending: number[] = new Array<number>(n);
-    for (let i = 0; i < n; i++) descending[i] = noveltyAt(order[i] ?? 0);
+    for (let i = 0; i < n; i++) {
+        const at = order[i];
+        // `order` holds 0..n-1, so this cannot miss. Reading a miss as member 0's
+        // score would splice one member's novelty into another's slot and bend
+        // the curve the cutoff is measured from; -Infinity sorts to the bottom
+        // of a descending list and can only shrink the protected set.
+        descending[i] = at === undefined ? Number.NEGATIVE_INFINITY : noveltyAt(at);
+    }
     const protect = n === 0 ? 0 : knee(descending, Math.max(1, Math.ceil(n * NOVELTY_VETO_FRACTION)));
 
     const seen = new Map<string, number>();
@@ -864,8 +948,8 @@ export function redundancyOf(
  * WEIGHTED GAP — `relGap * (absGap / range)`, fired at 0.05 — is the right
  * detector for a BOUNDED CANDIDATE LIST WITH A REAL CLIFF: a few hundred search
  * results where matched and unmatched separate cleanly. On [9.2, 9.1, 8.9, 0.4,
- * 0.3, 0.2] the gap at index 2 scores (8.5/0.4) * (8.5/9.0) = 20.1 against
- * 5.0e-4 for its neighbour, and it returns 3.
+ * 0.3, 0.2] the gap at index 2 scores (8.5/8.9) * (8.5/9.0) = 0.90 against
+ * 4.9e-4 for its neighbour, and it returns 3.
  *
  * It CANNOT WORK on a dense corpus curve, and the arithmetic says why. On n
  * near-identical records the adjacent gaps are on the order of range/n, so
@@ -932,10 +1016,13 @@ function weightedGap(s: (i: number) => number, n: number, range: number): number
     let best = 0;
     let bestScore = 0;
     for (let i = start; i + 1 < n; i++) {
-        const absGap = s(i) - s(i + 1);
-        // A drop to zero is an infinite relative gap; EPS keeps that finite and
-        // very large, which is the correct reading of it.
-        const relGap = absGap / Math.max(s(i + 1), EPS);
+        const left = s(i);
+        const absGap = left - s(i + 1);
+        // Relative to the score ABOVE the gap, so relGap lands in [0,1] and the
+        // 0.05 floor keeps the meaning it is documented with. A left score at or
+        // below EPS cannot carry a meaningful relative gap — the list descends,
+        // so everything below it is smaller still — and 0 is the honest reading.
+        const relGap = left > EPS ? absGap / left : 0;
         const score = relGap * (absGap / range);
         if (score > bestScore) { bestScore = score; best = i + 1; }
     }
