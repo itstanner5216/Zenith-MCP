@@ -47,7 +47,7 @@
     "minimatch": "^10.2.6",
     "web-tree-sitter": "^0.26.12",
     "zenith-toon": "workspace:*",
-    "zod": "^4.4.3"
+    "zod": "^4.5.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
