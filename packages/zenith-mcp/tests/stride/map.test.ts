@@ -130,6 +130,26 @@ function arrayToBytes(name: string, targetBytes: number, record: (i: number) => 
     return { name, text: b.finish(), rootCount: count };
 }
 
+/**
+ * An array of exactly `count` elements.
+ *
+ * Sized by element count where `arrayToBytes` is sized by bytes: the outline
+ * bound is a MEMBER count, so a fixture that means to sit on a chosen side of
+ * it has to say how many members it wants. Naming a byte target instead lands
+ * wherever the record width happens to put it — a 400-byte target of `{"n":i}`
+ * records is 45 elements, not the 20 its name would suggest.
+ */
+function arrayOfCount(name: string, count: number, record: (i: number) => string): Fixture {
+    const b = new Blocks();
+    b.add('[');
+    for (let i = 0; i < count; i++) {
+        if (i > 0) b.add(',');
+        b.add(record(i));
+    }
+    b.add(']');
+    return { name, text: b.finish(), rootCount: count };
+}
+
 /** A root object of `keys` members, each `value(i)`. */
 function wideObject(name: string, keys: number, value: (i: number) => string): Fixture {
     const b = new Blocks();
@@ -525,7 +545,7 @@ describe('nothing is withheld without being counted', () => {
         for (const f of [
             heterogeneous('heterogeneous root'),
             deepSpine('deep spine, 256 levels', 256),
-            arrayToBytes('root array of 20 elements', 400, (i) => `{"n":${i}}`),
+            arrayOfCount('root array of 20 elements', 20, (i) => `{"n":${i}}`),
         ]) {
             const b = build(f);
             const named = b.map.outline.filter((e) => e.pointer !== '');
@@ -546,7 +566,7 @@ describe('nothing is withheld without being counted', () => {
         const shapes = [
             millionRecords(), wideRecords(), wideScalars(),
             heterogeneous('heterogeneous root'), deepSpine('deep spine, 256 levels', 256),
-            arrayToBytes('root array of 20 elements', 400, (i) => `{"n":${i}}`),
+            arrayOfCount('root array of 20 elements', 20, (i) => `{"n":${i}}`),
             { name: 'empty root object', text: '{}', rootCount: 0 },
             { name: 'empty root array', text: '[]', rootCount: 0 },
             { name: 'root array exactly at the bound', text: `[${new Array<string>(OUTLINE_MAX).fill('1').join(',')}]`, rootCount: OUTLINE_MAX },
