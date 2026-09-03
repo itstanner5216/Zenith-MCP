@@ -51,7 +51,10 @@ import { StrideIndex } from '../../src/core/stride/index.js';
 import { RESOLVE_ID_CACHE_MAX, Resolver, type Member } from '../../src/core/stride/resolve.js';
 import { BufferSource } from '../../src/core/stride/source.js';
 import { scanStructure, K_ARRAY, K_OBJECT } from '../../src/core/stride/scan.js';
-import { StrideError, type StrideKind, type StrideNode } from '../../src/core/stride/types.js';
+import {
+    DENSE_CHILD_LIMIT, STRIDE_DEFAULT, StrideError,
+    type StrideKind, type StrideNode,
+} from '../../src/core/stride/types.js';
 import { decodeJsonString } from '../../src/core/stride/index.js';
 
 /** Members in the fixtures below, so every window crosses several checkpoints. */
@@ -461,25 +464,6 @@ interface Subject {
     readonly pointers: readonly string[];
     /** True when the document is also small enough to check against `JSON.parse`. */
     readonly parseable: boolean;
-    /**
-     * Pointers the document HOLDS A VALUE AT that STRIDE cannot currently
-     * reach. Pinned rather than skipped: the oracle below requires each of them
-     * to keep failing, so the pin has to be deleted the moment the underlying
-     * defect is fixed instead of quietly outliving it.
-     *
-     * There is exactly one entry-worthy cause today, and it is not in this file.
-     * `index.ts` distinguishes an array element from an object member by a
-     * stored name length of zero, so `denseChildren` reports a member LEGALLY
-     * NAMED THE EMPTY STRING as `key: null` — indistinguishable from an element.
-     * `memberByKey`'s dense route compares against that null and finds nothing,
-     * so `"/"` cannot address the empty-named member of any container small
-     * enough to be indexed densely (at most DENSE_CHILD_LIMIT, 32). It resolves
-     * correctly in a checkpointed container, where the name is re-read from the
-     * source, which is why `wideObjectSubject` covers I8's `"/"` case for real.
-     * Confirmed present before the change this file's second half tests, and
-     * reported rather than worked around: the sentinel is index.ts's to fix.
-     */
-    readonly knownUnreachable: readonly string[];
 }
 
 /**
@@ -633,7 +617,7 @@ function alternatingSpine(depth: number): Subject {
         pointers.push(at);
     }
     pointers.push(`${at}/past-the-leaf`);
-    return { label: `alternating spine of ${depth} levels`, text, pointers, parseable: true, knownUnreachable: [] };
+    return { label: `alternating spine of ${depth} levels`, text, pointers, parseable: true };
 }
 
 /**
@@ -657,9 +641,7 @@ function wideObjectSubject(count: number): Subject {
         const token = pointerToken(keyFor(i));
         pointers.push(`/${token}`, `/${token}/n`, `/${token}/pad`, `/${token}/absent`, `/${token}/0`);
     }
-    // Checkpointed, so the empty-named member IS reachable here: this subject is
-    // where I8's `"/"` case is actually covered.
-    return { label: `wide object of ${count} members`, text: `{${parts.join(',')}}`, pointers, parseable: true, knownUnreachable: [] };
+    return { label: `wide object of ${count} members`, text: `{${parts.join(',')}}`, pointers, parseable: true };
 }
 
 /**
@@ -677,7 +659,7 @@ function bulkArraySubject(count: number): Subject {
     for (const i of [0, 1, 31, 32, 33, 63, 64, 512, 1000, count - 2, count - 1]) {
         pointers.push(`/${i}`, `/${i}/n`, `/${i}/tags`, `/${i}/tags/0`, `/${i}/tags/1`, `/${i}/tags/2`, `/${i}/absent`, `/${i}/n/0`);
     }
-    return { label: `bulk array of ${count} records`, text: `[${parts.join(',')}]`, pointers, parseable: true, knownUnreachable: [] };
+    return { label: `bulk array of ${count} records`, text: `[${parts.join(',')}]`, pointers, parseable: true };
 }
 
 /**
@@ -717,9 +699,10 @@ function heterogeneousSubject(): Subject {
         '/emptyObj', '/emptyObj/x', '/emptyArr', '/emptyArr/0',
         '/absent', 'nope', '/obj/two/three/0/deeper',
     ];
-    // The root is 20 members wide, so it is indexed densely, and its empty-named
-    // member is therefore unreachable by pointer — see `knownUnreachable`.
-    return { label: 'heterogeneous document', text, pointers, parseable: true, knownUnreachable: ['/'] };
+    // The root is 20 members wide, so it is indexed densely: this subject is
+    // where the DENSE route's `"/"` is put to the oracle, and
+    // `wideObjectSubject` is where the checkpointed route's is.
+    return { label: 'heterogeneous document', text, pointers, parseable: true };
 }
 
 /**
@@ -745,7 +728,7 @@ function aliasSubject(): Subject {
         '/~00', '/~00/d', '/~0/d', '/~01', '/~01/e', '/~1', '/~1/e',
         '/~2', '/~2/x', '/~/~/x/deeper',
     ];
-    return { label: 'members behind non-canonical escapes', text, pointers, parseable: true, knownUnreachable: [] };
+    return { label: 'members behind non-canonical escapes', text, pointers, parseable: true };
 }
 
 /** The documents that are nothing but edges: empty, scalar, and empty-named. */
@@ -771,9 +754,6 @@ function edgeSubjects(): Subject[] {
         text,
         pointers: edgePointers,
         parseable: true,
-        // Three nested empty-named members, each in a container one member wide
-        // and so indexed densely — see `knownUnreachable`.
-        knownUnreachable: text === '{"":{"":{"":1}}}' ? ['/', '//', '///'] : [],
     }));
 }
 
@@ -885,18 +865,6 @@ function assertAgreesWithJsonParse(subject: Subject): number {
         } catch (e) {
             expect(e, `${subject.label}: ${JSON.stringify(pointer)} must fail as a StrideError, not as a bare throw`).toBeInstanceOf(StrideError);
         }
-        if (subject.knownUnreachable.includes(pointer)) {
-            expect(
-                node,
-                `${JSON.stringify(pointer)} in the ${subject.label} is pinned as unreachable by index.ts's zero-length-name sentinel; it now resolves, so delete the pin`,
-            ).toBeNull();
-            expect(
-                truth.found,
-                `${JSON.stringify(pointer)} is only worth pinning if the document really does hold a value there`,
-            ).toBe(true);
-            checked++;
-            continue;
-        }
         expect(
             node !== null,
             `${subject.label}: ${JSON.stringify(pointer)} must resolve exactly when JSON.parse has a value there`,
@@ -963,8 +931,12 @@ describe('the fast id routes answer what the derivation answers', () => {
         const { source, index } = buildSubject(escapes, 'i8');
         const fast = new Resolver(index);
         const control = new Resolver(index, { shortcuts: false });
+        // This document's root is 20 members wide, so it is indexed DENSELY:
+        // these cases put I8 to the dense route, and the checkpointed route gets
+        // the same treatment below.
         const cases: ReadonlyArray<readonly [string, string, string]> = [
             ['', 'the whole document', escapes.text],
+            ['/', 'the member named "", not the document', '"empty name"'],
             ['/~0', 'the member named "~"', '"tilde"'],
             ['/a~1b', 'the member named "a/b"', '"slash"'],
             ['/~00', 'the member named "~0", not the member named "~"', '"literal tilde-zero"'],
@@ -983,10 +955,14 @@ describe('the fast id routes answer what the derivation answers', () => {
             ).toBe(bytes);
         }
 
-        // `"/"` is the member named the empty string and NOT the document —
-        // asserted against a checkpointed container, because in a dense one it
-        // is currently unreachable for a reason that belongs to index.ts (see
-        // `Subject.knownUnreachable`).
+        // `"/"` is the member named the empty string and NOT the document, on
+        // the CHECKPOINTED route as well as the dense one above. Both are here
+        // because the two read the name from different places — the dense table
+        // and the document's own bytes — and I8 has to hold on either.
+        expect(
+            fast.resolve('/').start === fast.resolve('').start,
+            '"/" and "" must not span the same bytes: one is a member, the other the document',
+        ).toBe(false);
         const wide = wideObjectSubject(2000);
         const built = buildSubject(wide, 'i8-empty-name');
         expect(
@@ -1170,4 +1146,243 @@ describe('bounded memory (I6)', () => {
         }
         console.log(`[bound] ${pointers.length} distinct nodes resolved, memo peaked at ${peak} of ${RESOLVE_ID_CACHE_MAX} entries`);
     }, 300_000);
+});
+
+// ---------------------------------------------------------------------------
+// A name STRIDE cannot say is a member STRIDE cannot address, and the two
+// places a name can be lost are the two places it is stored: the index's dense
+// child table, and nowhere at all — a checkpointed container re-reads its names
+// out of the document. Those are different code, so a name has to be put to
+// BOTH, at every container width where the build switches between them.
+//
+// The width sweep below is the point. `""` was reachable in a checkpointed
+// container and unreachable in a dense one for as long as it was, because a
+// hand-written fixture is almost always narrow and a generated one almost
+// always wide, so no single fixture ever crossed the boundary. These cross it in
+// both directions, and assert which route each width actually took rather than
+// assuming it.
+// ---------------------------------------------------------------------------
+
+/** Container widths that bracket every threshold the index switches on. */
+const NAME_SWEEP_SIZES: readonly number[] = [
+    1, 2, DENSE_CHILD_LIMIT - 1, DENSE_CHILD_LIMIT, DENSE_CHILD_LIMIT + 1,
+    STRIDE_DEFAULT, STRIDE_DEFAULT + 1, 300,
+];
+
+/**
+ * Names that share the empty name's code path: they are stored the same way,
+ * read back the same way, and each is one a pointer implementation is known to
+ * mishandle. `""` is the one this file was changed for; the rest are its
+ * neighbours, and a fix that special-cased the empty name would break them.
+ */
+const NEIGHBOUR_NAMES: readonly string[] = [
+    '',                 // the whole reason for this sweep: RFC 6901's "/"
+    '/',                // escapes to ~1, and is the byte a pointer splits on
+    '~',                // escapes to ~0
+    '~0',               // the LITERAL text "~0", which must escape to "~00"
+    '~1',               // the LITERAL text "~1", which must escape to "~01"
+    ' ',                // a single space: a name a trimming parser loses
+    '\u0000',        // a single NUL byte, which JSON escapes and C truncates
+    'x'.repeat(10_000), // longer than any name-length field should assume
+];
+
+/** Where in the container the name under test sits. */
+const NAME_POSITIONS: ReadonlyArray<readonly [string, (size: number) => number]> = [
+    ['the head', () => 0],
+    ['the interior', (size) => Math.floor(size / 2)],
+    ['the tail', (size) => size - 1],
+];
+
+/** A name, short enough to print and unambiguous about what it is. */
+function describeName(name: string): string {
+    if (name.length <= 24) return JSON.stringify(name);
+    return `${JSON.stringify(name.slice(0, 12))}... (${name.length} chars)`;
+}
+
+/**
+ * An object of `size` members, one of them named `name` at ordinal `at` and the
+ * rest named `f0`, `f1`, ... — none of which can collide with any name in
+ * NEIGHBOUR_NAMES. Values are distinct per ordinal, so landing on the wrong
+ * member is a visible failure and not a coincidence.
+ */
+function objectWithName(size: number, at: number, name: string): { text: string; target: string } {
+    const parts: string[] = [];
+    for (let i = 0; i < size; i++) {
+        const key = i === at ? name : `f${i}`;
+        parts.push(`${JSON.stringify(key)}:${JSON.stringify(`v${i}`)}`);
+    }
+    return { text: `{${parts.join(',')}}`, target: JSON.stringify(`v${at}`) };
+}
+
+describe('a member is addressable by its name whatever that name is and however wide its container', () => {
+    it('enumerates, resolves, finds by name and round-trips every awkward name at every width', () => {
+        let dense = 0;
+        let checkpointed = 0;
+        let cases = 0;
+
+        for (const name of NEIGHBOUR_NAMES) {
+            for (const size of NAME_SWEEP_SIZES) {
+                // Deduplicated: at size 1 and 2 the three positions collapse, and
+                // running the same document three times would inflate the case
+                // count without testing anything more.
+                const ats = [...new Set(NAME_POSITIONS.map(([, of]) => of(size)))];
+                for (const at of ats) {
+                    const where = NAME_POSITIONS.find(([, of]) => of(size) === at)?.[0] ?? 'the head';
+                    const subject = `an object of ${size} members with the member named ${describeName(name)} at ${where}`;
+                    const { text, target } = objectWithName(size, at, name);
+                    const source = new BufferSource(Buffer.from(text, 'utf8'), `names:${size}:${at}`);
+                    const index = StrideIndex.build(source);
+                    expect(index.stats.errorAt, `${subject}: the fixture must be well-formed JSON`).toBe(-1);
+
+                    const resolver = new Resolver(index);
+                    const root = resolver.root();
+                    expect(root.count, `${subject}: the root must hold all ${size} members`).toBe(size);
+
+                    // Which route this width took, asserted rather than assumed:
+                    // the defect was route-specific, so a sweep that did not know
+                    // its own route could pass while covering one route twice.
+                    const isDense = index.isDense(index.rootId);
+                    if (isDense) dense++; else checkpointed++;
+                    expect(
+                        isDense,
+                        `${subject}: a container of ${size} members must take the ${size <= DENSE_CHILD_LIMIT ? 'dense' : 'checkpointed'} route, and the sweep has to cover both`,
+                    ).toBe(size <= DENSE_CHILD_LIMIT);
+
+                    // ── enumerates ────────────────────────────────────────────
+                    const members = resolver.members(root, 0, size);
+                    expect(
+                        members.length,
+                        `${subject}: all ${size} members must enumerate, or one is withheld without being counted`,
+                    ).toBe(size);
+                    const listed = members[at];
+                    expect(
+                        listed?.key,
+                        `${subject}: the member at ordinal ${at} must enumerate WITH its name; null there means "array element, no name" and would hide it from every by-name route`,
+                    ).toBe(name);
+
+                    // ── found by name ─────────────────────────────────────────
+                    const byKey = resolver.memberByKey(root, name);
+                    expect(
+                        byKey === null,
+                        `${subject}: memberByKey must find it`,
+                    ).toBe(false);
+                    expect(
+                        byKey?.ordinal,
+                        `${subject}: memberByKey must find THAT member and not another`,
+                    ).toBe(at);
+
+                    // ── resolves by the pointer STRIDE emits for it ────────────
+                    // Built with this file's own escaper, so the pointer STRIDE
+                    // reports has to agree with an independent one rather than
+                    // with itself.
+                    const pointer = `/${pointerToken(name)}`;
+                    const node = resolver.resolve(pointer);
+                    expect(
+                        source.slice(node.start, node.end).toString('utf8'),
+                        `${subject}: ${JSON.stringify(pointer.slice(0, 40))} must span the value of that member and no other`,
+                    ).toBe(target);
+                    expect(
+                        node.pointer,
+                        `${subject}: the resolved node must report the canonical pointer it was reached by`,
+                    ).toBe(pointer);
+
+                    // ── round-trips ───────────────────────────────────────────
+                    // The emit/accept rule: hand STRIDE's own answer straight
+                    // back and require the same span, then check the name that
+                    // pointer decodes to against a splitter written here.
+                    const again = resolver.resolve(node.pointer);
+                    expect(
+                        `${again.start}..${again.end}`,
+                        `${subject}: re-resolving the pointer STRIDE emitted must land on the same bytes`,
+                    ).toBe(`${node.start}..${node.end}`);
+                    expect(
+                        splitPointer(node.pointer),
+                        `${subject}: the emitted pointer must decode back to exactly that one name`,
+                    ).toEqual([name]);
+
+                    // ── against JSON.parse ────────────────────────────────────
+                    const truth: unknown = JSON.parse(text);
+                    expect(
+                        JSON.parse(source.slice(node.start, node.end).toString('utf8')),
+                        `${subject}: the bytes STRIDE spanned are not the value JSON.parse holds at that name`,
+                    ).toEqual(valueAtTokens(truth, [name]).value);
+                    cases++;
+                }
+            }
+        }
+
+        console.log(`[names] ${cases} name/width/position cases: ${dense} on the dense route, ${checkpointed} on the checkpoint route`);
+        expect(
+            dense > 0 && checkpointed > 0,
+            `the sweep must cross the dense/checkpoint boundary in both directions; it ran ${dense} dense and ${checkpointed} checkpointed cases`,
+        ).toBe(true);
+    }, 300_000);
+
+    it('keeps an array element nameless, so the empty name and no name stay different facts', () => {
+        // The other half of the distinction, and the half a fix could break by
+        // making every row report a name. An element of an array has no name at
+        // any width, and `null` is how that is said.
+        for (const size of NAME_SWEEP_SIZES) {
+            const text = `[${Array.from({ length: size }, (_v, i) => JSON.stringify(`v${i}`)).join(',')}]`;
+            const source = new BufferSource(Buffer.from(text, 'utf8'), `elements:${size}`);
+            const index = StrideIndex.build(source);
+            const resolver = new Resolver(index);
+            const members = resolver.members(resolver.root(), 0, size);
+            expect(members.length, `an array of ${size} elements must enumerate all of them`).toBe(size);
+            for (const m of members) {
+                expect(
+                    m.key,
+                    `an array of ${size} elements: element ${m.ordinal} must report NO name; "" there would make it indistinguishable from a member named the empty string`,
+                ).toBeNull();
+            }
+            expect(
+                resolver.memberByKey(resolver.root(), '') === null,
+                `an array of ${size} elements has no member named "", so looking one up must find nothing`,
+            ).toBe(true);
+        }
+    }, 120_000);
+
+    it('addresses the empty name at every level of a spine of nothing but empty names', () => {
+        // Nesting is where a name lost at one level hides the levels beneath it:
+        // the pointer for depth 3 is "///", and it can only be reached if every
+        // level above it resolved by the same name first.
+        const depth = 6;
+        let text = '"bottom"';
+        for (let i = 0; i < depth; i++) text = `{"":${text},"sib${i}":${i}}`;
+        const source = new BufferSource(Buffer.from(text, 'utf8'), 'empty-name-spine');
+        const index = StrideIndex.build(source);
+        expect(index.stats.errorAt, 'the generated spine must be well-formed JSON').toBe(-1);
+        const resolver = new Resolver(index);
+        const control = new Resolver(index, { shortcuts: false });
+        for (let level = 1; level <= depth; level++) {
+            const pointer = '/'.repeat(level);
+            const node = resolver.resolve(pointer);
+            expect(
+                node.depth,
+                `${JSON.stringify(pointer)} is ${level} empty-named levels down and must resolve to depth ${level}`,
+            ).toBe(level);
+            expect(
+                describeResolution(resolver, pointer),
+                `${JSON.stringify(pointer)} must resolve identically with the id shortcuts on and off`,
+            ).toBe(describeResolution(control, pointer));
+        }
+        // `depth` empty-named levels put the leaf at `depth` tokens down, so the
+        // deepest pointer of the loop above is the one that reaches it.
+        const bottom = resolver.resolve('/'.repeat(depth));
+        expect(
+            source.slice(bottom.start, bottom.end).toString('utf8'),
+            `${JSON.stringify('/'.repeat(depth))} must reach the value at the bottom of the spine`,
+        ).toBe('"bottom"');
+        // One level past the leaf asks a string for a member. The empty name is
+        // still a name there, so this must fail as `not_found` and not resolve to
+        // the leaf: reaching "" everywhere must not mean reaching it anywhere.
+        expect(
+            describeResolution(resolver, '/'.repeat(depth + 1)),
+            `${JSON.stringify('/'.repeat(depth + 1))} asks the leaf string for a member named "" and must fail as not_found`,
+        ).toBe(describeResolution(control, '/'.repeat(depth + 1)));
+        expect(
+            describeResolution(resolver, '/'.repeat(depth + 1)).startsWith('fail not_found'),
+            `${JSON.stringify('/'.repeat(depth + 1))} must fail as not_found, and reported: ${describeResolution(resolver, '/'.repeat(depth + 1))}`,
+        ).toBe(true);
+    }, 120_000);
 });

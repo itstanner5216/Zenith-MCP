@@ -37,6 +37,11 @@ const SCAN_CHUNK_BYTES = 4 << 20;           // 4 MiB
  */
 export const MAX_SLICE_BYTES = 64 << 20;    // 64 MiB
 
+/**
+ * Read-only byte access to one document, whatever holds it. Both
+ * implementations answer in document offsets, so nothing above this module has
+ * to know whether the bytes came from a heap buffer or a file descriptor.
+ */
 export interface StrideSource {
     /** Total bytes in the document. */
     readonly size: number;
@@ -66,6 +71,47 @@ function guardRange(start: number, end: number, size: number): [number, number] 
         );
     }
     return [s, e];
+}
+
+/**
+ * The page holding byte `offset`.
+ *
+ * Division, deliberately, and not `offset >>> PAGE_BITS`. `>>>` coerces its
+ * operand to a 32-bit unsigned integer, so every offset at or above 2**32 wraps
+ * to a small page number: at exactly 4 GiB the page computes as 0, the in-page
+ * offset lands far past the end of that 1 MiB page, and the read comes back
+ * empty having raised nothing. Bytes that are not a verbatim slice of the source
+ * — an I1 violation the caller has no way to detect. STRIDE's envelope reaches
+ * into the gigabytes, so those offsets are inside it, not past it.
+ *
+ * Nothing underneath imposes a matching limit, so the reader imposes none
+ * either. Measured on this platform: `Buffer.constants.MAX_LENGTH` is
+ * 9007199254740991, and `fs.readSync` served a full 1 MiB page from position
+ * 4294967296. `offset / PAGE_BYTES` and `page * PAGE_BYTES` stay exact in a
+ * double for every page below 2**53 / PAGE_BYTES, which is 8 PiB of document at
+ * the 1 MiB page size — four million times the largest document STRIDE targets.
+ */
+function pageOf(offset: number): number {
+    return Math.floor(offset / PAGE_BYTES);
+}
+
+/**
+ * The failure every read on a closed source raises.
+ *
+ * `not_found` is the member of the closed StrideFailure set that fits: the
+ * offset addresses nothing in this document any longer, because the descriptor
+ * behind it has been released. Without this, the descriptor's own EBADF escapes
+ * instead — an error from outside the closed set, carrying no `recovery` for the
+ * caller to act on. It lives in one function because `close()` runs on every
+ * teardown path including error paths, so a read after close is reachable in
+ * ordinary use and three copies of the wording would drift apart.
+ */
+function closedError(): StrideError {
+    return new StrideError(
+        'not_found',
+        'The source is closed; its file descriptor has been released.',
+        'Open the document again with openSource(path) and reissue the read.',
+    );
 }
 
 /** A document already resident in memory. */
@@ -158,11 +204,11 @@ export class FileSource implements StrideSource {
     }
 
     slice(start: number, end: number): Buffer {
-        if (this.closed) throw new StrideError('not_found', 'Source is closed.', 'Reopen the document.');
+        if (this.closed) throw closedError();
         const [s, e] = guardRange(start, end, this.size);
         if (e === s) return Buffer.alloc(0);
-        const firstPage = s >>> PAGE_BITS;
-        const lastPage = (e - 1) >>> PAGE_BITS;
+        const firstPage = pageOf(s);
+        const lastPage = pageOf(e - 1);
         if (firstPage === lastPage) {
             // The common case: no copy, a view onto the cached page.
             const page = this.page(firstPage);
@@ -186,13 +232,23 @@ export class FileSource implements StrideSource {
     }
 
     byteAt(i: number): number {
+        // Closed first: a released descriptor can answer nothing, in range or
+        // out of it, and reaching fs.readSync on it is what leaks a bare EBADF.
+        if (this.closed) throw closedError();
         if (i < 0 || i >= this.size) return -1;
-        const page = this.page(i >>> PAGE_BITS);
-        return page[i - (i >>> PAGE_BITS) * PAGE_BYTES] ?? -1;
+        const index = pageOf(i);
+        const within = i - index * PAGE_BYTES;
+        // `within` is inside [0, page.length) for every in-range `i`, so the
+        // guard fires only if a page came back shorter than the size stat
+        // promised — a file truncated under an open descriptor. -1 is the
+        // interface's own "no such byte" answer and the only safe default here:
+        // a numeric one such as 0 would fabricate a byte the document does not
+        // contain, which is the I1 violation this module exists to prevent.
+        return this.page(index)[within] ?? -1;
     }
 
     sequential(from: number, to: number, onChunk: (chunk: Buffer, absolute: number) => void): void {
-        if (this.closed) throw new StrideError('not_found', 'Source is closed.', 'Reopen the document.');
+        if (this.closed) throw closedError();
         const s = Math.max(0, from);
         const e = Math.min(this.size, to);
         if (e <= s) return;

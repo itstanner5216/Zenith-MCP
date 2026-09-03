@@ -76,7 +76,20 @@ const CHECKPOINT_CAP = 16_384;
  */
 const KEY_INDEX_CAP = 262_144;
 
+/**
+ * This container recorded its members one by one, so its dense rows answer
+ * "which member is ordinal i" and "what is member i called" directly.
+ */
 export const F_DENSE = 1;
+/**
+ * This container was reduced to checkpoints, so a member is reached by seeking
+ * the offset below it and re-scanning the document forward.
+ *
+ * Exactly one of the two is set on any committed container — `commit` takes one
+ * branch or the other — which is what lets a lookup test them in order and
+ * treat the second as the answer when the first is absent, rather than having
+ * to rank two routes that both claim to hold the member.
+ */
 export const F_CHECKPOINT = 2;
 /**
  * Set when the key hash table ran out of room before it could cover every
@@ -86,6 +99,26 @@ export const F_CHECKPOINT = 2;
  * shortcut past a distance the stride already covers.
  */
 const F_PARTIAL_KEYS = 4;
+
+/**
+ * The `cKeyLen` entry of a dense row that carries NO MEMBER NAME AT ALL: every
+ * element of an array, and — only in a document that is already malformed — an
+ * object value the scanner emitted no `key` event in front of.
+ *
+ * Recorded name lengths are therefore BIASED BY ONE: a row holding a name of
+ * `n` bytes stores `n + 1`, so 0 is reserved for "no name" and can never also
+ * mean "a name of length zero". RFC 6901 makes `""` a legal member name, and the
+ * pointer `"/"` addresses it (I8), so "the empty name" and "no name" are two
+ * different facts about a row rather than one. An unbiased length collapses them
+ * into 0, which is what made a member named `""` indistinguishable from an array
+ * element and so unreachable through the dense route.
+ *
+ * The two cases cannot be confused again because the bias is decoded in exactly
+ * one place — `memberNameAt` — and nothing else in this module or outside it
+ * reads `cKeyOff` or `cKeyLen`. There is no second reader to forget it, and the
+ * encoded value 0 has no valid decoding as a name: it is the absence itself.
+ */
+const ROW_HAS_NO_NAME = 0;
 
 /** Everything the index knows about one indexed node, materialised on demand. */
 export interface IndexedNode {
@@ -106,7 +139,12 @@ export interface ChildRef {
     readonly kind: StrideKind;
     /** Node id when this child is itself indexed, else -1. */
     readonly node: number;
-    /** Member name for an object child, or null for an array element. */
+    /**
+     * Member name for an object child, or null when the child has no name at
+     * all. `null` means "array element", NOT "a name of zero length": a member
+     * legally named the empty string reports `''`, which is what makes the
+     * pointer `"/"` addressable (I8). See `ROW_HAS_NO_NAME`.
+     */
     readonly key: string | null;
     /** Ordinal within the parent. */
     readonly ordinal: number;
@@ -224,6 +262,7 @@ export class StrideIndex {
     private cKind = new Uint8Array(0);
     private cNode = new Int32Array(0);
     private cKeyOff = new Uint32Array(0);
+    /** Name length BIASED BY ONE; `ROW_HAS_NO_NAME` for a row with no name. */
     private cKeyLen = new Uint32Array(0);
     private cCounter = 0;
 
@@ -271,7 +310,28 @@ export class StrideIndex {
         return this.nSlot[id] ?? -1;
     }
 
-    /** Member name of `id`, or null when its parent is an array or it is the root. */
+    /**
+     * The name recorded for dense row `row`, or null when that row carries none.
+     *
+     * The ONLY reader of `cKeyOff` and `cKeyLen`, which is what makes the
+     * one-byte bias on the stored length unforgettable — see `ROW_HAS_NO_NAME`.
+     * A row outside the table answers null rather than defaulting the offset:
+     * `cKeyOff` and `cKeyLen` are grown and written as a pair and are never
+     * partially populated, so `undefined` from either can only mean the row does
+     * not exist, and a name read from a defaulted offset 0 would be some other
+     * member's bytes.
+     */
+    private memberNameAt(row: number): string | null {
+        const off = this.cKeyOff[row];
+        const encoded = this.cKeyLen[row];
+        if (off === undefined || encoded === undefined || encoded === ROW_HAS_NO_NAME) return null;
+        return this.keyBlob.toString('utf8', off, off + (encoded - 1));
+    }
+
+    /**
+     * Member name of `id`, or null when its parent is an array or it is the root.
+     * A member named the empty string answers `''`, not null.
+     */
     keyOf(id: number): string | null {
         const parent = this.nParent[id] ?? -1;
         if (parent < 0) return null;
@@ -279,11 +339,7 @@ export class StrideIndex {
         const off = this.nChildOff[parent] ?? -1;
         const len = this.nChildLen[parent] ?? 0;
         for (let i = 0; i < len; i++) {
-            if (this.cNode[off + i] === id) {
-                const ko = this.cKeyOff[off + i] ?? 0;
-                const kl = this.cKeyLen[off + i] ?? 0;
-                return kl === 0 ? null : this.keyBlob.toString('utf8', ko, ko + kl);
-            }
+            if (this.cNode[off + i] === id) return this.memberNameAt(off + i);
         }
         return null;
     }
@@ -302,14 +358,12 @@ export class StrideIndex {
         if (off < 0 || len === 0) return [];
         const out: ChildRef[] = new Array<ChildRef>(len);
         for (let i = 0; i < len; i++) {
-            const ko = this.cKeyOff[off + i] ?? 0;
-            const kl = this.cKeyLen[off + i] ?? 0;
             out[i] = {
                 start: this.cStart[off + i] ?? 0,
                 end: this.cEnd[off + i] ?? 0,
                 kind: KIND_NAMES[this.cKind[off + i] ?? 0] ?? 'null',
                 node: this.cNode[off + i] ?? -1,
-                key: kl === 0 ? null : this.keyBlob.toString('utf8', ko, ko + kl),
+                key: this.memberNameAt(off + i),
                 ordinal: i,
             };
         }
@@ -635,6 +689,15 @@ export class StrideIndex {
             frame.count++;
             if (frame.nodeId < 0) return;
 
+            // Whether this member HAS a name, which is a question about the
+            // scanner having emitted a `key` event in front of it and not about
+            // how long that name turned out to be. Every element of an array
+            // answers false; every member of a well-formed object answers true,
+            // including one whose name is the empty string. Read here, before
+            // `pendNameStart` is cleared, because both the resumable boundary and
+            // the recorded name length turn on it.
+            const named = frame.kind === K_OBJECT && frame.pendNameStart >= 0;
+
             // Where a scan that resumes at this member has to begin. For an
             // ARRAY element that is the value's first byte. For an OBJECT member
             // it is the first byte of the NAME, because an object interior
@@ -644,9 +707,7 @@ export class StrideIndex {
             // missing here means the document is malformed at this point, which
             // `errorAt` already reports, and the value's own start is then the
             // only offset that exists.
-            const boundary = frame.kind === K_OBJECT && frame.pendNameStart >= 0
-                ? frame.pendNameStart
-                : start;
+            const boundary = named ? frame.pendNameStart : start;
             frame.pendNameStart = -1;
 
             if (frame.dense) {
@@ -655,7 +716,11 @@ export class StrideIndex {
                 frame.dKind.push(kind);
                 frame.dNode.push(nodeId);
                 frame.dKeyOff.push(frame.pendKeyOff);
-                frame.dKeyLen.push(frame.kind === K_OBJECT ? frame.pendKeyLen : 0);
+                // Biased by one so that a name of zero length stays distinct from
+                // no name at all — see `ROW_HAS_NO_NAME`. `named` is what decides,
+                // so `{"":1}` records 1 here and `[1]` records 0, and the member
+                // the pointer `"/"` addresses survives into the dense table.
+                frame.dKeyLen.push(named ? frame.pendKeyLen + 1 : ROW_HAS_NO_NAME);
                 frame.dBoundary.push(boundary);
                 frame.pendKeyLen = 0;
                 if (frame.count > DENSE_CHILD_LIMIT) {
