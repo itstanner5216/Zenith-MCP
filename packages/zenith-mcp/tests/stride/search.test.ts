@@ -1149,7 +1149,23 @@ describe('the rates this module\'s cost is made of', () => {
         return median(rates);
     }
 
-    it('folds ASCII at about 0.42 GB/s over 64 KiB chunks', () => {
+    // This loop is a local copy of the fold in search.ts, so its rate measures the
+    // HOST, not the module. The header above quotes 0.42 GB/s on node v22.23.2;
+    // the machine this was last run on folds the same loop at 1.62-1.69 GB/s idle
+    // and 1.51 under a full-suite load — 3.9x the reference, from clock and codegen
+    // alone. A band drawn around one machine's figure therefore fails on faster
+    // hardware while proving nothing about search.ts.
+    //
+    // What survives a change of host is that the body actually touched all `size`
+    // bytes. The rate is computed from `bytes`, not from anything the body did, so
+    // an elided body still reports one: measured on this host, an empty body reads
+    // 2,906 GB/s and a body touching a single byte 1,509 GB/s, against 1.5 for the
+    // real fold. The 10 GB/s ceiling sits ~150x under the cheaper of those two
+    // elisions and ~6x over the fastest honest reading; a scalar per-byte loop
+    // carrying a bounds check and two comparisons cannot reach it (10 GB/s is
+    // ~0.1 ns/byte, about 3 bytes per cycle at 3.5 GHz). Crossing it means the
+    // measurement stopped measuring. The 0.15 floor is the same guard downward.
+    it('folds ASCII over 64 KiB chunks at a rate that proves it touched every byte', () => {
         const size = SEARCH_BLOCK_BYTES;
         const src = Buffer.allocUnsafe(size);
         for (let i = 0; i < size; i++) src[i] = 0x41 + (i % 58);
@@ -1160,10 +1176,12 @@ describe('the rates this module\'s cost is made of', () => {
                 dst[i] = b === undefined ? 0 : (b >= 0x41 && b <= 0x5a ? b + 0x20 : b);
             }
         });
-        expect(rate, `the ASCII fold loop measured ${rate.toFixed(3)} GB/s against a documented 0.42`)
+        expect(rate, `the ASCII fold loop measured ${rate.toFixed(3)} GB/s (reference: 0.42 on the machine `
+            + 'the header was written on); below 0.15 the loop is not folding at a rate any host explains')
             .toBeGreaterThan(0.15);
-        expect(rate, `the ASCII fold loop measured ${rate.toFixed(3)} GB/s against a documented 0.42`)
-            .toBeLessThan(1.5);
+        expect(rate, `the ASCII fold loop measured ${rate.toFixed(3)} GB/s; above 10 the body cannot have `
+            + 'touched all 65,536 bytes, so the harness is measuring an elided loop rather than a fold')
+            .toBeLessThan(10);
     }, 120_000);
 
     it('searches a folded 64 KiB JSON window far faster than it folds it, and by a wide margin', () => {
