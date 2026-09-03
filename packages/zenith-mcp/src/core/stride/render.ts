@@ -451,6 +451,20 @@ function decodeStringPrefix(raw: Buffer, limit: number): string | null {
 }
 
 /**
+ * Byte range of a scalar's VALUE: inside the quotes for a string, the whole span
+ * otherwise.
+ *
+ * Computed in one place because four things have to agree about where the value
+ * starts — the excerpt's first byte, the marker's range, the omission's span and
+ * the envelope's continuation — and for a string that start is one byte past the
+ * node's own span. Four separate `kind === 'string' ? start + 1 : start` sites
+ * are four chances for one of them to drift by that quote.
+ */
+function scalarValueRange(span: RenderSpan): readonly [number, number] {
+    return span.kind === 'string' ? [span.start + 1, span.end - 1] : [span.start, span.end];
+}
+
+/**
  * A scalar that does not fit. A string yields a leading verbatim excerpt plus a
  * marker; anything else yields the marker alone, because a truncated number is
  * not a number and emitting one would be a fabricated value.
@@ -462,12 +476,24 @@ function decodeStringPrefix(raw: Buffer, limit: number): string | null {
  * truncation impossible to miss, keeps the marker flush-left so it matches
  * MARKER_RE, and the envelope still reports `kind: "string"`.
  */
-function scalarPreview(ctx: Ctx, span: RenderSpan, allot: number): Rendered | null {
+function scalarPreview(ctx: Ctx, span: RenderSpan, allot: number, fromByte = 0): Rendered | null {
     const isString = span.kind === 'string';
-    const from = isString ? span.start + 1 : span.start;
-    const to = isString ? span.end - 1 : span.end;
-    const total = to - from;
+    const [base, to] = scalarValueRange(span);
+    const total = to - base;
     if (total <= 0) return null;
+
+    // Every byte count here is absolute — measured from the start of the VALUE,
+    // never from this excerpt. `fromByte` is what makes the `scalar` cursor an
+    // address instead of a label: without it a truncated scalar handed back its
+    // own continuation and was served the same head bytes again. Measured on a
+    // 1,750-byte string at budget 600: the omission declared 1,305 bytes
+    // withheld from span [451,1756] and its cursor resumed at 445, but the view
+    // at offset 445 was byte-identical to the view at 0 and its cursor pointed
+    // at 445 once more. The walk could not terminate and those 1,305 bytes were
+    // unreachable while an omission claimed they were addressed, which is I4
+    // failing in the one direction a caller cannot detect.
+    const consumed = Math.min(Math.max(0, Math.floor(fromByte)), total);
+    const start = base + consumed;
 
     const markerAt = (shownBytes: number): string => buildMarker({
         head: `bytes ${shownBytes}-${total} of ${total}`,
@@ -479,43 +505,60 @@ function scalarPreview(ctx: Ctx, span: RenderSpan, allot: number): Rendered | nu
     // excerpt is sized before either string exists.
     const reserve = jsonStringChars(markerAt(total));
     const record = (shownBytes: number): void => {
+        // An omission of zero bytes addresses nothing, and recording one would
+        // put a `next` on a view with no tail left — the same non-terminating
+        // walk from the other end.
+        if (shownBytes >= total) return;
         ctx.omissions.push({
             of: 'bytes',
             pointer: span.pointer,
             count: total - shownBytes,
             total,
-            span: [from + shownBytes, to],
+            span: [base + shownBytes, to],
             cursor: address('scalar', span.pointer, shownBytes).cursor,
             reason: 'budget',
         });
     };
 
+    // A caller resuming at or past the end has already been given every byte.
+    // The marker says so and carries no omission, which ends the walk; an empty
+    // string here would read as a value that is empty.
+    if (consumed >= total) {
+        const done = markerAt(total);
+        const doneChars = jsonStringChars(done);
+        return doneChars > allot ? null : { value: done, chars: doneChars };
+    }
+
     if (isString) {
         // 2 brackets + 1 comma for the wrapper, then quotes on the excerpt.
         const room = allot - 3 - reserve - 2;
-        const rawMax = Math.min(SCALAR_PREVIEW_BYTES, room, MAX_SLICE_BYTES);
+        // Capped at what is left of the value, so `usedBytes` can never count
+        // the closing quote as content.
+        const rawMax = Math.min(SCALAR_PREVIEW_BYTES, room, MAX_SLICE_BYTES, total - consumed);
         if (rawMax >= 1) {
-            const raw = ctx.resolver.source.slice(from, Math.min(to, from + rawMax));
+            const raw = ctx.resolver.source.slice(start, Math.min(to, start + rawMax));
             const text = decodeStringPrefix(raw, rawMax);
             if (text !== null && text.length > 0) {
                 // How many source bytes the excerpt actually consumed, so the
-                // marker and the omission name the same boundary.
+                // marker and the omission name the same boundary. Added to what
+                // earlier views consumed, because the marker's range is absolute.
                 const usedBytes = Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
-                const marker = markerAt(usedBytes);
+                const shownEnd = consumed + usedBytes;
+                const marker = markerAt(shownEnd);
                 const value = [text, marker];
                 const chars = estimateChars(value);
                 if (chars <= allot) {
-                    record(usedBytes);
+                    record(shownEnd);
                     return { value, chars };
                 }
             }
         }
     }
 
-    const bare = markerAt(0);
+    const bare = markerAt(consumed);
     const chars = jsonStringChars(bare);
     if (chars > allot) return null;
-    record(0);
+    record(consumed);
     return { value: bare, chars };
 }
 
@@ -1175,7 +1218,7 @@ export function renderNode(resolver: Resolver, node: StrideNode, opts: RenderOpt
         } else {
             const fallback = isContainer
                 ? subtreeMarker(ctx, span, allot, 'budget')
-                : (scalarPreview(ctx, span, allot) ?? subtreeMarker(ctx, span, allot, 'budget'));
+                : (scalarPreview(ctx, span, allot, offset) ?? subtreeMarker(ctx, span, allot, 'budget'));
             if (fallback !== null) {
                 value = fallback.value;
                 chars = fallback.chars;
@@ -1194,11 +1237,27 @@ export function renderNode(resolver: Resolver, node: StrideNode, opts: RenderOpt
         // back covers the same ground it walked forward.
         if (from > 0) prev = address('read', node.pointer, Math.max(0, from - Math.max(1, to - from)));
     } else if (!isContainer) {
+        const [base, valueEnd] = scalarValueRange(span);
+        // With no byte omission the view reached the end of the value, so the
+        // bytes shown run to the value's own length.
+        let shownEnd = valueEnd - base;
         for (const o of ctx.omissions) {
             if (o.of === 'bytes' && o.pointer === node.pointer) {
-                next = address('scalar', node.pointer, o.total - o.count);
+                shownEnd = o.total - o.count;
+                next = address('scalar', node.pointer, shownEnd);
                 break;
             }
+        }
+        // Page backwards by the width this view achieved, mirroring the
+        // container arm above, so a caller walking a long scalar back covers
+        // the same ground it walked forward. Measured from the position that
+        // was actually read rather than the one asked for: an offset past the
+        // end is clamped for the read, and a `prev` derived from the raw
+        // request would address a byte the value does not have.
+        const here = Math.min(offset, valueEnd - base);
+        if (here > 0) {
+            const width = Math.max(1, shownEnd - here);
+            prev = address('scalar', node.pointer, Math.max(0, here - width));
         }
     }
     const parent = node.parent === null ? null : address('read', node.parent, 0);

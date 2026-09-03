@@ -581,6 +581,129 @@ describe('truncation is never silent', () => {
     }, 60_000);
 });
 
+describe('the scalar cursor retrieves the bytes it names', () => {
+    /**
+     * Bytes recovered by following ONLY the cursors the views hand back, and
+     * whether the walk ever stops advancing.
+     *
+     * Set-equality against the source value, not containment: an implementation
+     * that serves the same head bytes forever passes any containment check
+     * against a repeating body, and that is exactly the defect this guards.
+     */
+    function walkScalar(resolver: Resolver, pointer: string, budget: number): {
+        text: string; steps: number; stalled: boolean;
+    } {
+        const node = resolver.resolve(pointer);
+        const seen = new Set<number>([0]);
+        let offset = 0;
+        let text = '';
+        let steps = 0;
+        for (;;) {
+            // The walk must terminate on its own; the cap only stops a red run
+            // from hanging the suite.
+            if (steps++ > 20_000) return { text, steps, stalled: true };
+            const view = renderNode(resolver, node, { budget, offset });
+            assertUniversal(view, resolver.source.size, `scalar walk at offset ${offset}, budget ${budget}`);
+            text += contentStrings(view.data).join('');
+            const withheld = view.envelope.omitted.find((o) => o.of === 'bytes');
+            if (withheld === undefined) return { text, steps, stalled: false };
+            const resume = decodeCursor(withheld.cursor).offset;
+            if (seen.has(resume)) return { text, steps, stalled: true };
+            seen.add(resume);
+            offset = resume;
+        }
+    }
+
+    // Budgets start at 120 rather than at MIN_VIEW_BUDGET because below one
+    // marker's width — measured at 78-84 characters for a scalar marker — no
+    // offset can show content at all, so `recordWholeSpan` declares the whole
+    // span withheld and no cursor could make progress. That floor is a property
+    // of the budget, not of the address, and 120 is the smallest of these that
+    // clears it. MIN_BUDGET_CHARS (256) sits comfortably above it.
+    const BUDGETS = [120, 200, 256, 600, 1_000, 4_000, 40_000] as const;
+
+    it('reconstructs a long scalar exactly, by cursor alone, at every budget above the marker floor', () => {
+        const bodies: readonly { readonly name: string; readonly body: string }[] = [
+            // Non-repeating, so a byte range that never arrives cannot be
+            // mistaken for one that did.
+            { name: 'non-repeating ascii', body: Array.from({ length: 250 }, (_, i) => `Q${String(i).padStart(6, '0')}`).join('') },
+            { name: 'repeating ascii', body: 'abcdefghij'.repeat(1_200) },
+            // Multi-byte and astral, where a resumed read could land mid-codepoint.
+            { name: 'astral emoji and CJK', body: Array.from({ length: 900 }, (_, i) => (i % 3 === 0 ? '\u{1f600}' : i % 3 === 1 ? '中文' : 'é')).join('') },
+            // Escape-heavy, where one source byte and one string character differ.
+            { name: 'escape-heavy', body: Array.from({ length: 600 }, (_, i) => `a"b\\c\nd${i}`).join('') },
+        ];
+        for (const { name, body } of bodies) {
+            const resolver = open(JSON.stringify({ a: body }), `scalar-walk-${name}`);
+            for (const budget of BUDGETS) {
+                const walked = walkScalar(resolver, '/a', budget);
+                expect(
+                    walked.stalled,
+                    `${name} at budget ${budget}: the walk stopped advancing after ${walked.steps} steps with `
+                    + `${walked.text.length} of ${body.length} characters recovered. A cursor that does not move `
+                    + 'is an omission claiming to be addressed while nothing can reach it (I4).',
+                ).toBe(false);
+                expect(
+                    walked.text,
+                    `${name} at budget ${budget}: following the cursors recovered ${walked.text.length} of `
+                    + `${body.length} characters in ${walked.steps} steps. Every byte the omissions named must `
+                    + 'arrive, and it must be the byte the source holds there.',
+                ).toBe(body);
+            }
+        }
+    }, 120_000);
+
+    it('terminates at an offset on or past the end, and pages back inside the value', () => {
+        const body = 'x'.repeat(3_000);
+        const resolver = open(JSON.stringify({ a: body }), 'scalar-past-end');
+        const node = resolver.resolve('/a');
+        for (const offset of [2_999, 3_000, 3_001, 99_999]) {
+            const view = renderNode(resolver, node, { budget: 600, offset });
+            assertUniversal(view, resolver.source.size, `scalar at offset ${offset}`);
+            expect(
+                view.envelope.next,
+                `offset ${offset} is at or past the ${body.length}-byte value, so there is no tail to offer; a `
+                + 'continuation here is a walk that cannot end',
+            ).toBeUndefined();
+            const prev = view.envelope.prev;
+            if (prev !== undefined) {
+                expect(
+                    prev.offset ?? 0,
+                    `offset ${offset}: prev addresses byte ${prev.offset ?? 0} of a ${body.length}-byte value. `
+                    + 'A backward address has to name a byte the value actually has.',
+                ).toBeLessThanOrEqual(body.length);
+            }
+        }
+    });
+
+    it('resumes on the boundary the previous view stopped at, so no byte is shown twice or skipped', () => {
+        // 7 bytes per chunk, each naming its own ordinal: a duplicated or
+        // dropped chunk is visible in the reconstruction, not just in a length.
+        const body = Array.from({ length: 400 }, (_, i) => `C${String(i).padStart(6, '0')}`).join('');
+        const resolver = open(JSON.stringify({ a: body }), 'scalar-boundary');
+        const node = resolver.resolve('/a');
+        let offset = 0;
+        const pieces: string[] = [];
+        for (let step = 0; step < 200; step++) {
+            const view = renderNode(resolver, node, { budget: 400, offset });
+            pieces.push(contentStrings(view.data).join(''));
+            const withheld = view.envelope.omitted.find((o) => o.of === 'bytes');
+            if (withheld === undefined) break;
+            expect(
+                withheld.span[0],
+                `step ${step}: the omission's span starts at byte ${withheld.span[0]}, but its cursor resumes at `
+                + `${decodeCursor(withheld.cursor).offset} counted from the value's first byte. The two have to `
+                + 'name the same boundary or a caller loses or repeats the bytes between them.',
+            ).toBe(resolver.resolve('/a').start + 1 + decodeCursor(withheld.cursor).offset);
+            offset = decodeCursor(withheld.cursor).offset;
+        }
+        expect(
+            pieces.join(''),
+            `the pieces joined to ${pieces.join('').length} characters against a ${body.length}-character value`,
+        ).toBe(body);
+    });
+});
+
 describe('a cut never lands inside a codepoint', () => {
     it('truncates emoji, CJK and combining marks without producing a lone surrogate', () => {
         // Astral emoji (surrogate pairs), CJK (3-byte UTF-8), and base letters
