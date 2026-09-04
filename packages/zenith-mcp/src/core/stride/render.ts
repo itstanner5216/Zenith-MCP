@@ -426,6 +426,19 @@ function safeUtf8End(buf: Buffer, limit: number): number {
     return i + need <= end ? end : i;
 }
 
+/** A decoded excerpt and the number of SOURCE bytes it consumed. */
+interface StringPrefix {
+    readonly text: string;
+    /**
+     * Bytes of the string's interior this excerpt covers, measured in the
+     * document's own encoding. It is the decoder's cut, not a property of
+     * `text`: the two differ by a factor of six on `\uXXXX` input, and any
+     * attempt to recover it from `text` afterwards has already lost the
+     * information — which is the whole reason this is a pair and not a string.
+     */
+    readonly bytes: number;
+}
+
 /**
  * Decode the leading bytes of a JSON string's interior. The cut may land inside
  * an escape sequence, which no amount of byte arithmetic can detect reliably
@@ -434,7 +447,7 @@ function safeUtf8End(buf: Buffer, limit: number): number {
  * surrogate is dropped, because emitting one would put a lone surrogate in the
  * payload.
  */
-function decodeStringPrefix(raw: Buffer, limit: number): string | null {
+function decodeStringPrefix(raw: Buffer, limit: number): StringPrefix | null {
     let cut = safeUtf8End(raw, limit);
     for (let tries = 0; tries < 8 && cut > 0; tries++) {
         try {
@@ -442,7 +455,14 @@ function decodeStringPrefix(raw: Buffer, limit: number): string | null {
             if (typeof parsed !== 'string') return null;
             const n = parsed.length;
             const last = n > 0 ? parsed.charCodeAt(n - 1) : 0;
-            return last >= 0xd800 && last <= 0xdbff ? parsed.slice(0, n - 1) : parsed;
+            if (last < 0xd800 || last > 0xdbff) return { text: parsed, bytes: cut };
+            // Dropping the character means giving back its bytes too, and there
+            // are exactly six of them: a lone high surrogate can only have come
+            // from a `\uXXXX` escape, because valid UTF-8 cannot encode a
+            // surrogate and CESU-8 bytes decode to U+FFFD instead of one.
+            // Reporting `cut` here would step the next page past an escape whose
+            // character was never shown.
+            return { text: parsed.slice(0, n - 1), bytes: cut - 6 };
         } catch {
             cut = safeUtf8End(raw, cut - 1);
         }
@@ -537,15 +557,29 @@ function scalarPreview(ctx: Ctx, span: RenderSpan, allot: number, fromByte = 0):
         const rawMax = Math.min(SCALAR_PREVIEW_BYTES, room, MAX_SLICE_BYTES, total - consumed);
         if (rawMax >= 1) {
             const raw = ctx.resolver.source.slice(start, Math.min(to, start + rawMax));
-            const text = decodeStringPrefix(raw, rawMax);
-            if (text !== null && text.length > 0) {
-                // How many source bytes the excerpt actually consumed, so the
-                // marker and the omission name the same boundary. Added to what
-                // earlier views consumed, because the marker's range is absolute.
-                const usedBytes = Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
-                const shownEnd = consumed + usedBytes;
+            const prefix = decodeStringPrefix(raw, rawMax);
+            if (prefix !== null && prefix.text.length > 0 && prefix.bytes > 0) {
+                // The decoder's own cut, so the marker and the omission name the
+                // boundary the excerpt actually stopped at. Added to what earlier
+                // views consumed, because the marker's range is absolute.
+                //
+                // Re-serialising the decoded text to measure this instead —
+                // `Buffer.byteLength(JSON.stringify(text)) - 2` — was wrong for
+                // every escape `JSON.stringify` does not reproduce, and it was
+                // wrong in the direction that fabricates content. `\u0041` is six
+                // source bytes and one serialised character, so a 120-character
+                // value written that way advanced 20 bytes per page instead of
+                // 120: the next page resumed inside the escape, `u0041` decoded
+                // as text, and the walk handed back 720 characters for a
+                // 120-character string. Measured at budgets 120, 200 and 400;
+                // `\/` (2 bytes, 1 character) doubled a 200-character value the
+                // same way, and `\ud83d\ude00` inflated by 2.5x-3x. The
+                // fixtures in the test that asserts this property could never
+                // show it, because they were built with `JSON.stringify`, which
+                // emits none of those three forms.
+                const shownEnd = consumed + prefix.bytes;
                 const marker = markerAt(shownEnd);
-                const value = [text, marker];
+                const value = [prefix.text, marker];
                 const chars = estimateChars(value);
                 if (chars <= allot) {
                     record(shownEnd);
@@ -1297,23 +1331,41 @@ export function renderNode(resolver: Resolver, node: StrideNode, opts: RenderOpt
         if (from > 0) prev = address('read', node.pointer, Math.max(0, from - Math.max(1, to - from)));
     } else if (!isContainer) {
         const [base, valueEnd] = scalarValueRange(span);
+        // The position that was actually read rather than the one asked for: an
+        // offset past the end is clamped for the read, and arithmetic against
+        // the raw request would address a byte the value does not have.
+        const here = Math.min(offset, valueEnd - base);
         // With no byte omission the view reached the end of the value, so the
         // bytes shown run to the value's own length.
         let shownEnd = valueEnd - base;
         for (const o of ctx.omissions) {
             if (o.of === 'bytes' && o.pointer === node.pointer) {
                 shownEnd = o.total - o.count;
-                next = address('scalar', node.pointer, shownEnd);
+                // Only when the excerpt covered ground. A budget too small to
+                // hold one marker beside one byte yields the marker alone, and
+                // that omission's cursor is `here` by design — honest about
+                // showing nothing. Offering it as `next` turned that honesty
+                // into a cycle: the caller is handed the address it just called.
+                // With no `next` the view falls to the stall hint, which asks
+                // for a larger budget instead.
+                //
+                // The band where nothing can advance is not a constant, and it
+                // is not confined below MIN_BUDGET_CHARS: the marker carries a
+                // cursor, the cursor encodes the pointer, so a deeper node has
+                // a wider marker and a higher floor. Measured on a 720-byte
+                // u-escaped string, highest budget that could not advance
+                // against pointer length: 96 at 2 chars, 107 at 8, 120 at 14,
+                // 144 at 26, 193 at 50, 289 at 98, 484 at 194 — tracking the
+                // marker's own width of 67, 78, 88, 110, 152, 238 and 408
+                // characters. Anything that reads the floor as a fixed number
+                // is reading one pointer's measurement.
+                if (shownEnd > here) next = address('scalar', node.pointer, shownEnd);
                 break;
             }
         }
         // Page backwards by the width this view achieved, mirroring the
         // container arm above, so a caller walking a long scalar back covers
-        // the same ground it walked forward. Measured from the position that
-        // was actually read rather than the one asked for: an offset past the
-        // end is clamped for the read, and a `prev` derived from the raw
-        // request would address a byte the value does not have.
-        const here = Math.min(offset, valueEnd - base);
+        // the same ground it walked forward.
         if (here > 0) {
             const width = Math.max(1, shownEnd - here);
             prev = address('scalar', node.pointer, Math.max(0, here - width));
