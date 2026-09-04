@@ -568,14 +568,38 @@ function scalarPreview(ctx: Ctx, span: RenderSpan, allot: number, fromByte = 0):
  * fits, because an empty container looks like content and a marker cannot be
  * mistaken for any.
  */
-function subtreeMarker(ctx: Ctx, span: RenderSpan, allot: number, reason: 'budget' | 'depth'): Rendered | null {
+function subtreeMarker(
+    ctx: Ctx,
+    span: RenderSpan,
+    allot: number,
+    reason: 'budget' | 'depth',
+    /**
+     * The ordinal the caller asked to start at. Zero everywhere the whole node
+     * was requested; the caller's own offset when a paged container produced
+     * nothing. It is NOT a byte position — a scalar stall passes 0, because a
+     * byte offset fed to a `read` cursor would address a member index.
+     */
+    resume: number,
+): Rendered | null {
     const bytes = span.end - span.start;
     const count = span.count >= 0 ? span.count : establishCount(ctx, span);
     const unit = span.kind === 'object' ? 'keys' : 'elements';
     const detail = count >= 0 && (span.kind === 'object' || span.kind === 'array')
         ? `${count} ${unit}, ${bytes} bytes`
         : `${bytes} bytes`;
-    const cursor = address('read', span.pointer, 0).cursor;
+    // Where the CALLER stood, not 0. This marker stands for a request that
+    // produced nothing, and a cursor addressing 0 sends the caller back to a
+    // page it has already read. Measured on a 50-record array at budget 200:
+    // offset 0 showed elements 0-4 and pointed `next` at 5, offset 5 showed
+    // nothing and answered with a cursor to 0, so a caller following the
+    // addresses walked 0 -> 5 -> 0 forever and elements 5-49 were unreachable.
+    // 94 of the budgets in [5,4000] behaved that way for that document, 126 for
+    // a 40-key object, and 185 for the same 50 records under a 43-character
+    // pointer — the band widens with the pointer, because a longer cursor makes
+    // the two gap markers the reserve pays for longer. Resuming where the
+    // caller stood makes the failure stationary and the `reason` explains it,
+    // instead of a cycle that reads as progress.
+    const cursor = address('read', span.pointer, resume).cursor;
     const marker = buildMarker({
         // The pointer goes in bare, as the marker form specifies — except at
         // the document root, where the pointer IS the empty string and printing
@@ -588,11 +612,25 @@ function subtreeMarker(ctx: Ctx, span: RenderSpan, allot: number, reason: 'budge
     }, allot);
     const chars = jsonStringChars(marker);
     if (chars > allot) return null;
+    const isContainer = span.kind === 'object' || span.kind === 'array';
+    const size = reason === 'depth' || isContainer ? Math.max(count, 0) : bytes;
+    // A paged container that showed nothing withheld the requested window
+    // onward, not the whole container: `[0, resume)` was excluded by the
+    // caller's own offset, and charging the budget with it both overstates the
+    // loss and points recovery at 0. No companion omission is emitted for
+    // `[0, resume)` either. `assemble` has to emit one because an array's
+    // markers stand at the ordinals they replace, so a missing below-window
+    // marker would make the first shown member read as element 0; this payload
+    // is a single marker and makes no positional claim, so there is no index
+    // for a below-window run to correct.
+    const paged = isContainer && reason === 'budget';
+    const from = paged ? Math.min(Math.max(0, resume), size) : 0;
     ctx.omissions.push({
-        of: reason === 'depth' ? 'depth' : (span.kind === 'object' ? 'keys' : span.kind === 'array' ? 'elements' : 'bytes'),
+        of: reason === 'depth' ? 'depth' : (isContainer ? (span.kind === 'object' ? 'keys' : 'elements') : 'bytes'),
         pointer: span.pointer,
-        count: reason === 'depth' ? Math.max(count, 0) : (span.kind === 'object' || span.kind === 'array' ? Math.max(count, 0) : bytes),
-        total: reason === 'depth' ? Math.max(count, 0) : (span.kind === 'object' || span.kind === 'array' ? Math.max(count, 0) : bytes),
+        count: size - from,
+        ...(paged ? { range: [from, size] as readonly [number, number] } : {}),
+        total: size,
         span: [span.start, span.end],
         cursor,
         reason,
@@ -1045,7 +1083,7 @@ function renderValue(ctx: Ctx, span: RenderSpan, allot: number, depth: number): 
     // Depth is checked before the budget, because a budget large enough to pay
     // for 50,000 levels of nesting would otherwise let this recursive walk
     // reach the stack limit. A marker costs one frame; the subtree costs many.
-    if (depth >= MAX_RENDER_DEPTH) return subtreeMarker(ctx, span, allot, 'depth');
+    if (depth >= MAX_RENDER_DEPTH) return subtreeMarker(ctx, span, allot, 'depth', 0);
 
     const whole = verbatim(ctx, span, allot, depth);
     if (whole !== null) return whole;
@@ -1053,11 +1091,11 @@ function renderValue(ctx: Ctx, span: RenderSpan, allot: number, depth: number): 
     if (span.kind === 'object' || span.kind === 'array') {
         const split = renderContainer(ctx, span, allot, depth, 0, Number.MAX_SAFE_INTEGER);
         if (split !== null) return { value: split.value, chars: split.chars };
-        return subtreeMarker(ctx, span, allot, 'budget');
+        return subtreeMarker(ctx, span, allot, 'budget', 0);
     }
     const preview = scalarPreview(ctx, span, allot);
     if (preview !== null) return preview;
-    return subtreeMarker(ctx, span, allot, 'budget');
+    return subtreeMarker(ctx, span, allot, 'budget', 0);
 }
 
 // ── the exported renders ──────────────────────────────────────────────────
@@ -1109,18 +1147,23 @@ function payloadAllot(budget: number): number {
  * difference: a probe across three models scored 46.7 / 44.4 / 23.3 out of 100
  * at noticing silent mid-task content loss, and mostly caught it when cued.
  */
-function recordWholeSpan(ctx: Ctx, span: RenderSpan, count: number): void {
+function recordWholeSpan(ctx: Ctx, span: RenderSpan, count: number, resume: number): void {
     const isContainer = span.kind === 'object' || span.kind === 'array';
     const bytes = span.end - span.start;
     const size = isContainer ? Math.max(count, 0) : bytes;
+    // Same rule as `subtreeMarker`: measure the loss from where the caller
+    // stood and address the recovery there. A last-resort omission that rewinds
+    // is worse than the `null` payload it accompanies, because the payload at
+    // least admits it is empty while the cursor claims somewhere to go.
+    const from = isContainer ? Math.min(Math.max(0, resume), size) : 0;
     ctx.omissions.push({
         of: isContainer ? (span.kind === 'object' ? 'keys' : 'elements') : 'bytes',
         pointer: span.pointer,
-        count: size,
-        ...(isContainer ? { range: [0, size] as readonly [number, number] } : {}),
+        count: size - from,
+        ...(isContainer ? { range: [from, size] as readonly [number, number] } : {}),
         total: size,
         span: [span.start, span.end],
-        cursor: address(isContainer ? 'read' : 'scalar', span.pointer, 0).cursor,
+        cursor: address(isContainer ? 'read' : 'scalar', span.pointer, from).cursor,
         reason: 'budget',
     });
 }
@@ -1133,7 +1176,12 @@ function recordWholeSpan(ctx: Ctx, span: RenderSpan, count: number): void {
  * payload is documented to be read as decoration — `[..., ... +7 more]` once
  * produced validation code that rejected the seven.
  */
-function hintFor(node: StrideNode, omitted: readonly StrideOmission[], next: StrideAddress | null): string {
+function hintFor(
+    node: StrideNode,
+    omitted: readonly StrideOmission[],
+    next: StrideAddress | null,
+    shown: readonly [number, number] | null,
+): string {
     const here = JSON.stringify(node.pointer);
     const complete = node.parent === null
         ? `Nothing is withheld: this view is all of ${here}. No further call is needed for this pointer.`
@@ -1158,6 +1206,17 @@ function hintFor(node: StrideNode, omitted: readonly StrideOmission[], next: Str
     const target = next !== null ? next : { pointer: widest.pointer, offset: resume, cursor: widest.cursor };
     const unit = widest.of === 'depth' ? 'ancestor levels' : widest.of;
     const regions = omitted.length === 1 ? '1 withheld region' : `${omitted.length} withheld regions`;
+    // Nothing was shown and there is nowhere to advance to, so the address that
+    // produced this view produces it again. Naming that call as the recovery is
+    // half of what turned a stalled page into a cycle — the other half being a
+    // cursor that rewound — and the recovery for a budget stall is a larger
+    // budget, so that is what the instruction has to say.
+    if (shown === null && next === null && widest.reason === 'budget') {
+        return `NONE of the ${widest.count} ${unit} under ${JSON.stringify(widest.pointer)} at offset ${resume} `
+            + `fit this budget, out of ${widest.total} (${regions} in total). Raise the budget, then call mode `
+            + `${JSON.stringify(op)} with pointer ${JSON.stringify(widest.pointer)} and offset ${resume}, or cursor `
+            + `${JSON.stringify(widest.cursor)}. The same call at this budget returns this same view.`;
+    }
     return `${widest.count} of ${widest.total} ${unit} under ${JSON.stringify(widest.pointer)} are not in this view `
         + `(${regions} in total). Call mode ${JSON.stringify(op)} with pointer ${JSON.stringify(target.pointer)} `
         + `and offset ${target.offset ?? resume}, or cursor ${JSON.stringify(target.cursor)}, to fetch it.`;
@@ -1217,13 +1276,13 @@ export function renderNode(resolver: Resolver, node: StrideNode, opts: RenderOpt
             shown = rendered.shown;
         } else {
             const fallback = isContainer
-                ? subtreeMarker(ctx, span, allot, 'budget')
-                : (scalarPreview(ctx, span, allot, offset) ?? subtreeMarker(ctx, span, allot, 'budget'));
+                ? subtreeMarker(ctx, span, allot, 'budget', offset)
+                : (scalarPreview(ctx, span, allot, offset) ?? subtreeMarker(ctx, span, allot, 'budget', 0));
             if (fallback !== null) {
                 value = fallback.value;
                 chars = fallback.chars;
             } else {
-                recordWholeSpan(ctx, span, node.count);
+                recordWholeSpan(ctx, span, node.count, isContainer ? offset : 0);
             }
         }
     }
@@ -1272,7 +1331,7 @@ export function renderNode(resolver: Resolver, node: StrideNode, opts: RenderOpt
         ...(next === null ? {} : { next }),
         ...(prev === null ? {} : { prev }),
         ...(parent === null ? {} : { parent }),
-        hint: hintFor(node, ctx.omissions, next),
+        hint: hintFor(node, ctx.omissions, next, shown),
     };
     return { data: value, envelope, chars, budget };
 }
@@ -1478,7 +1537,7 @@ export function renderWindow(resolver: Resolver, node: StrideNode, opts: RenderO
             reason: 'budget',
         });
         const bare = renderValue(ctx, targetSpan, usable, node.depth);
-        if (bare === null) recordWholeSpan(ctx, targetSpan, node.count);
+        if (bare === null) recordWholeSpan(ctx, targetSpan, node.count, 0);
         data = bare === null ? null : bare.value;
     } else {
         const meta = {
@@ -1520,7 +1579,7 @@ export function renderWindow(resolver: Resolver, node: StrideNode, opts: RenderO
         if (content === null && contentAllot >= MIN_MEMBER_CHARS) {
             content = renderValue(ctx, targetSpan, contentAllot, node.depth);
         }
-        if (content === null) recordWholeSpan(ctx, targetSpan, node.count);
+        if (content === null) recordWholeSpan(ctx, targetSpan, node.count, 0);
         data = { [STRIDE_KEY]: { ...meta, of }, window: content === null ? null : content.value };
     }
 
@@ -1531,7 +1590,7 @@ export function renderWindow(resolver: Resolver, node: StrideNode, opts: RenderO
     // payload rather than breaking I3 — the same trade the allocator makes
     // everywhere else: less shown, never more claimed.
     if (chars > usable) {
-        recordWholeSpan(ctx, targetSpan, node.count);
+        recordWholeSpan(ctx, targetSpan, node.count, 0);
         data = null;
         chars = estimateChars(null);
         reached = false;
@@ -1560,7 +1619,7 @@ export function renderWindow(resolver: Resolver, node: StrideNode, opts: RenderO
         ...(next === null ? {} : { next }),
         ...(prev === null ? {} : { prev }),
         ...(parentAddress === null ? {} : { parent: parentAddress }),
-        hint: hintFor(node, ctx.omissions, next),
+        hint: hintFor(node, ctx.omissions, next, reached ? [reachFrom, reachTo] : null),
     };
     return { data, envelope, chars, budget };
 }

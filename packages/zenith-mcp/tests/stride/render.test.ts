@@ -922,4 +922,121 @@ describe('paging a container is addressed in both directions', () => {
         expect(seen.size, 'paging delivered no keys at all').toBeGreaterThan(0);
         expect(pages, 'paging terminated on the first page').toBeGreaterThan(1);
     }, 120_000);
+
+    /**
+     * Documents whose containers are narrow enough that a marker costs a real
+     * share of a small budget. That is where paging breaks: a page at offset 0
+     * pays for ONE omitted run, `[1, count)`, while a page at any interior
+     * offset pays for TWO, `[0, offset)` and `[offset + 1, count)`, and between
+     * those two costs lies a band of budgets that can start a walk but not
+     * continue it. The last fixture is the same array under a 43-character
+     * pointer, because a longer pointer makes a longer cursor makes a longer
+     * marker: its band is 185 budgets wide against the root array's 94.
+     */
+    function pagingFixtures(): Array<{ name: string; doc: string; pointer: string }> {
+        const recs: string[] = [];
+        for (let i = 0; i < 50; i++) recs.push(`{"id":${i},"n":"v${i}"}`);
+        const array = `[${recs.join(',')}]`;
+        const strings: string[] = [];
+        for (let i = 0; i < 30; i++) strings.push(`"string number ${i} here"`);
+        return [
+            { name: '50 records', doc: array, pointer: '' },
+            { name: '100 numbers', doc: bigArrayDocument(100), pointer: '' },
+            { name: '40 keys', doc: wideObjectDocument(40), pointer: '' },
+            { name: '30 strings', doc: `[${strings.join(',')}]`, pointer: '' },
+            {
+                name: '50 records under a deep pointer',
+                doc: `{"alpha":{"bravo":{"charlie":{"delta":{"echo":{"foxtrot":{"golf":${array}}}}}}}}`,
+                pointer: '/alpha/bravo/charlie/delta/echo/foxtrot/golf',
+            },
+        ];
+    }
+
+    it('never hands back an address below the one it was called with', () => {
+        // The band is entirely under 400 for every fixture here — 114-207 for
+        // the records, 205-389 for the same records under the deep pointer — so
+        // the sweep runs one budget at a time across it rather than sampling.
+        for (const fixture of pagingFixtures()) {
+            const resolver = open(fixture.doc, `paging-${fixture.name}`);
+            const docBytes = byteLength(fixture.doc);
+            const node = resolver.resolve(fixture.pointer);
+            expect(node, `${fixture.name}: pointer ${fixture.pointer} did not resolve`).not.toBeNull();
+            if (node === null) continue;
+            for (let budget = 5; budget <= 500; budget++) {
+                let offset = 0;
+                const visited: number[] = [];
+                for (let step = 0; step < node.count + 2; step++) {
+                    const view = renderNode(resolver, node, { budget, offset });
+                    assertUniversal(view, docBytes, `${fixture.name} budget ${budget} offset ${offset}`);
+                    visited.push(offset);
+                    const shown = view.envelope.shown;
+                    if (shown === undefined) {
+                        const om = view.envelope.omitted;
+                        const last = om[om.length - 1];
+                        expect(last, `${fixture.name} budget ${budget}: offset ${offset} showed nothing and recorded no omission`)
+                            .toBeDefined();
+                        if (last === undefined) break;
+                        expect(decodeCursor(last.cursor).offset,
+                            `${fixture.name} budget ${budget}: a stall at offset ${offset} addressed recovery at a LOWER offset,`
+                            + ` so a caller following the addresses walks ${visited.join(' -> ')} and back`).toBe(offset);
+                        break;
+                    }
+                    const next = view.envelope.next;
+                    if (next === undefined) {
+                        expect(shown[1], `${fixture.name} budget ${budget}: offset ${offset} showed [${shown[0]},${shown[1]}]`
+                            + ` of ${node.count} and offered no way on`).toBeGreaterThanOrEqual(node.count);
+                        break;
+                    }
+                    const at = decodeCursor(next.cursor).offset;
+                    expect(at, `${fixture.name} budget ${budget}: next addressed ${at} from ${offset}`
+                        + ` (visited ${visited.join(' -> ')})`).toBeGreaterThan(offset);
+                    offset = at;
+                }
+                expect(visited.length, `${fixture.name} budget ${budget}: the walk never terminated`
+                    + ` in ${node.count + 2} pages`).toBeLessThanOrEqual(node.count + 1);
+            }
+        }
+    }, 120_000);
+
+    it('measures a stall from the offset asked for, not from the start of the container', () => {
+        const recs: string[] = [];
+        for (let i = 0; i < 50; i++) recs.push(`{"id":${i},"n":"v${i}"}`);
+        const doc = `[${recs.join(',')}]`;
+        const resolver = open(doc, 'paging-stall');
+        const root = resolver.root();
+
+        // Budget 200 is inside the measured band: offset 0 shows elements 0-4
+        // and points `next` at 5, and offset 5 cannot afford the two markers a
+        // page at an interior offset needs. Before this was fixed the stall
+        // answered with `count 50, total 50` and a cursor to 0.
+        const first = renderNode(resolver, root, { budget: 200, offset: 0 });
+        assertUniversal(first, byteLength(doc), 'records at budget 200 offset 0');
+        expect(first.envelope.shown, 'the fixture no longer pages at budget 200; the band moved').toBeDefined();
+        const next = first.envelope.next;
+        expect(next, 'the first page of the fixture offered no next').toBeDefined();
+        if (next === undefined) return;
+        const resume = decodeCursor(next.cursor).offset;
+        expect(resume, 'the fixture no longer stalls on its second page; the band moved').toBeGreaterThan(0);
+
+        const stalled = renderNode(resolver, root, { budget: 200, offset: resume });
+        assertUniversal(stalled, byteLength(doc), `records at budget 200 offset ${resume}`);
+        expect(stalled.envelope.shown, 'the second page now fits; the band moved').toBeUndefined();
+        expect(stalled.envelope.omitted, 'a stalled page recorded no omission').toHaveLength(1);
+        const om = stalled.envelope.omitted[0];
+        expect(om, 'a stalled page recorded no omission').toBeDefined();
+        if (om === undefined) return;
+        expect(om.reason, 'a page that failed on budget blamed something else').toBe('budget');
+        expect(om.total, 'the omission misreports how many elements the container holds').toBe(50);
+        expect(om.range, `the omission does not name the range the request asked for`).toEqual([resume, 50]);
+        expect(om.count, 'the omission charges the budget with elements the offset had already excluded')
+            .toBe(50 - resume);
+        expect(decodeCursor(om.cursor).offset, 'the omission addresses recovery back at the start of the container')
+            .toBe(resume);
+        // The hint is the instruction a caller actually follows, so it must not
+        // name the call that just failed as a plain retry.
+        expect(stalled.envelope.hint, 'the hint tells the caller to repeat the call that just returned nothing')
+            .toContain('Raise the budget');
+        expect(stalled.envelope.hint, 'the hint does not say which offset to resume at')
+            .toContain(`offset ${resume}`);
+    });
 });
