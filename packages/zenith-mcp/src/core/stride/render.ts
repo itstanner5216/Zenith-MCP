@@ -149,10 +149,269 @@ function jsonStringChars(s: string): number {
 }
 
 /**
+ * A JSON number carried as the bytes the document wrote it with, not as a
+ * double.
+ *
+ * Every other JSON form survives a parse and a re-serialise unchanged. A number
+ * does not, and it fails in three separate ways, none of them detectable in the
+ * output. Precision past 17 significant digits is discarded, so an int64
+ * identifier comes back a different identifier: 1889283923049203712 leaves as
+ * 1889283923049203700 and 18446744073709551615 as 18446744073709552000.
+ * Magnitude past the double range becomes Infinity, which serialises as `null`,
+ * and below it becomes 0 — so `1e400` and `1e-400` do not come back as numbers
+ * at all. And a representation the document chose is replaced by V8's canonical
+ * one: `1.2000` -> `1.2`, `1E+2` -> `100`, `-0` -> `0`.
+ *
+ * I1 says every byte STRIDE returns is copied from the source or is `__stride`
+ * metadata, and a number that arrived as one value and left as another is
+ * neither. So numbers are not parsed: the reader keeps the token, `estimateChars`
+ * measures the token, and `toJsonText` writes the token. All nine cases above
+ * were measured before the fix and are pinned as tests.
+ *
+ * There is deliberately no `toJSON`. One returning `text` would make
+ * `JSON.stringify` emit `"1889283923049203712"`, a quoted digit string — which
+ * is a shape some APIs really do use for large integers, so a caller that
+ * forgot `toJsonText` would receive something plausible and wrong. Without one,
+ * the same mistake yields `{"text":"1889283923049203712"}`, which cannot be read
+ * as a document value by accident.
+ */
+export class SourceNumber {
+    constructor(readonly text: string) {}
+}
+
+const C_TAB = 9;
+const C_LF = 10;
+const C_CR = 13;
+const C_SPACE = 32;
+const C_QUOTE = 34;
+const C_PLUS = 43;
+const C_COMMA = 44;
+const C_MINUS = 45;
+const C_DOT = 46;
+const C_ZERO = 48;
+const C_NINE = 57;
+const C_COLON = 58;
+const C_UPPER_E = 69;
+const C_OPEN_BRACKET = 91;
+const C_BACKSLASH = 92;
+const C_CLOSE_BRACKET = 93;
+const C_LOWER_E = 101;
+const C_OPEN_BRACE = 123;
+const C_CLOSE_BRACE = 125;
+
+/** A container the reader has entered and not yet closed. */
+type Frame =
+    | { readonly kind: 'array'; readonly items: unknown[] }
+    | { readonly kind: 'object'; readonly record: Record<string, unknown>; key: string };
+
+/**
+ * Read one JSON value from a slice, keeping every number as its source text.
+ *
+ * Replaces `JSON.parse` on the verbatim path, and has to be a real parser rather
+ * than a parse followed by a repair: `JSON.parse` discards the number tokens
+ * before anything can look at them, and pairing the parsed value back up with
+ * tokens re-scanned from the source only works until a document repeats an
+ * object key, at which point the parsed value holds fewer numbers than the
+ * source does and every later pairing is off by one.
+ *
+ * Iterative, over an explicit stack, for the reason stated on `estimateChars`:
+ * the slice is bounded by the allotment but its DEPTH is not, and a 4,000-
+ * character budget still admits 2,000 levels of `[[[[...]]]]`. `JSON.parse`
+ * survives that natively; a recursive reader would throw RangeError where the
+ * old code returned a value, which is a crash introduced in the name of
+ * fidelity.
+ *
+ * Returns null on anything malformed, exactly where `JSON.parse` would have
+ * thrown, so the caller's fallback is unchanged. Strictness is its own reason to
+ * be here: this reader accepts RFC 8259 and nothing else, and it is what decides
+ * whether a span is emittable — not the structural scanner, which is lenient by
+ * design because it must not stop at the first oddity in a 20 GB file.
+ */
+function readSourceValue(raw: Buffer): { readonly value: unknown } | null {
+    const n = raw.length;
+    let i = 0;
+
+    const ws = (): void => {
+        while (i < n) {
+            const c = raw[i];
+            if (c === C_SPACE || c === C_TAB || c === C_LF || c === C_CR) i++;
+            else break;
+        }
+    };
+
+    /** The string starting at `i`, decoded, or null if it is not one. */
+    const readString = (): string | null => {
+        if (raw[i] !== C_QUOTE) return null;
+        let j = i + 1;
+        while (j < n) {
+            const c = raw[j];
+            if (c === C_BACKSLASH) { j += 2; continue; }
+            if (c === C_QUOTE) break;
+            // A raw control character is invalid inside a JSON string, and
+            // accepting one here would emit a payload no strict reader can
+            // parse — I2 is about the caller's parser, not this one.
+            if (c === undefined || c < C_SPACE) return null;
+            j++;
+        }
+        if (j >= n || raw[j] !== C_QUOTE) return null;
+        // `JSON.parse` on the quoted token, because escape decoding is where a
+        // hand-written reader earns its bugs: surrogate pairs, `\u0000`, and
+        // `\/` all have to come out exactly as V8 would have them, or the
+        // string STRIDE returns is not the string the document holds.
+        try {
+            const parsed: unknown = JSON.parse(raw.toString('utf8', i, j + 1));
+            if (typeof parsed !== 'string') return null;
+            i = j + 1;
+            return parsed;
+        } catch {
+            return null;
+        }
+    };
+
+    /** The number token starting at `i`, or null if it is not a valid one. */
+    const readNumber = (): SourceNumber | null => {
+        const start = i;
+        const digits = (): boolean => {
+            const from = i;
+            while (i < n) {
+                const c = raw[i];
+                if (c === undefined || c < C_ZERO || c > C_NINE) break;
+                i++;
+            }
+            return i > from;
+        };
+        if (raw[i] === C_MINUS) i++;
+        // Leading zeros are not a JSON number: `01` is two tokens, and a reader
+        // that accepts it emits a payload the caller cannot parse back.
+        if (raw[i] === C_ZERO) i++;
+        else if (!digits()) return null;
+        if (raw[i] === C_DOT) { i++; if (!digits()) return null; }
+        const e = raw[i];
+        if (e === C_LOWER_E || e === C_UPPER_E) {
+            i++;
+            const sign = raw[i];
+            if (sign === C_PLUS || sign === C_MINUS) i++;
+            if (!digits()) return null;
+        }
+        return new SourceNumber(raw.toString('utf8', start, i));
+    };
+
+    /** The literal starting at `i`, or undefined if it is not one. */
+    const readLiteral = (): { readonly value: unknown } | undefined => {
+        for (const [text, value] of LITERALS) {
+            if (raw.length - i >= text.length && raw.toString('utf8', i, i + text.length) === text) {
+                i += text.length;
+                return { value };
+            }
+        }
+        return undefined;
+    };
+
+    const frames: Frame[] = [];
+    let value: unknown;
+
+    // Two phases alternating: read a value, then attach it to the frame that
+    // wanted it. `want` says which the loop is in.
+    let want = true;
+    for (;;) {
+        if (want) {
+            ws();
+            if (i >= n) return null;
+            const c = raw[i];
+            if (c === C_OPEN_BRACKET) {
+                i++;
+                ws();
+                if (raw[i] === C_CLOSE_BRACKET) { i++; value = []; want = false; continue; }
+                frames.push({ kind: 'array', items: [] });
+                continue;
+            }
+            if (c === C_OPEN_BRACE) {
+                i++;
+                ws();
+                if (raw[i] === C_CLOSE_BRACE) { i++; value = {}; want = false; continue; }
+                const key = readString();
+                if (key === null) return null;
+                ws();
+                if (raw[i] !== C_COLON) return null;
+                i++;
+                frames.push({ kind: 'object', record: {}, key });
+                continue;
+            }
+            if (c === C_QUOTE) {
+                const text = readString();
+                if (text === null) return null;
+                value = text;
+                want = false;
+                continue;
+            }
+            if (c === C_MINUS || (c !== undefined && c >= C_ZERO && c <= C_NINE)) {
+                const num = readNumber();
+                if (num === null) return null;
+                value = num;
+                want = false;
+                continue;
+            }
+            const literal = readLiteral();
+            if (literal === undefined) return null;
+            value = literal.value;
+            want = false;
+            continue;
+        }
+
+        const frame = frames[frames.length - 1];
+        if (frame === undefined) {
+            // The root value is complete. Trailing content is a malformed
+            // document, not a value with a suffix.
+            ws();
+            return i === n ? { value } : null;
+        }
+        if (frame.kind === 'array') {
+            frame.items.push(value);
+            ws();
+            if (raw[i] === C_COMMA) { i++; want = true; continue; }
+            if (raw[i] !== C_CLOSE_BRACKET) return null;
+            i++;
+            value = frame.items;
+            frames.pop();
+            continue;
+        }
+        // Last occurrence of a repeated key wins, which is what `JSON.parse`
+        // does. Preserving both is a separate question from preserving numbers,
+        // and answering it here would change this path's output for documents
+        // that have nothing to do with the defect being fixed.
+        frame.record[frame.key] = value;
+        ws();
+        if (raw[i] === C_COMMA) {
+            i++;
+            ws();
+            const key = readString();
+            if (key === null) return null;
+            ws();
+            if (raw[i] !== C_COLON) return null;
+            i++;
+            frame.key = key;
+            want = true;
+            continue;
+        }
+        if (raw[i] !== C_CLOSE_BRACE) return null;
+        i++;
+        value = frame.record;
+        frames.pop();
+    }
+}
+
+/** The three JSON literals, longest first so no prefix shadows another. */
+const LITERALS: readonly (readonly [string, unknown])[] = [
+    ['false', false],
+    ['true', true],
+    ['null', null],
+];
+
+/**
  * Exact serialised character count of a JSON-shaped value — the same number
- * `JSON.stringify(value).length` would give, computed structurally so that
+ * `toJsonText(value).length` would give, computed structurally so that
  * measuring a value never allocates a copy of it. Values here are only ever
- * `JSON.parse` output plus STRIDE's own strings, arrays and plain objects.
+ * `readSourceValue` output plus STRIDE's own strings, arrays and plain objects.
  *
  * Iterative, over an explicit stack, for the same reason the scanner is: V8's
  * `JSON.parse` accepts nesting far deeper than a recursive walk of the result
@@ -174,6 +433,9 @@ export function estimateChars(value: unknown): number {
             case 'object': break;
             default: total += 4; continue;      // undefined/function/symbol -> `null`
         }
+        // Before the object branch, which would otherwise walk `text` as a
+        // member and measure the box instead of the number it carries.
+        if (v instanceof SourceNumber) { total += v.text.length; continue; }
         if (Array.isArray(v)) {
             // Brackets plus one comma between each pair of elements. An element
             // stringify would drop still occupies a slot, as `null`.
@@ -193,6 +455,75 @@ export function estimateChars(value: unknown): number {
         total += members > 0 ? members - 1 : 0;
     }
     return total;
+}
+
+/**
+ * Serialise a payload to JSON text, writing every number as the document wrote
+ * it.
+ *
+ * This exists because `JSON.stringify` cannot: `SourceNumber` is the one value
+ * in a payload it has no correct rendering for, and the whole point of the box
+ * is that no JS value can hold `1e400` or nineteen significant digits. Callers
+ * serialise a view with this, not with `JSON.stringify`.
+ *
+ * It is the twin of `estimateChars`, and the pairing is load-bearing rather than
+ * decorative: I3 bounds `chars <= budget` using a count taken BEFORE the payload
+ * is built, so if the count and the text ever disagree the bound is being
+ * enforced against a number that does not describe the answer. They are written
+ * to the same rules — the same treatment of a non-finite number, the same
+ * omission of members `stringify` would drop — and a property test asserts
+ * `estimateChars(v) === toJsonText(v).length` over every shape in this file's
+ * fixtures rather than trusting that they were kept in step.
+ *
+ * Iterative, for the reason given on `estimateChars`: a payload STRIDE can
+ * measure is a payload it must be able to write, and recursion puts the limit on
+ * writing far below the limit on measuring.
+ */
+export function toJsonText(value: unknown): string {
+    const out: string[] = [];
+    // Either literal text to emit, or a value still to be rendered. Pushed in
+    // reverse of emission order, because a stack pops backwards.
+    type Step = { readonly text: string } | { readonly render: unknown };
+    const stack: Step[] = [{ render: value }];
+    while (stack.length > 0) {
+        const step = stack.pop();
+        if (step === undefined) break;          // unreachable: length was checked
+        if ('text' in step) { out.push(step.text); continue; }
+        const v = step.render;
+        if (v === null) { out.push('null'); continue; }
+        switch (typeof v) {
+            case 'boolean': out.push(v ? 'true' : 'false'); continue;
+            case 'number': out.push(Number.isFinite(v) ? String(v) : 'null'); continue;
+            case 'string': out.push(JSON.stringify(v)); continue;
+            case 'object': break;
+            default: out.push('null'); continue;    // undefined/function/symbol
+        }
+        if (v instanceof SourceNumber) { out.push(v.text); continue; }
+        if (Array.isArray(v)) {
+            stack.push({ text: ']' });
+            for (let k = v.length - 1; k >= 0; k--) {
+                stack.push({ render: v[k] });
+                if (k > 0) stack.push({ text: ',' });
+            }
+            out.push('[');
+            continue;
+        }
+        // The same filter `estimateChars` applies, and it has to be the same one:
+        // a member counted but not written, or written but not counted, is a
+        // budget enforced against the wrong length.
+        const members = Object.entries(v as Record<string, unknown>)
+            .filter(([, m]) => m !== undefined && typeof m !== 'function' && typeof m !== 'symbol');
+        stack.push({ text: '}' });
+        for (let k = members.length - 1; k >= 0; k--) {
+            const entry = members[k];
+            if (entry === undefined) continue;  // unreachable: k indexes members
+            stack.push({ render: entry[1] });
+            stack.push({ text: `${JSON.stringify(entry[0])}:` });
+            if (k > 0) stack.push({ text: ',' });
+        }
+        out.push('{');
+    }
+    return out.join('');
 }
 
 // ── Markers ───────────────────────────────────────────────────────────────
@@ -367,6 +698,10 @@ function emittable(root: unknown, allowedDepth: number): boolean {
         // cannot happen; refusing is the safe answer if it ever did.
         if (depth === undefined) return false;
         if (value === null || typeof value !== 'object') continue;
+        // A scalar that happens to be carried in an object. Descending into it
+        // would spend a nesting level the payload does not have and reject a
+        // value at MAX_RENDER_DEPTH that serialises perfectly well.
+        if (value instanceof SourceNumber) continue;
         if (depth >= allowedDepth) return false;
         if (Array.isArray(value)) {
             for (const item of value) { values.push(item); depths.push(depth + 1); }
@@ -391,12 +726,9 @@ function verbatim(ctx: Ctx, span: RenderSpan, allot: number, depth: number): Ren
     // MAX_SLICE_BYTES is the source's own single-slice ceiling; past it the
     // slice throws rather than returning, so the split path takes over.
     if (bytes > MAX_SLICE_BYTES) return null;
-    let value: unknown;
-    try {
-        value = JSON.parse(ctx.resolver.source.slice(span.start, span.end).toString('utf8'));
-    } catch {
-        return null;
-    }
+    const read = readSourceValue(ctx.resolver.source.slice(span.start, span.end));
+    if (read === null) return null;
+    const value = read.value;
     if (!emittable(value, MAX_RENDER_DEPTH - depth)) return null;
     const chars = estimateChars(value);
     return chars <= allot ? { value, chars } : null;

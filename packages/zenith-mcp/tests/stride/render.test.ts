@@ -26,7 +26,7 @@ import { StrideIndex } from '../../src/core/stride/index.js';
 import { Resolver } from '../../src/core/stride/resolve.js';
 import { decodeCursor } from '../../src/core/stride/cursor.js';
 import { MARKER_RE, SCALAR_PREVIEW_BYTES, STRIDE_KEY, type StrideView } from '../../src/core/stride/types.js';
-import { MIN_VIEW_BUDGET, estimateChars, renderNode, renderWindow } from '../../src/core/stride/render.js';
+import { MIN_VIEW_BUDGET, estimateChars, renderNode, renderWindow, toJsonText } from '../../src/core/stride/render.js';
 
 /** Seeded so a failing case is reproducible from the seed alone. */
 function mulberry32(seed: number): () => number {
@@ -281,12 +281,29 @@ function matrixFixtures(): Fixture[] {
     return fixturesCache;
 }
 
+/**
+ * The payload as the caller receives it: serialised by the module, then read
+ * back. Structural assertions go through this rather than against `view.data`
+ * directly, because `data` carries numbers as source tokens — the thing that
+ * makes an int64 identifier survive — and a deep-equal against `JSON.parse` of
+ * the document would compare a token to a double and fail on a correct payload.
+ * Going through the serialiser also means these tests assert on the bytes that
+ * actually leave, not on an intermediate nobody is sent.
+ */
+function received(view: StrideView): unknown {
+    return JSON.parse(toJsonText(view.data));
+}
+
 /** Checks that must hold of every view, whatever produced it. */
 function assertUniversal(view: StrideView, docBytes: number, where: string): void {
     expect(view.chars, `${where}: chars ${view.chars} exceeded the view's own budget ${view.budget}`)
         .toBeLessThanOrEqual(view.budget);
 
-    const text = JSON.stringify(view.data);
+    // `toJsonText`, not `JSON.stringify`: a payload carries numbers as the bytes
+    // the document wrote, which no JS value can hold, so stringify renders the
+    // box instead of the number. Measuring with it reported 18 characters for
+    // the 7-character payload `{"a":1}`.
+    const text = toJsonText(view.data);
     expect(typeof text, `${where}: payload did not serialise to a string`).toBe('string');
     expect(text.length, `${where}: serialised payload is ${text.length} chars, budget ${view.budget}`)
         .toBeLessThanOrEqual(view.budget);
@@ -444,10 +461,14 @@ describe('a complete view is the document itself', () => {
             const view = renderNode(resolver, resolver.root(), { budget: 100_000 });
             expect(view.envelope.omitted, `source truth for ${doc}: something was withheld at budget 100000`)
                 .toEqual([]);
-            expect(view.data, `source truth for ${doc}: payload is not the parsed document`)
+            expect(received(view), `source truth for ${doc}: payload is not the parsed document`)
                 .toEqual(JSON.parse(doc));
+            // These fixtures are already minified, so a complete view is the
+            // document text byte for byte — a stronger statement than value
+            // equality, and the one I1 actually makes.
+            expect(toJsonText(view.data), `source truth for ${doc}: payload is not the document text`).toBe(doc);
             expect(view.chars, `source truth for ${doc}: chars disagrees with the minified length`)
-                .toBe(JSON.stringify(JSON.parse(doc)).length);
+                .toBe(doc.length);
         }
     });
 
@@ -469,36 +490,184 @@ describe('a complete view is the document itself', () => {
             'a document truncated for depth did not record a depth omission').toBe(true);
     }, 300_000);
 
-    it('drops a value whose serialisation is longer than the bytes it came from', () => {
-        // Byte length is a safe upper bound on character cost for every JSON
-        // form but one: `1e-6` is four source bytes and stringifies to
-        // `0.000001`, eight characters. So the byte guard alone is not enough,
-        // and the allocator measures each parsed value exactly and refuses one
-        // that measures over its allotment. These budgets are swept small on
-        // purpose — the gap only opens where the allotment falls between a
-        // value's byte length and its character length.
+    it('costs a number exactly the bytes it came from, at every budget', () => {
+        // These two tests used to assert the opposite, and the comment they
+        // carried was the reason: "byte length is a safe upper bound on character
+        // cost for every JSON form but one -- `1e-6` is four source bytes and
+        // stringifies to `0.000001`, eight characters". That was true while a
+        // number round-tripped through a double. It is not true now: a number is
+        // emitted as the token the document wrote, so its character cost IS its
+        // byte length, and the widening the old allocator had to defend against
+        // cannot occur. The fixtures are kept because they are the exact shapes
+        // that used to widen, and the budgets stay swept small because that is
+        // where a mismatch of a few characters decides what fits.
         const docs = ['[1e-6]', '[1e-6,1e-6]', '{"a":1e-6,"b":2e-7}', '[1E5,1e21,1e-7,1e-6]'];
         for (const doc of docs) {
             for (let budget = 5; budget <= 48; budget++) {
                 const resolver = open(doc, `widen:${doc}:${budget}`);
                 const view = renderNode(resolver, resolver.root(), { budget });
-                assertUniversal(view, byteLength(doc), `widening number in ${doc} at budget ${budget}`);
+                assertUniversal(view, byteLength(doc), `number cost in ${doc} at budget ${budget}`);
             }
+        }
+
+        // At a budget that fits the whole document, the payload is the document.
+        for (const doc of docs) {
+            const resolver = open(doc, `exact:${doc}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 100_000 });
+            expect(
+                toJsonText(view.data),
+                `${doc} came back re-encoded. A number STRIDE emits is bytes copied from the source (I1), and `
+                + '`0.000001` for `1e-6` is a value the document does not contain.',
+            ).toBe(doc);
+            expect(view.chars, `${doc}: chars must equal its own byte length once no number widens`)
+                .toBe(byteLength(doc));
         }
     });
 
     it('measures every value it emits exactly, so chars is never an estimate', () => {
-        // A number is the one JSON form whose serialisation can be LONGER than
-        // its source bytes (`1e-6` is 4 bytes and 8 characters), which is why
-        // byte length alone cannot be the accounting.
+        // The pairing this rests on is `estimateChars` against `toJsonText`:
+        // I3 bounds the payload using a count taken before the payload is built,
+        // so a disagreement between the two means the budget was enforced against
+        // a number that does not describe the answer. `JSON.stringify` cannot
+        // stand in for either -- it has no rendering for a source number at all.
         const doc = '{"tiny":1e-6,"big":1E5,"neg":-0,"round":1.0,"exp":1e21}';
         const resolver = open(doc, 'numbers');
         const view = renderNode(resolver, resolver.root(), { budget: 100_000 });
-        expect(view.chars, 'number widening: chars disagrees with JSON.stringify').toBe(JSON.stringify(view.data).length);
-        expect(estimateChars(view.data), 'estimateChars disagrees with JSON.stringify on widened numbers')
-            .toBe(JSON.stringify(view.data).length);
-        expect(view.chars, 'the payload did not grow past its source, so the case did not exercise widening')
-            .toBeGreaterThan(0);
+        const text = toJsonText(view.data);
+        expect(text, 'every one of these numbers is a form V8 would have rewritten').toBe(doc);
+        expect(view.chars, 'chars disagrees with the text actually produced').toBe(text.length);
+        expect(estimateChars(view.data), 'estimateChars disagrees with toJsonText').toBe(text.length);
+        expect(view.chars, 'the fixture must not be empty').toBeGreaterThan(0);
+    });
+});
+
+describe('a number is the bytes the document wrote', () => {
+    // Every one of these was measured going wrong before the fix, and the third
+    // column is what came back. They are not variations on one bug: the first
+    // four change the VALUE (an identifier becomes a different identifier, a
+    // magnitude becomes `null` or `0`), and the rest change only the
+    // representation the document chose. I1 covers both -- what STRIDE returns
+    // is bytes copied from the source -- so all nine are pinned the same way.
+    const CORRUPTED: readonly {
+        readonly name: string;
+        readonly source: string;
+        readonly wasEmittedAs: string;
+    }[] = [
+        { name: 'int64 identifier', source: '1889283923049203712', wasEmittedAs: '1889283923049203700' },
+        { name: 'uint64 max', source: '18446744073709551615', wasEmittedAs: '18446744073709552000' },
+        { name: 'past the double range', source: '1e400', wasEmittedAs: 'null' },
+        { name: 'under the double range', source: '1e-400', wasEmittedAs: '0' },
+        { name: 'below the integer gap', source: '-9007199254740993', wasEmittedAs: '-9007199254740992' },
+        { name: 'forty digits', source: '3.141592653589793238462643383279502884197', wasEmittedAs: '3.141592653589793' },
+        { name: 'trailing zeros', source: '1.2000', wasEmittedAs: '1.2' },
+        { name: 'explicit exponent', source: '1E+2', wasEmittedAs: '100' },
+        { name: 'signed zero', source: '-0', wasEmittedAs: '0' },
+    ];
+
+    it('returns each number exactly as the document wrote it', () => {
+        for (const c of CORRUPTED) {
+            const doc = `{"v":${c.source}}`;
+            const resolver = open(doc, `number:${c.name}`);
+            const view = renderNode(resolver, resolver.resolve('/v'), { budget: 4000 });
+            const text = toJsonText(view.data);
+            expect(
+                text,
+                `${c.name}: the document holds ${c.source} and STRIDE returned ${text}. It used to return `
+                + `${c.wasEmittedAs}, which is not a value the document contains (I1).`,
+            ).toBe(c.source);
+            expect(view.chars, `${c.name}: chars must count the token, not a re-encoding of it`).toBe(c.source.length);
+        }
+    });
+
+    it('returns them exactly when they are nested inside a record it emits whole', () => {
+        // The scalar cases above are reachable by pointer. This is the case that
+        // actually bites: reading a RECORD verbatim, where the identifier is one
+        // member among several and no caller thought to address it on its own.
+        const record = '{"id":1889283923049203712,"qty":1.2000,"ratio":1e400,"z":-0,'
+            + '"deep":[[{"n":18446744073709551615}]],"name":"ok","flag":true,"none":null}';
+        const resolver = open(`[${record}]`, 'nested-numbers');
+        const view = renderNode(resolver, resolver.resolve('/0'), { budget: 4000 });
+        const text = toJsonText(view.data);
+        expect(text, 'a record emitted whole must be byte-identical to its source').toBe(record);
+        expect(view.chars, 'and chars must equal the text produced').toBe(text.length);
+    });
+
+    it('keeps every number token, in order, over a generated battery', () => {
+        // A number can only be preserved by not being parsed, and the way to be
+        // sure nothing parses one is to generate shapes rather than list them.
+        // Deterministic LCG: a failure reproduces exactly.
+        let seed = 20260904;
+        const rnd = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        const pick = <T,>(a: readonly T[]): T => {
+            const v = a[Math.floor(rnd() * a.length)];
+            if (v === undefined) throw new Error('empty pool');
+            return v;
+        };
+        const NUMS = [
+            '0', '-0', '1', '-1', '1.2000', '1E+2', '1e-7', '1e400', '1e-400', '0e0', '-0e-0',
+            '3.141592653589793238462643383279502884197', '1889283923049203712', '18446744073709551615',
+            '-9007199254740993', '0.0', '-0.0', '2e+308', '123456789012345678901234567890',
+            '1.7976931348623157e+308', '5e-324', '9007199254740992', '1.0000000000000002',
+        ];
+        // Escape-free, so exact TEXT equality is a fair assertion. A string
+        // written `\u00e9` comes back as the character it denotes, which is a
+        // re-encoding of the same value and a separate question from this one.
+        const STRS = ['""', '"a"', '"ok"', '"tab\\there"', '"q\\\\r"'];
+        const LITS = ['true', 'false', 'null'];
+
+        const gen = (depth: number): string => {
+            const r = rnd();
+            if (depth <= 0 || r < 0.45) return pick([...NUMS, ...STRS, ...LITS]);
+            const k = Math.floor(rnd() * 5);
+            if (r < 0.72) return `[${Array.from({ length: k }, () => gen(depth - 1)).join(',')}]`;
+            const seen = new Set<string>();
+            const parts: string[] = [];
+            for (let j = 0; j < k; j++) {
+                const key = `k${Math.floor(rnd() * 8)}`;
+                // A repeated key is a separate defect; skip so that text
+                // equality here is testing numbers and nothing else.
+                if (seen.has(key)) continue;
+                seen.add(key);
+                parts.push(`${JSON.stringify(key)}:${gen(depth - 1)}`);
+            }
+            return `{${parts.join(',')}}`;
+        };
+
+        let checked = 0;
+        for (let t = 0; t < 600; t++) {
+            const body = gen(1 + Math.floor(rnd() * 4));
+            const doc = body.startsWith('{') || body.startsWith('[') ? body : `[${body}]`;
+            const resolver = open(doc, `battery:${t}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 200_000 });
+            const text = toJsonText(view.data);
+            expect(text, `battery ${t}: ${doc} came back as ${text}`).toBe(doc);
+            expect(view.chars, `battery ${t}: chars disagrees with the text produced for ${doc}`).toBe(text.length);
+            expect(estimateChars(view.data), `battery ${t}: estimateChars disagrees with toJsonText for ${doc}`)
+                .toBe(text.length);
+            checked++;
+        }
+        expect(checked, 'the battery must actually have run').toBe(600);
+    }, 300_000);
+
+    it('agrees with estimateChars on every shape, including ones no document holds', () => {
+        // `estimateChars` is what I3 enforces the budget against and `toJsonText`
+        // is what the caller receives, so a disagreement is a budget applied to a
+        // length nobody was sent. These shapes are the ones where the two could
+        // drift apart: the members `stringify` drops, a non-finite number, an
+        // empty container, a key needing escapes.
+        const SHAPES: readonly unknown[] = [
+            null, true, false, 0, -1.5, 'plain', '', 'quote " and \\ and \n',
+            [], {}, [[]], [{}], [null, undefined], { a: undefined }, { a: 1, b: undefined, c: 2 },
+            { 'key "quoted"': 1 }, { '\n': [1, 2] }, [Number.POSITIVE_INFINITY, Number.NaN],
+            { nested: { deep: [1, 'two', null, { three: false }] } },
+        ];
+        for (const shape of SHAPES) {
+            const text = toJsonText(shape);
+            expect(estimateChars(shape), `estimateChars disagrees with toJsonText on ${text}`).toBe(text.length);
+            // And both must agree with the platform, on the shapes where the
+            // platform has an opinion -- everything without a source number.
+            expect(text, `toJsonText diverged from JSON.stringify on ${text}`).toBe(JSON.stringify(shape) ?? 'null');
+        }
     });
 });
 
@@ -889,13 +1058,13 @@ describe('focus keeps the part that was searched for', () => {
         const budget = 600;
         const blind = renderNode(resolver, resolver.root(), { budget });
         assertUniversal(blind, byteLength(doc), `focus control at budget ${budget}`);
-        expect(JSON.stringify(blind.data).includes('NEEDLE'),
+        expect(toJsonText(blind.data).includes('NEEDLE'),
             'the control case already shows the needle, so the fixture proves nothing').toBe(false);
 
         const aimed = renderNode(resolver, resolver.root(), { budget, focus: [at] });
         assertUniversal(aimed, byteLength(doc), `focus honoured at budget ${budget}`);
-        expect(JSON.stringify(aimed.data).includes('NEEDLE-8f3a-marker'),
-            `focus at byte ${at} did not survive into a ${budget}-char view: ${JSON.stringify(aimed.data).slice(0, 400)}`)
+        expect(toJsonText(aimed.data).includes('NEEDLE-8f3a-marker'),
+            `focus at byte ${at} did not survive into a ${budget}-char view: ${toJsonText(aimed.data).slice(0, 400)}`)
             .toBe(true);
         expect(aimed.envelope.omitted.length,
             'a focused view that trimmed the record recorded no omission').toBeGreaterThan(0);
@@ -920,10 +1089,14 @@ describe('a document member literally named __stride stays unambiguous', () => {
         // either is a payload no reader can interpret.
         expect(isMarker(record[STRIDE_KEY]),
             `the reserved key carries document content instead of a marker: ${String(record[STRIDE_KEY])}`).toBe(true);
-        expect(JSON.stringify(view.data).includes('SECRET-document-value'),
+        expect(toJsonText(view.data).includes('SECRET-document-value'),
             'the colliding member leaked into the payload').toBe(false);
-        expect(record['a'], 'a sibling of the colliding member was dropped').toBe(1);
-        expect(record['b'], 'a sibling of the colliding member was dropped').toBe(2);
+        const delivered = received(view);
+        expect(delivered !== null && typeof delivered === 'object' && !Array.isArray(delivered),
+            'the delivered payload is not an object').toBe(true);
+        const asSent = delivered as Record<string, unknown>;
+        expect(asSent['a'], 'a sibling of the colliding member was dropped').toBe(1);
+        expect(asSent['b'], 'a sibling of the colliding member was dropped').toBe(2);
 
         // The omission must address the member's OWN pointer, because no budget
         // and no offset on the container will ever reveal it.
@@ -958,7 +1131,7 @@ describe('a document member literally named __stride stays unambiguous', () => {
         for (const budget of [64, 256, 1_000, 8_000, 100_000]) {
             const view = renderNode(resolver, resolver.root(), { budget });
             assertUniversal(view, byteLength(doc), `wide collision at budget ${budget}`);
-            expect(JSON.stringify(view.data).includes('SECRET'),
+            expect(toJsonText(view.data).includes('SECRET'),
                 `wide collision at budget ${budget}: the colliding member leaked into the payload`).toBe(false);
         }
     }, 60_000);
@@ -994,7 +1167,7 @@ describe('renderWindow places the target in its surroundings', () => {
         }
         // The target itself, verbatim, and neighbours around it — not a summary
         // of them: byte-exact context at the hit is the measured win.
-        const content = JSON.stringify(data['window']);
+        const content = toJsonText(data['window']);
         expect(content.includes('"row-250-'), `the window does not contain the target: ${content.slice(0, 300)}`).toBe(true);
         expect(content.includes('"row-249-') || content.includes('"row-251-'),
             `the window contains no verbatim neighbour: ${content.slice(0, 300)}`).toBe(true);
@@ -1013,7 +1186,8 @@ describe('renderWindow places the target in its surroundings', () => {
         // has to degrade — but degrading must not throw away the one thing the
         // caller asked for. Answering `null` here would be inside budget and
         // useless, which is the failure this pins.
-        expect(view.data, 'a window too small for its wrapper dropped the target as well').toBe(30);
+        expect(received(view), 'a window too small for its wrapper dropped the target as well').toBe(30);
+        expect(toJsonText(view.data), 'and the target is the source token, not a re-encoding of it').toBe('30');
         expect(view.envelope.omitted.some((o) => o.of === 'depth'),
             'the surroundings were dropped without being recorded as an omission').toBe(true);
     });
@@ -1027,7 +1201,11 @@ describe('renderWindow places the target in its surroundings', () => {
         const meta = data[STRIDE_KEY] as Record<string, unknown>;
         expect(meta['at'], 'a root window does not name the root').toBe('');
         expect(meta['ancestors'], 'the root has no ancestors, but some were reported').toEqual([]);
-        expect(data['window'], 'a root window does not carry the document').toEqual(JSON.parse(doc));
+        const sent = received(view);
+        const sentRecord = sent !== null && typeof sent === 'object' && !Array.isArray(sent)
+            ? sent as Record<string, unknown>
+            : {};
+        expect(sentRecord['window'], 'a root window does not carry the document').toEqual(JSON.parse(doc));
     });
 });
 

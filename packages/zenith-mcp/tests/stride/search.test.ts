@@ -59,6 +59,7 @@ import {
     MIN_BUDGET_CHARS, SEARCH_BLOCK_BYTES, SHAPE_SAMPLE, StrideError, TERM_DICT_LIMIT,
 } from '../../src/core/stride/types.js';
 import type { StrideHit, StrideSearchResult } from '../../src/core/stride/types.js';
+import { toJsonText } from '../../src/core/stride/render.js';
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -605,7 +606,7 @@ describe('the budget bounds the result (I3 BUDGET BOUND)', () => {
             expect(r.totalMatches, `the true count must survive any budget (budget ${budget})`)
                 .toBe(trueMatches(f, ['alphaterm']).size);
             for (const h of r.hits) {
-                const text = JSON.stringify(h.preview);
+                const text = toJsonText(h.preview);
                 expect(typeof text, `preview of ${h.pointer} at budget ${budget} must serialise`).toBe('string');
                 expect(() => JSON.parse(text === undefined ? 'null' : text),
                     `preview of ${h.pointer} at budget ${budget} must parse as JSON (I2)`).not.toThrow();
