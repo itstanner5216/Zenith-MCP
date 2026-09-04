@@ -105,7 +105,7 @@ import { MIN_VIEW_BUDGET, estimateChars, renderNode } from './render.js';
 import type { Member, Resolver } from './resolve.js';
 import { censusOf, knee, noveltyOf } from './shape.js';
 import type { StrideSource } from './source.js';
-import { pathTerms, tokenize, tokenizeBytes } from './terms.js';
+import { isTokenBoundaryByte, pathTerms, tokenize, tokenizeBytes } from './terms.js';
 import {
     ENVELOPE_RESERVE, SEARCH_BLOCK_BYTES, StrideError,
     type StrideHit, type StrideKind, type StrideNode, type StrideSearchResult, type StrideShape,
@@ -173,11 +173,20 @@ export const MIN_NOVELTY_POPULATION = 8;
  *
  * One SEARCH_BLOCK_BYTES, because that is already the span the index tokenises
  * in one pass, and a "record" larger than a whole block is a collection rather
- * than a record. A record above the cap is verified over that many bytes around
- * its first hit instead: it is still enumerated, still counted and still
- * returned — only its `tf` and `dl` are measured over the window, which makes
- * its score a lower bound. Recall never depends on this number; at 27.4 MiB/s
- * measured, cost does.
+ * than a record. A record above the cap is FIRST verified over that many bytes
+ * around its first hit, as a fast path — and that window is kept only when it
+ * confirms every query term. Otherwise the record is re-verified over all of its
+ * own bytes, in boundary-aligned pieces.
+ *
+ * THIS NUMBER GOVERNS COST, NEVER RECALL, and it took a correction to make that
+ * true. The window used to be the whole of the verify, and the window is centred
+ * on the record's first LITERAL hit, which the literal sweep will happily place
+ * inside a longer word. When the tokeniser then correctly refused to count the
+ * substring and the record's genuine token occurrence lay more than half a window
+ * away, `matched` came back 0 and the record was dropped: not counted in
+ * totalMatches, on no page, while the hint asserted exhaustiveness. Measured on
+ * the two-record fixture in tests/stride/search.test.ts, padding one record past
+ * this cap took totalMatches from 2 to 1 with nothing else changed.
  */
 export const RECORD_VERIFY_BYTES = SEARCH_BLOCK_BYTES;
 
@@ -669,19 +678,6 @@ function verifyRecord(
     scratch: string[],
     mask: Uint32Array,
 ): { readonly tf: Uint32Array; readonly dl: number; readonly matched: number } {
-    let from = rec.start;
-    let to = rec.end;
-    if (to - from > RECORD_VERIFY_BYTES) {
-        // Centred on the hit, so the whole term is inside the window: a term is
-        // at most TOKEN_MAX_BYTES long and the half-window is 32 KiB.
-        const half = Math.floor(RECORD_VERIFY_BYTES / 2);
-        from = Math.max(rec.start, rec.seed - half);
-        to = Math.min(rec.end, from + RECORD_VERIFY_BYTES);
-    }
-    const buf = source.slice(from, to);
-    scratch.length = 0;
-    tokenizeBytes(buf, 0, buf.length, scratch);
-
     const tf = new Uint32Array(m);
     mask.fill(0);
     let matched = 0;
@@ -704,11 +700,100 @@ function verifyRecord(
         const now = held === undefined ? 0 : held;
         if ((now & bit) === 0) { mask[w] = now | bit; matched += 1; }
     };
-    for (const token of scratch) bump(token, true);
+    /** Tokenise one already-boundary-aligned span and return its token count. */
+    const absorb = (from: number, to: number): number => {
+        const buf = source.slice(from, to);
+        scratch.length = 0;
+        tokenizeBytes(buf, 0, buf.length, scratch);
+        for (const token of scratch) bump(token, true);
+        return scratch.length;
+    };
+
+    let dl: number;
+    if (rec.end - rec.start <= RECORD_VERIFY_BYTES) {
+        dl = absorb(rec.start, rec.end);
+    } else {
+        // Fast path: the window around the first literal hit. Centred, so the
+        // whole term is inside it — a term is at most TOKEN_MAX_BYTES long and
+        // the half-window is 32 KiB.
+        const half = Math.floor(RECORD_VERIFY_BYTES / 2);
+        const from = Math.max(rec.start, rec.seed - half);
+        dl = absorb(from, Math.min(rec.end, from + RECORD_VERIFY_BYTES));
+        if (matched < m) {
+            // The window did not settle the record. It cannot be trusted for the
+            // gate, because the hit it is centred on may be a substring inside a
+            // longer word, and it cannot be trusted for coordination, because a
+            // term it never saw scores tf 0 and keeps the SoftAND bonus from
+            // firing on the record that holds the whole query. Start over across
+            // all of the record's own bytes; the window's counts are discarded
+            // rather than added so tf and dl stay measured over exactly one
+            // region.
+            tf.fill(0);
+            mask.fill(0);
+            matched = 0;
+            dl = absorbWholeRecord(source, rec, absorb);
+        }
+    }
+
     const path = pathTerms(pointer);
     for (const term of path) bump(term, false);
 
-    return { tf, dl: scratch.length + path.length, matched };
+    return { tf, dl: dl + path.length, matched };
+}
+
+/**
+ * Tokenise every byte of a record in pieces, and return the total token count.
+ *
+ * The pieces are cut at CL_NONE bytes, never at a fixed stride, so no atom is
+ * ever cut in half: `tokenizeBytes` says a token straddling its `to` is cut
+ * short and names the caller as the one who must solve it, and this is the
+ * solution that keeps the pieces a PARTITION of the record. Overlapping the
+ * pieces instead would double-count the overlap in `tf` and `dl`, and worse,
+ * would tokenise from the overlap's edge — emitting an atom that starts where no
+ * token starts, which can equal a query term the document does not hold.
+ *
+ * Cost is the record's own bytes at the tokeniser's rate, and it is paid only by
+ * a record that is both larger than RECORD_VERIFY_BYTES and unsettled by its
+ * window. Summed over a query that is bounded by the candidate records' bytes —
+ * the same order as the literal sweep that produced the candidates, and never
+ * the document more than once.
+ *
+ * Measured on this host: `tokenizeBytes` folds 23.7 MiB/s, and a query over 24
+ * records of 128 KiB each, every one of them driven down this path by a rejected
+ * substring, took 130 ms for 3.0 MiB — the records' own bytes at that rate, which
+ * is the bound above and not a multiple of it.
+ */
+function absorbWholeRecord(
+    source: StrideSource,
+    rec: OpenRecord,
+    absorb: (from: number, to: number) => number,
+): number {
+    let dl = 0;
+    let pos = rec.start;
+    // The previous piece ran out of boundary bytes, so it ended inside a run of
+    // word bytes. Everything up to that run's end was already tokenised as one
+    // (truncated) atom, so this piece must skip to the run's end rather than
+    // emit a second atom starting mid-run.
+    let insideRun = false;
+    while (pos < rec.end) {
+        const end = Math.min(pos + RECORD_VERIFY_BYTES, rec.end);
+        let lo = pos;
+        if (insideRun) {
+            while (lo < end && !isTokenBoundaryByte(source.byteAt(lo))) lo++;
+            if (lo >= end) { pos = end; continue; }
+            insideRun = false;
+        }
+        let hi = end;
+        if (end < rec.end) {
+            // Retreat to the last byte no atom can span. The bytes given up are
+            // read again as the head of the next piece, so none are skipped.
+            while (hi > lo && !isTokenBoundaryByte(source.byteAt(hi - 1))) hi--;
+            if (hi === lo) { hi = end; insideRun = true; }
+        }
+        dl += absorb(lo, hi);
+        pos = hi;
+    }
+    return dl;
 }
 
 /**

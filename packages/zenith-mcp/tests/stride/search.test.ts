@@ -1268,3 +1268,218 @@ describe('the recall fixture states its own cost', () => {
             + 'which is the sweep plus the same verify pass').toBeLessThan(5_000);
     }, 300_000);
 });
+
+describe('a record\'s SIZE never changes whether it matches (I7 FULL RECALL)', () => {
+    // Records above RECORD_VERIFY_BYTES are verified over a window centred on
+    // their first LITERAL hit, and the literal sweep matches substrings. So a
+    // record whose first hit is `error` inside `errors` is opened at a position
+    // the tokeniser will correctly reject, and if the record's genuine token
+    // occurrence lies more than half a window away it used to fall outside the
+    // only bytes ever tokenised -- `matched` came back 0 and the record was
+    // dropped from totalMatches, from every page, and from the hint's claim of
+    // exhaustiveness.
+    //
+    // THE FIXTURE'S KEY ORDER IS LOAD-BEARING, and a first draft of these tests
+    // got it wrong in a way worth recording. Building records with
+    // `JSON.stringify({...payload, pad})` puts the pad LAST, which leaves the
+    // rejected substring and the genuine token 28 bytes apart -- both inside any
+    // window -- so every test passed with the fallback disabled. The pad has to
+    // sit BETWEEN them. Each record below is therefore assembled by hand, in
+    // order: the substring that opens the record, the pad that carries the
+    // genuine token out of reach, then the term itself.
+
+    /** `{"id":I,"msg":"<lead>","pad":"y…","level":"<tail>"}`, in that byte order. */
+    function spread(id: number, lead: string, tail: string, padBytes: number): string {
+        return `{"id":${id},"msg":${JSON.stringify(lead)},`
+            + `"pad":"${'y'.repeat(padBytes)}","level":${JSON.stringify(tail)}}`;
+    }
+
+    const UNDER = 100;
+    const OVER = RECORD_VERIFY_BYTES * 2;
+
+    function answer(padBytes: number, query: string): {
+        got: Set<string>; truth: Set<string>; matched: Map<string, string[]>; hits: StrideHit[];
+    } {
+        const fixture = rowsFixture([
+            JSON.stringify({ id: 0, msg: 'error' }),
+            spread(1, 'errors observed', 'error', padBytes),
+            spread(2, 'zulu here', 'foxtrot', padBytes),
+            JSON.stringify({ id: 3, msg: 'zulu only' }),
+        ]);
+        const w = wire(fixture.bytes, `pad-${padBytes}`);
+        const hits = allHits(w, query, { budget: BIG_BUDGET, limit: 100 });
+        return {
+            got: new Set(hits.map((h) => h.pointer)),
+            // `trueMatches` is the independent route: it tokenises each record's
+            // whole span in ONE slice, sharing no code with the piecewise walk.
+            truth: trueMatches(fixture, searchTerms(query)),
+            matched: new Map(hits.map((h) => [h.pointer, [...h.matched].sort()])),
+            hits,
+        };
+    }
+
+    it('the paired fixture really does straddle the verify cap', () => {
+        // Without this, a fixture that quietly sat under the cap would make every
+        // assertion below vacuous -- which is exactly what a first draft did.
+        const small = rowsFixture([spread(1, 'errors observed', 'error', UNDER)]);
+        const big = rowsFixture([spread(1, 'errors observed', 'error', OVER)]);
+        const smallSpan = at(small.spans, 0, 'span')[1] - at(small.spans, 0, 'span')[0];
+        const bigSpan = at(big.spans, 0, 'span')[1] - at(big.spans, 0, 'span')[0];
+        expect(smallSpan, `the small record is ${smallSpan} B and must be under ${RECORD_VERIFY_BYTES}`)
+            .toBeLessThan(RECORD_VERIFY_BYTES);
+        expect(bigSpan, `the big record is ${bigSpan} B and must be over ${RECORD_VERIFY_BYTES}`)
+            .toBeGreaterThan(RECORD_VERIFY_BYTES);
+        // And the genuine token must be further from the first literal hit than
+        // half a window, or the window would contain it anyway.
+        const firstHit = at(literalOccurrences(big.bytes, 'error'), 0, 'first literal hit');
+        const occurrences = literalOccurrences(big.bytes, 'error');
+        const genuine = at(occurrences, occurrences.length - 1, 'last literal hit');
+        expect(
+            genuine - firstHit,
+            `the two occurrences are ${genuine - firstHit} B apart and the half-window is `
+            + `${Math.floor(RECORD_VERIFY_BYTES / 2)}`,
+        ).toBeGreaterThan(Math.floor(RECORD_VERIFY_BYTES / 2));
+    });
+
+    it('returns the same records whether the record is under or over the verify cap', () => {
+        for (const query of ['error', 'zulu foxtrot', 'error zulu', 'observed']) {
+            const under = answer(UNDER, query);
+            const over = answer(OVER, query);
+            expect(
+                difference(under.truth, under.got),
+                `under the cap, query ${JSON.stringify(query)} lost records`,
+            ).toEqual([]);
+            expect(
+                difference(over.truth, over.got),
+                `over the cap, query ${JSON.stringify(query)} lost ${difference(over.truth, over.got).length} `
+                + 'records the same document under the cap returns; record size is not allowed to '
+                + 'change the match set',
+            ).toEqual([]);
+            expect(
+                difference(over.got, over.truth),
+                `over the cap, query ${JSON.stringify(query)} invented records`,
+            ).toEqual([]);
+            expect(
+                [...over.got].sort(),
+                `the two sizes disagree: under ${JSON.stringify([...under.got].sort())} `
+                + `over ${JSON.stringify([...over.got].sort())}`,
+            ).toEqual([...under.got].sort());
+        }
+    });
+
+    it('reports every query term the oversized record holds, however far apart they sit', () => {
+        // `matched` is what the SoftAND coordination bonus is computed from, so a
+        // record holding the whole query and reporting one term is not only
+        // mislabelled -- it loses the bonus to records that hold less.
+        const over = answer(OVER, 'zulu foxtrot');
+        const under = answer(UNDER, 'zulu foxtrot');
+        expect(
+            over.matched.get('/rows/2'),
+            'the oversized record holds both query terms, with the pad between them',
+        ).toEqual(['foxtrot', 'zulu']);
+        expect(
+            over.matched.get('/rows/2'),
+            'a term is reported for the oversized record exactly when it is for the small one',
+        ).toEqual(under.matched.get('/rows/2'));
+    });
+
+    it('ranks the record holding the whole query above one holding part of it, at either size', () => {
+        for (const [label, pad] of [['under', UNDER], ['over', OVER]] as const) {
+            const { hits } = answer(pad, 'zulu foxtrot');
+            const first = hits[0];
+            expect(
+                first === undefined ? 'no hits' : first.pointer,
+                `${label} the cap, the record holding both terms must outrank the one holding `
+                + `only "zulu"; got ${JSON.stringify(hits.map((h) => h.pointer))}`,
+            ).toBe('/rows/2');
+        }
+    });
+
+    it('crosses a run of word bytes wider than one verify piece without losing what follows', () => {
+        // Two things at once, and both are needed to reach the walk at all. The
+        // decoy is a LONGER word, so the first literal hit is one the tokeniser
+        // rejects and the window settles nothing -- that is what makes the walk
+        // run. The run is then wider than the piece the walk reads, so no piece
+        // contains a byte an atom cannot span: the walk has to carry "still
+        // inside a run" across pieces and resume at the run's end. Restarting
+        // mid-run instead would emit a truncated atom and lose the real term.
+        const run = 'y'.repeat(RECORD_VERIFY_BYTES * 3);
+        const fixture = rowsFixture([
+            `{"id":0,"decoy":"zulufoxtrotx","run":"${run}","after":"zulufoxtrot"}`,
+        ]);
+        const w = wire(fixture.bytes, 'long-run');
+        const got = new Set(allHits(w, 'zulufoxtrot', { budget: BIG_BUDGET, limit: 100 }).map((h) => h.pointer));
+        expect(
+            [...got],
+            `the term sits after a ${run.length}-byte unbroken run, past a decoy that opens the `
+            + `record ${RECORD_VERIFY_BYTES} bytes earlier`,
+        ).toEqual(['/rows/0']);
+        expect(
+            trueMatches(fixture, searchTerms('zulufoxtrot')),
+            'and the independent whole-span tokenisation agrees the record holds the term',
+        ).toEqual(new Set(['/rows/0']));
+    });
+
+    it('does not emit a term a fixed-stride cut would land exactly on top of', () => {
+        // THE ALIGNMENT CASE, and the only one that shows why the cut has to be
+        // boundary-aligned rather than merely tidy. A cut inside a run of word
+        // bytes usually emits a harmless truncated atom, because the run
+        // continues past the query term. Place the term so a fixed stride lands
+        // exactly on its first byte AND the run ends immediately after it, and
+        // the truncated atom is the query term itself -- a match the document
+        // does not contain.
+        //
+        // Arithmetic, so the fixture cannot drift: `rowsFixture` opens with
+        // `{"rows":[` and the record opens with `{"id":0,"run":"`, so the run's
+        // z-bytes must be RECORD_VERIFY_BYTES minus that 15-byte prefix for
+        // `error` to begin at record-relative offset RECORD_VERIFY_BYTES.
+        const PREFIX = '{"id":0,"run":"';
+        const filler = 'z'.repeat(RECORD_VERIFY_BYTES - PREFIX.length);
+        const record = `${PREFIX}${filler}error"}`;
+        const fixture = rowsFixture([record]);
+        const recStart = at(fixture.spans, 0, 'span')[0];
+        const errorAt = at(literalOccurrences(fixture.bytes, 'error'), 0, 'the planted occurrence');
+        expect(
+            errorAt - recStart,
+            'the term must begin exactly one verify piece into the record, or a fixed-stride cut '
+            + 'would not land on it and this fixture would prove nothing',
+        ).toBe(RECORD_VERIFY_BYTES);
+        expect(
+            at(fixture.spans, 0, 'span')[1] - recStart,
+            'and the record must be over the cap, so the windowed path is the one taken',
+        ).toBeGreaterThan(RECORD_VERIFY_BYTES);
+
+        const w = wire(fixture.bytes, 'aligned-cut');
+        const got = new Set(allHits(w, 'error', { budget: BIG_BUDGET, limit: 100 }).map((h) => h.pointer));
+        expect(
+            trueMatches(fixture, searchTerms('error')),
+            `"${filler.slice(0, 3)}...error" is one atom, so the independent whole-span `
+            + 'tokenisation finds no match here',
+        ).toEqual(new Set());
+        expect(
+            [...got],
+            'the term sits inside a longer run and is not a token there; returning it would be a '
+            + 'false positive manufactured by where the walk cut the record',
+        ).toEqual([]);
+    });
+
+    it('does not match a term glued onto a long run, where it is not a token', () => {
+        // The walk must not tokenise from a seam: an atom starting at a seam
+        // rather than at a real token start can equal a query term the document
+        // does not hold. `yyy...yerror` is ONE atom, so `error` is not in this
+        // record and no cut may make it appear.
+        const run = 'y'.repeat(RECORD_VERIFY_BYTES * 3);
+        const fixture = rowsFixture([
+            `{"id":0,"glued":"${run}error"}`,
+            JSON.stringify({ id: 1, msg: 'error' }),
+        ]);
+        const w = wire(fixture.bytes, 'glued');
+        const got = new Set(allHits(w, 'error', { budget: BIG_BUDGET, limit: 100 }).map((h) => h.pointer));
+        expect(
+            difference(got, trueMatches(fixture, searchTerms('error'))),
+            `a term glued to a ${run.length}-byte run is not a token there, so matching it would be `
+            + 'a false positive introduced by where the walk cut the record',
+        ).toEqual([]);
+        expect(got.has('/rows/1'), 'the record that does hold the term still matches').toBe(true);
+    });
+});

@@ -213,6 +213,28 @@ function emitAtom(buf: Buffer, from: number, to: number, out: string[], mask: nu
 }
 
 /**
+ * True when no token can span this byte, so cutting a range here cannot cut an
+ * atom in half.
+ *
+ * Exists so a caller reading a span in pieces can put its seams where
+ * `tokenizeBytes` would have ended an atom anyway. The alternative -- overlapping
+ * the pieces and re-tokenising the overlap -- emits an atom that starts at the
+ * overlap's edge rather than at a real token start, and a truncated atom that
+ * happens to equal a query term is a match the document does not contain. A run
+ * of `preerror` cut at the `e` yields `error`, which is exactly the false
+ * positive the substring rejection in search.ts exists to prevent.
+ *
+ * Only CL_NONE qualifies. A joiner joins when a word byte follows it, so an atom
+ * CAN span one; CL_NONE ends an atom unconditionally. In JSON the structural
+ * bytes and every quote are CL_NONE, so a scan for the nearest boundary
+ * terminates within a few bytes of any starting point in practice.
+ */
+export function isTokenBoundaryByte(byte: number): boolean {
+    if (byte < 0 || byte > 0xff) return true;       // not a byte at all: -1 past the end
+    return (CT[byte] ?? CL_NONE) === CL_NONE;
+}
+
+/**
  * Tokenise `buf[from..to)` straight from the bytes, appending to `out`.
  *
  * This is the hot path: it runs over every block of the document, so there is
