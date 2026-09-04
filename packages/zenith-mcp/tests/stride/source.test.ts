@@ -1334,3 +1334,94 @@ describe('byteAt on a closed file-backed source', () => {
         ).toBe('StrideError(not_found)');
     });
 });
+
+describe('a file truncated under an open descriptor never yields memory as document bytes', () => {
+    // The size stat is taken once, in the constructor. A file that shrinks after
+    // that leaves `size` describing bytes that are gone, so a page read comes
+    // back SHORT. `page` allocates with `Buffer.allocUnsafe`, so the unread tail
+    // of that allocation is recycled pool memory; publishing it would put bytes
+    // in a payload that were never in any document, which is the one failure I1
+    // exists to prevent and the one a caller cannot possibly detect.
+    //
+    // ASSERTED BY LENGTH AND BY EQUALITY AGAINST THE FILE AS IT NOW STANDS, not
+    // by inspecting the suspect bytes. What recycled memory happens to contain
+    // is allocator luck -- the first run of this repro drew zeroes, the next drew
+    // a run decoding to "data:application/json;ba" from elsewhere in the
+    // process -- so a test that looked for garbage would pass or fail at random.
+    // How MANY bytes come back is deterministic either way.
+
+    const FULL = 3 << 20;
+    const KEPT = 1 << 20;
+
+    /** A source whose file has shrunk to `KEPT` bytes since it was opened. */
+    function truncatedSource(name: string): { src: FileSource; path: string; bytes: Buffer } {
+        const bytes = noisyBytes(97, FULL);
+        const p = tmpPath(name);
+        fs.writeFileSync(p, bytes);
+        const src = new FileSource(p, 4);
+        OPEN_SOURCES.push(src);
+        fs.truncateSync(p, KEPT);
+        return { src, path: p, bytes };
+    }
+
+    it('reports the stale size but reads nothing past where the file now ends', () => {
+        const { src } = truncatedSource('truncated-size.bin');
+        expect(src.size, 'the constructor stat is a snapshot and is not re-taken').toBe(FULL);
+        seenRange(KEPT, FULL);
+        expect(
+            src.slice(KEPT, FULL).length,
+            `slice over the removed range returned ${src.slice(KEPT, FULL).length} bytes; `
+            + 'the file holds none there, so every one of them would be fabricated',
+        ).toBe(0);
+    });
+
+    it('answers -1 from byteAt past the real end, never a fabricated byte value', () => {
+        const { src } = truncatedSource('truncated-byteat.bin');
+        // Sampled across the removed range including its first byte and the last
+        // byte the stale size claims, so a page that came back short anywhere is
+        // caught rather than only the one at the seam.
+        for (const at of [KEPT, KEPT + 1, KEPT + 4096, (2 << 20), FULL - 1]) {
+            expect(
+                src.byteAt(at),
+                `byteAt(${at}) returned ${src.byteAt(at)}; the file ends at ${KEPT}, so any value `
+                + 'in 0..255 here is a byte the document does not contain',
+            ).toBe(-1);
+        }
+        expect(src.byteAt(KEPT - 1), 'the last surviving byte still reads').toBeGreaterThanOrEqual(0);
+    });
+
+    it('returns exactly the surviving bytes for a range straddling the new end', () => {
+        const { src, bytes } = truncatedSource('truncated-straddle.bin');
+        const from = KEPT - 8;
+        const to = KEPT + 8;
+        seenRange(from, to);
+        const got = src.slice(from, to);
+        const survives = bytes.subarray(from, KEPT);
+        // Equality, not a length check and not containment: a page cache that
+        // returned the right COUNT of bytes from the wrong place would pass a
+        // length assertion, and this is the layer where that must not happen.
+        expect(
+            got.equals(survives),
+            `a straddling slice returned ${got.length} bytes (${JSON.stringify([...got])}); `
+            + `only the ${survives.length} bytes still on disk exist`,
+        ).toBe(true);
+    });
+
+    it('agrees byte for byte with the file on every range that still exists', () => {
+        const { src, bytes } = truncatedSource('truncated-fidelity.bin');
+        const truth = bytes.subarray(0, KEPT);
+        // Page seams either side of the surviving region, so the multi-page
+        // assembly path is covered and not just the single-page one.
+        for (const [from, to] of [
+            [0, 64], [PAGE_BYTES - 32, PAGE_BYTES + 32], [KEPT - 64, KEPT],
+            [0, KEPT], [PAGE_BYTES, KEPT],
+        ] as const) {
+            seenRange(from, to);
+            const got = src.slice(from, to);
+            expect(
+                got.equals(truth.subarray(from, to)),
+                `slice(${from}, ${to}) does not match the file over a range that survived truncation`,
+            ).toBe(true);
+        }
+    });
+});

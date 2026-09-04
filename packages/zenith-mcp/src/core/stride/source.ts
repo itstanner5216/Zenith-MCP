@@ -186,21 +186,34 @@ export class FileSource implements StrideSource {
         const offset = index * PAGE_BYTES;
         const length = Math.min(PAGE_BYTES, this.size - offset);
         const buf = Buffer.allocUnsafe(length < 0 ? 0 : length);
-        if (buf.length > 0) {
-            let read = 0;
-            while (read < buf.length) {
-                const n = fs.readSync(this.fd, buf, read, buf.length - read, offset + read);
-                if (n <= 0) break;
-                read += n;
-            }
+        let read = 0;
+        while (read < buf.length) {
+            const n = fs.readSync(this.fd, buf, read, buf.length - read, offset + read);
+            if (n <= 0) break;
+            read += n;
         }
+        // ONLY the bytes the read actually delivered. `buf` is allocUnsafe, so
+        // [read, buf.length) is recycled pool memory, and `length` comes from
+        // the size stat taken at open: a file truncated under this descriptor
+        // makes the two differ. Caching the full buffer published that memory as
+        // document bytes — measured on a 3 MiB file truncated to 1 MiB, a 4 KiB
+        // slice past the real EOF came back with 3,985 bytes that were never in
+        // the file, one run of them decoding to "data:application/json;ba" from
+        // elsewhere in the process. That is an I1 violation and a disclosure.
+        //
+        // Every reader downstream was already written for a short page: the
+        // straddling branch of `slice` clamps to `base + page.length` and
+        // returns `out.subarray(0, written)`, `byteAt` has an `?? -1` guard
+        // whose comment names this exact case, and `sequential` hands out
+        // `buf.subarray(0, read)`. Truncating here is what makes those live.
+        const page = buf.subarray(0, read);
         while (this.pages.size >= this.maxPages) {
             const oldest = this.pages.keys().next();
             if (oldest.done === true) break;
             this.pages.delete(oldest.value);
         }
-        this.pages.set(index, buf);
-        return buf;
+        this.pages.set(index, page);
+        return page;
     }
 
     slice(start: number, end: number): Buffer {
