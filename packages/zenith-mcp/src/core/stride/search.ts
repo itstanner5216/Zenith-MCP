@@ -145,17 +145,45 @@ export const BM25_B = 0.75;
 export const LEXICAL_WEIGHT = 0.7;
 
 /**
- * Floor on the candidate pool the novelty channel may reorder. The pool grows
- * with what the caller asked for — `max(NOVELTY_POOL_MIN, 4 * (offset + limit))`
- * — so paging never runs off the end of it.
+ * Cap on the candidate pool the novelty channel may reorder.
+ *
+ * A CAP, and fixed. This was a floor under `4 * (offset + limit)`, which made
+ * the pool — and therefore the novelty percentile calibrated over it, and
+ * therefore the fused order a page is sliced from — a function of the offset
+ * that asked. Two pages then disagreed about the ranking: measured on 800
+ * matching records at limit 10, walking every page returned 800 hits covering
+ * 752 distinct records, so 48 came back twice and 48 were never shown at all.
+ * At 1,200 records it was 90 and 90. Under 800 the drift was invisible, which
+ * is why a 120-record test could not see it.
  *
  * 256 is SHAPE_SAMPLE, the census's own sample bound, so a pool and the prior it
  * is scored against are the same order of size; it also sits inside shape.knee's
  * CLIFF_MAX_N, which keeps the cutoff on its bounded-candidate-list branch. The
  * cap exists because an uncapped structural pool is the documented mechanism by
- * which fusion goes net-negative (2,000+ candidates instead of ~200).
+ * which fusion goes net-negative (2,000+ candidates instead of ~200) — which is
+ * the reason it stays 256 rather than growing to cover a deep page. Ranks below
+ * it are answered from the lexical order the pool was selected out of, bounded
+ * by RANK_DEPTH_MAX.
  */
-export const NOVELTY_POOL_MIN = 256;
+export const NOVELTY_POOL_CAP = 256;
+
+/**
+ * The deepest rank a page can address.
+ *
+ * Paging past the novelty pool continues in pure lexical order, and that order
+ * has to be materialised as far as the page reaches: one `Scored` per rank, at
+ * a measured 104 B retained each on this host, so this bound is what keeps a
+ * query matching a million records from building a million objects to answer a
+ * request for rank 999,990. 4,096 is 410 pages at the default page size — past
+ * any walk a caller makes — and costs 416 KiB at full depth. Only the pool's
+ * own members and the page's carry a resolved record; the rest of the depth is
+ * three numbers and a null.
+ *
+ * Ranks beyond it are still COUNTED: `totalMatches` is the whole document's
+ * count, and the hint says how many of them rank is addressable for, so the
+ * limit is stated rather than silently applied.
+ */
+export const RANK_DEPTH_MAX = 4096;
 
 /**
  * Members a novelty population needs before its ranks mean anything.
@@ -1324,6 +1352,8 @@ function hintFor(
     path: 'index' | 'scan',
     needed: number,
     budget: number,
+    /** How many of `totalMatches` a rank can address; see RANK_DEPTH_MAX. */
+    ranked: number,
 ): string {
     const searched = prepared.terms.map((t) => t.term);
     const dropNote = prepared.dropped.length === 0
@@ -1340,16 +1370,42 @@ function hintFor(
             + ` Call mode "shape" on the collection to see which fields and values exist, then search a`
             + ` value it reports.${dropNote}`;
     }
+    // Two unrelated failures return nothing, and their recoveries are opposite.
+    // An offset past the last rank the query answers is not a budget problem,
+    // and telling that caller to raise the budget sends it round the same empty
+    // page: measured with 30 matches at offset 30, the old wording named a
+    // budget of 0 as the fix.
+    if (returned === 0 && offset >= ranked) {
+        const last = Math.max(0, ranked - 1);
+        const back = address('search', '', last, null, query);
+        const window = ranked < totalMatches
+            ? `, of which the ${ranked} highest-ranked are addressable by rank`
+            : '';
+        return `Offset ${offset} is past the last rank this query answers. ${totalMatches} records matched`
+            + `${window}, so the last rank is ${last}. Call mode "search" with query ${JSON.stringify(query)}`
+            + ` and offset ${last}, or cursor ${JSON.stringify(back.cursor)}. A larger budget does not change`
+            + ` this.${termNote}${dropNote}`;
+    }
     if (returned === 0) {
         return `${totalMatches} records matched ${JSON.stringify(query)} but a budget of ${budget} characters`
             + ` fits none of them: the highest-ranked hit needs ${needed}. Call mode "search" again with`
             + ` budget ${needed} or more.${termNote}${dropNote}`;
     }
-    if (offset + returned < totalMatches) {
+    if (offset + returned < ranked) {
         const next = address('search', '', offset + returned, null, query);
         return `${returned} of ${totalMatches} matching records are in this view, highest score first.`
             + ` Call mode "search" with query ${JSON.stringify(query)} and offset ${offset + returned},`
             + ` or cursor ${JSON.stringify(next.cursor)}, to fetch the next page.${termNote}${dropNote}`;
+    }
+    // Every rank this query can address has been walked. Offering another page
+    // here would name an offset that comes back empty, so when the count runs
+    // past the addressable depth the instruction is to narrow the query — the
+    // count itself stays exact, and this is where the difference is stated.
+    if (ranked < totalMatches) {
+        return `The ${ranked} highest-ranked of ${totalMatches} matching records are addressable by rank, and`
+            + ` this view holds the last ${returned} of them. The remaining ${totalMatches - ranked} matched and`
+            + ` are counted, but ranking past ${ranked} is not answered: add a term to narrow the query, or call`
+            + ` mode "map" on the collection to walk the records by position instead.${termNote}${dropNote}`;
     }
     return `All ${totalMatches} matching records are in this view, highest score first. No further call is`
         + ` needed for this query.${termNote}${dropNote}`;
@@ -1423,21 +1479,56 @@ export function search(
     }
     const sorted = raws.slice().sort();
 
-    const want = Math.max(NOVELTY_POOL_MIN, 4 * (offset + limit));
-    const pool = poolOf(raws, sorted, n, matches.seed, want);
-    for (const c of pool) {
+    // The order a page slices MUST NOT depend on the offset that asked for it,
+    // or two pages disagree and the walk both repeats and skips records (I7).
+    // `poolOf(k)` is the first k of one global order — lexical score
+    // descending, ties by document position — so `head` is always the same 256
+    // records and `ordered`'s first 256 are the same 256 in the same order.
+    const head = poolOf(raws, sorted, n, matches.seed, NOVELTY_POOL_CAP);
+    const depth = Math.min(n, RANK_DEPTH_MAX);
+    const ordered = depth > head.length
+        ? poolOf(raws, sorted, n, matches.seed, depth)
+        : head;
+
+    for (const c of head) {
         c.record = recordFor(resolver, resolver.locate(c.seed));
         c.relevance = percentileOf(sorted, n, c.raw);
     }
-    applyNovelty(resolver, pool);
-    for (const c of pool) {
+    applyNovelty(resolver, head);
+    for (const c of head) {
         c.score = LEXICAL_WEIGHT * c.relevance + (1 - LEXICAL_WEIGHT) * c.novelty;
     }
     // Deterministic to the last key: score, then the lexical channel that
     // carries most of it, then document order.
-    pool.sort((a, b) => b.score - a.score || b.relevance - a.relevance || a.seed - b.seed);
+    head.sort((a, b) => b.score - a.score || b.relevance - a.relevance || a.seed - b.seed);
 
-    const page = pool.slice(Math.min(offset, pool.length));
+    if (ordered !== head) {
+        // The fused head replaces the lexical prefix it was selected from —
+        // same records, reordered. Below it the novelty channel does not run,
+        // so `novelty` stays 0 and the score is the lexical channel alone. That
+        // cannot invert the boundary: relevance is a percentile of the same raw
+        // score the selection ranked by, so every head member's relevance is at
+        // least every tail member's, and 0.7 * r + 0.3 * nov >= 0.7 * r'.
+        for (let i = 0; i < head.length; i++) {
+            const c = head[i];
+            if (c !== undefined) ordered[i] = c;
+        }
+        for (let i = head.length; i < ordered.length; i++) {
+            const c = ordered[i];
+            if (c === undefined) continue;
+            c.relevance = percentileOf(sorted, n, c.raw);
+            c.score = LEXICAL_WEIGHT * c.relevance;
+        }
+    }
+
+    const page = ordered.slice(Math.min(offset, ordered.length));
+    // `cut` is clamped to `limit` by `knee`, so only the first `limit` entries
+    // of the page can be emitted and only those need a record resolved. The
+    // head already has its records — `applyNovelty` groups hits by parent.
+    for (let i = 0; i < Math.min(limit, page.length); i++) {
+        const c = page[i];
+        if (c !== undefined && c.record === null) c.record = recordFor(resolver, resolver.locate(c.seed));
+    }
     // The knee is applied to a BOUNDED candidate list, which is the shape its
     // weighted-gap branch is the right detector for; shape.knee picks the branch
     // from the input itself. It is not consulted when every match already fits
@@ -1507,7 +1598,7 @@ export function search(
         truncated: offset + hits.length < n,
         chars,
         budget,
-        hint: hintFor(query, prepared, n, offset, hits.length, path, needed, budget),
+        hint: hintFor(query, prepared, n, offset, hits.length, path, needed, budget, ordered.length),
     };
 }
 

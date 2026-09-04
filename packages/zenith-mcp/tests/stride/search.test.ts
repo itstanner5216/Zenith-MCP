@@ -50,7 +50,7 @@ import { BufferSource } from '../../src/core/stride/source.js';
 import type { StrideSource } from '../../src/core/stride/source.js';
 import {
     BM25_B, BM25_K1, DEFAULT_SEARCH_LIMIT, HIT_OFFSETS_MAX, LEXICAL_WEIGHT,
-    MIN_NOVELTY_POPULATION, MIN_RESULT_CHARS, NOVELTY_POOL_MIN, RECORD_VERIFY_BYTES,
+    MIN_NOVELTY_POPULATION, MIN_RESULT_CHARS, NOVELTY_POOL_CAP, RANK_DEPTH_MAX, RECORD_VERIFY_BYTES,
     SEARCH_STOPWORDS, search, searchTerms,
 } from '../../src/core/stride/search.js';
 import type { StrideSearchOptions } from '../../src/core/stride/search.js';
@@ -998,7 +998,7 @@ describe('unanswerable queries fail inside the closed StrideFailure set', () => 
 
 // ── paging and the pool ───────────────────────────────────────────────────
 
-describe('paging covers the match set the pool was sized for', () => {
+describe('paging covers every rank the query answers, exactly once', () => {
     it('pages through every match without a gap or a repeat at the default page size', () => {
         const n = 120;
         const f = rowsFixture(Array.from({ length: n }, (_, i) =>
@@ -1013,7 +1013,7 @@ describe('paging covers the match set the pool was sized for', () => {
             const r = search(w.resolver, w.blocks, 'alphaterm', { budget: BIG_BUDGET, limit: 10, offset });
             expect(r.totalMatches, `totalMatches must be stable across pages (page ${page})`).toBe(n);
             expect(r.returned, `page ${page} at offset ${offset} must return hits while matches remain; `
-                + `the pool is sized max(${NOVELTY_POOL_MIN}, 4*(offset+limit)) so it cannot run out`)
+                + `${n} is inside RANK_DEPTH_MAX (${RANK_DEPTH_MAX}) so every match is addressable by rank`)
                 .toBeGreaterThan(0);
             for (const h of r.hits) seen.push(h.pointer);
             offset += r.returned;
@@ -1023,9 +1023,162 @@ describe('paging covers the match set the pool was sized for', () => {
         expect(seen.length, 'and must not repeat a record across pages').toBe(n);
     }, 120_000);
 
-    it('holds the pool floor at NOVELTY_POOL_MIN, which is SHAPE_SAMPLE', () => {
-        expect(NOVELTY_POOL_MIN, 'the pool floor and the census sample must be the same order of size')
+    /**
+     * A document whose match count is large enough for the ranking to drift.
+     *
+     * 800 is not decoration. The pool used to be `max(256, 4 * (offset+limit))`,
+     * so it only started changing between pages once `4 * (offset+limit)` passed
+     * 256 AND stayed under the match count — which at limit 10 means offsets
+     * from 55 up, and needs the match count to be well past 256 before the
+     * changing pool changes the ranking. At 120 matches, the count the test
+     * above uses, the pool covers everything from the second page onward and no
+     * drift is possible. At 800 the walk returned 800 hits over 752 distinct
+     * records: 48 shown twice, 48 never shown.
+     */
+    const DRIFT_N = 800;
+
+    function driftFixture(count: number): Fixture {
+        return rowsFixture(Array.from({ length: count }, (_, i) =>
+            `{"n":${i},"v":"${Array.from({ length: (i % 7) + 1 }, () => 'alphaterm').join(' ')}"}`));
+    }
+
+    /** Every pointer the walk delivered, in the order the pages delivered them. */
+    function walkPages(w: Wired, query: string, limit: number, cap: number): string[] {
+        const seen: string[] = [];
+        let offset = 0;
+        for (let page = 0; page < cap; page++) {
+            const r = search(w.resolver, w.blocks, query, { budget: BIG_BUDGET, limit, offset });
+            if (r.returned === 0) break;
+            for (const h of r.hits) seen.push(h.pointer);
+            offset += r.returned;
+            if (offset >= r.totalMatches) break;
+        }
+        return seen;
+    }
+
+    it('pages through a match count large enough for the ranking to drift', () => {
+        const f = driftFixture(DRIFT_N);
+        const w = wire(f.bytes);
+        expect(DRIFT_N, 'the fixture must exceed the novelty pool or the old sizing could not drift')
+            .toBeGreaterThan(NOVELTY_POOL_CAP);
+        expect(DRIFT_N, 'and must sit inside the addressable depth, or a gap here would be the stated limit')
+            .toBeLessThanOrEqual(RANK_DEPTH_MAX);
+
+        const seen = walkPages(w, 'alphaterm', 10, 200);
+        const distinct = new Set(seen);
+        expect(distinct.size, `paging must cover all ${DRIFT_N} matches; the walk saw ${seen.length} hits over `
+            + `${distinct.size} distinct records, so ${DRIFT_N - distinct.size} were never shown`).toBe(DRIFT_N);
+        expect(seen.length, `and must not repeat a record: ${seen.length - distinct.size} came back twice`)
+            .toBe(DRIFT_N);
+    }, 300_000);
+
+    it('delivers the same order however the pages are cut', () => {
+        // The direct statement of the defect: if the ranking depends on the
+        // offset that asked for it, two page sizes walk the records in
+        // different orders, and either order is missing some of them.
+        const f = driftFixture(DRIFT_N);
+        const w = wire(f.bytes);
+        const byTen = walkPages(w, 'alphaterm', 10, 200);
+        const byThirty = walkPages(w, 'alphaterm', 30, 200);
+        expect(byThirty.length, 'the two walks covered different numbers of records').toBe(byTen.length);
+        const firstDiff = byTen.findIndex((p, i) => p !== byThirty[i]);
+        expect(firstDiff, `the two walks disagree from rank ${firstDiff}: at limit 10 it is `
+            + `${JSON.stringify(byTen[firstDiff])}, at limit 30 ${JSON.stringify(byThirty[firstDiff])}`).toBe(-1);
+    }, 300_000);
+
+    it('still fuses the novelty channel when the match set is larger than the pool', () => {
+        // Past NOVELTY_POOL_CAP the page comes from a longer lexical list than
+        // the pool, and the fused pool has to REPLACE the head of it. Computing
+        // the fusion and then paging the unfused list would leave every hit on
+        // the first page scored 0 and the structural channel dead for any query
+        // matching more than NOVELTY_POOL_CAP records.
+        //
+        // Key names are the same length in both shapes on purpose. BM25
+        // normalises by record length, so an unusual record that is also longer
+        // scores lower lexically, falls out of the top of the pool, and never
+        // reaches the channel that would have lifted it — which is what a first
+        // attempt at this fixture measured: novelty 0 across the whole page.
+        const pad = (i: number): string => String(i).padStart(6, '0');
+        const n = 600;
+        const f = rowsFixture(Array.from({ length: n }, (_, i) =>
+            i % 37 === 0 ? `{"a":"alphaterm","z":"${pad(i)}"}` : `{"a":"alphaterm","n":"${pad(i)}"}`));
+        const w = wire(f.bytes);
+        expect(n, 'the fixture must exceed the pool or the head and the page are the same list')
+            .toBeGreaterThan(NOVELTY_POOL_CAP);
+
+        const r = search(w.resolver, w.blocks, 'alphaterm', { budget: BIG_BUDGET, limit: 20 });
+        expect(r.totalMatches, 'every record must match').toBe(n);
+        const top = r.hits[0];
+        expect(top, 'the first page returned no hits at all').toBeDefined();
+        if (top === undefined) return;
+        expect(top.novelty, 'the highest-ranked hit carries no novelty, so the fused pool never reached the page')
+            .toBeGreaterThan(0);
+        expect(top.score, 'the score is the lexical channel alone, so the fusion was discarded')
+            .toBeGreaterThan(LEXICAL_WEIGHT * top.relevance);
+        // The `z`-shaped records are the rare key-set, so they are the ones the
+        // structural channel is supposed to lift.
+        const lifted = r.hits.filter((h) => h.novelty > 0).map((h) => h.pointer);
+        expect(lifted.length, 'no hit on the page was scored for novelty').toBeGreaterThan(0);
+        for (const p of lifted) {
+            const ordinal = Number(p.slice(p.lastIndexOf('/') + 1));
+            expect(ordinal % 37, `${p} was lifted for novelty but it is one of the regular records`).toBe(0);
+        }
+    }, 120_000);
+
+    it('states the addressable depth instead of offering a page that comes back empty', () => {
+        const f = driftFixture(40);
+        const w = wire(f.bytes);
+        const full = search(w.resolver, w.blocks, 'alphaterm', { budget: BIG_BUDGET, limit: 40 });
+        expect(full.returned, 'the whole match set must fit one page here').toBe(40);
+
+        // Past the end. The recovery is a smaller offset, not a larger budget:
+        // the old wording named a budget, and the budget was never the problem.
+        const past = search(w.resolver, w.blocks, 'alphaterm', { budget: BIG_BUDGET, limit: 10, offset: 40 });
+        expect(past.returned, 'an offset past the last rank must return nothing').toBe(0);
+        expect(past.totalMatches, 'and must still report the true count').toBe(40);
+        expect(past.hint, 'the hint blames the budget for an offset past the end')
+            .not.toContain('budget 0 or more');
+        expect(past.hint, 'the hint does not say the offset is past the last rank').toContain('past the last rank');
+        expect(past.hint, 'the hint does not name the last rank to go back to').toContain('offset 39');
+    }, 120_000);
+
+    it('never offers a next page past the depth it can rank, and says what is left', () => {
+        // The one case where `totalMatches` and the addressable depth differ.
+        // Offering `offset + returned` here would name a page that comes back
+        // empty, so the hint has to switch from "next page" to "this is the
+        // bottom, and this many matched below it".
+        const extra = 40;
+        const n = RANK_DEPTH_MAX + extra;
+        const f = rowsFixture(Array.from({ length: n }, (_, i) =>
+            `{"a":"alphaterm","n":"${String(i).padStart(6, '0')}"}`));
+        const w = wire(f.bytes);
+
+        const last = search(w.resolver, w.blocks, 'alphaterm',
+            { budget: BIG_BUDGET, limit: 10, offset: RANK_DEPTH_MAX - 10 });
+        expect(last.totalMatches, 'the count must cover the whole document, not the rankable part').toBe(n);
+        expect(last.returned, 'the last addressable page must still deliver its hits').toBe(10);
+        expect(last.hint, 'the hint offers a next page that would come back empty')
+            .not.toContain('to fetch the next page');
+        expect(last.hint, 'the hint does not say how deep ranking goes').toContain(`${RANK_DEPTH_MAX} highest-ranked`);
+        expect(last.hint, 'the hint does not say how many matched below the addressable depth')
+            .toContain(`remaining ${extra} matched`);
+
+        const past = search(w.resolver, w.blocks, 'alphaterm',
+            { budget: BIG_BUDGET, limit: 10, offset: RANK_DEPTH_MAX });
+        expect(past.returned, 'an offset at the depth bound must return nothing').toBe(0);
+        expect(past.hint, 'the hint does not say the offset is past the last rank').toContain('past the last rank');
+        expect(past.hint, 'the hint does not name the last rank to go back to')
+            .toContain(`offset ${RANK_DEPTH_MAX - 1}`);
+    }, 300_000);
+
+    it('holds the novelty pool at SHAPE_SAMPLE, and holds it independent of the page asked for', () => {
+        expect(NOVELTY_POOL_CAP, 'the pool and the census sample must be the same order of size')
             .toBe(SHAPE_SAMPLE);
+        // A pool that grows with the request is how the ranking became a
+        // function of the offset. The cap is the fix, so the cap has to be a
+        // constant — and the depth bound has to leave room to page past it.
+        expect(RANK_DEPTH_MAX, 'paging must reach past the novelty pool or the pool is a page limit')
+            .toBeGreaterThan(NOVELTY_POOL_CAP);
     });
 
     it('reports truncated exactly when matches remain beyond the page', () => {
