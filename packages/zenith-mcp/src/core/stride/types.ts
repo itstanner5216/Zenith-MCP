@@ -208,6 +208,19 @@ export interface StrideShape {
     readonly fields: readonly StrideField[];
     /** Mean bytes per member across the sample. */
     readonly meanBytes: number;
+    /**
+     * Members counted in the widest single member of the sample. Exact, and
+     * independent of the cap: the scan counts every one even where it stops
+     * describing them.
+     */
+    readonly widestMember: number;
+    /**
+     * `fields` is a SUBSET of what the sample carries: the census either
+     * described CENSUS_FIELD_CAP distinct names and refused the rest, or
+     * stopped scanning a record at CENSUS_SCAN_CAP members. `widestMember`
+     * against `fields.length` says how much is missing (I4).
+     */
+    readonly fieldsCapped: boolean;
 }
 
 /** Document-level orientation — the cheapest first call. */
@@ -332,6 +345,89 @@ export const SHAPE_SAMPLE = 256;
 
 /** Distinct values tracked per field before `exact` goes false. */
 export const DISTINCT_CAP = 64;
+
+/**
+ * Member names one shape census will DESCRIBE.
+ *
+ * A census describes a SCHEMA. Past some width a record has no schema worth
+ * listing member by member, and the useful answer is the count plus a pointer
+ * to read it — which is why this is a cap and not a budget. Without it the
+ * census allocated one tally per distinct name: measured on a 3.03 MiB array
+ * holding one 200,000-key record, 207.34 MiB retained, 68.4x the document; a
+ * 4.76 MiB document died with FATAL heap at --max-old-space-size=256, and a
+ * 15.9 MiB one died at 512. I6 says memory is a function of the request, not of
+ * the document, and a 4.76 MiB document is four orders of magnitude below what
+ * this navigator exists for.
+ *
+ * 64 is the same number as DISTINCT_CAP, and for the same reason: enough to
+ * characterise a record, not enough to enumerate one. It puts a full-cap census
+ * at a measured 7,490 serialised characters, and what a census keeps is its
+ * result rather than its tallies: post-collection retention measured at
+ * 0.00-0.21 MiB over documents from 0.69 to 31.26 MiB.
+ *
+ * Bounded by heap limit rather than by sampling `heapUsed`, which counts
+ * uncollected garbage and read 44 MiB on one 5.51 MiB document whose retention
+ * was 0.02 MiB. Bisecting --max-old-space-size instead, over four adversarial
+ * shapes, the smallest heap that completes index build plus census is never more
+ * than one 2 MiB bisection step above the smallest that completes the index build
+ * ALONE, and is usually equal to it. Which shape shows the step moves between
+ * runs, so the step is the resolution of the method and not a property of a
+ * shape; the bound is what holds. The census no longer moves the number: the
+ * 3.03 MiB one-record document that retained 207.34 MiB now runs whole in the
+ * 21 MiB its index build needs by itself. What stays proportional to the document
+ * there is the index's own tables, not this.
+ */
+export const CENSUS_FIELD_CAP = 64;
+
+/**
+ * Members of any single record the per-member scan will look at.
+ *
+ * Separate from CENSUS_FIELD_CAP, and sixteen times larger, because the two
+ * bound different costs. A described name owns a tally — several Sets, an
+ * array, and up to DISTINCT_CAP value texts of VALUE_READ_BYTES each. A merely
+ * SCANNED member owns one gram of its name and kind, tens of bytes.
+ *
+ * The difference matters because `noveltyOf` reaches this same scan, and there
+ * a record is characterised by everything it carries rather than by the members
+ * a schema shares. Capping the scan at CENSUS_FIELD_CAP made novelty blind past
+ * the 64th member: measured on 40 records of 200 identical members where one
+ * carried a different `tag` at position 200, every record scored alike and the
+ * outlier ranked 1st of 40 only by tie-break. At 1,024 the outlier is found,
+ * and the wider cap is free at the bound: scoring a full NOVELTY_POOL_CAP pool
+ * of 4,096-member records — 19.60 MiB of document, every record four times
+ * wider than this cap — completes in the same 25 MiB heap as building that
+ * document's index by itself, and retains 0.02 MiB.
+ *
+ * 1,024 is also deliberately above the width at which novelty stops
+ * discriminating for reasons that have nothing to do with this cap: measured at
+ * 1,022 members, on the same fixture, both before this constant existed and
+ * after. Sizing the scan to that ceiling would make the cap the binding limit
+ * and couple a memory bound to a scoring one. Whoever moves that ceiling should
+ * not have to find this constant first.
+ *
+ * Records wider than this are still counted exactly, and `StrideShape` reports
+ * that count, so a caller can see it is looking at part of a record (I4).
+ */
+export const CENSUS_SCAN_CAP = 1024;
+
+/**
+ * Bytes of a member name the census reads before describing it by length.
+ *
+ * A name is bytes the document chose; the census's memory must not be. Every
+ * name it describes is retained twice over — once as a tally key, once inside
+ * the sorted key-set signature that decides homogeneity — so the untended cost
+ * is the document's own key width, unbounded, doubled. Measured on a 31.26 MiB
+ * array of 40,960-byte names: 60.66 MiB retained. Under the bound that document
+ * retains 0.00 MiB and completes in the 37 MiB heap its index build needs
+ * anyway.
+ *
+ * 128 is TOKEN_MAX_BYTES, deliberately. A name wider than the widest token the
+ * search index will hold is past the width at which either half of this
+ * navigator still treats it as a name rather than as content. Over the bound the
+ * census substitutes a marker carrying the true byte length, so what it declined
+ * to read is addressed rather than silent (I4).
+ */
+export const CENSUS_NAME_BYTES = 128;
 
 /** Verbatim sample values kept per field. */
 export const FIELD_SAMPLES = 3;

@@ -44,7 +44,8 @@ import { StrideIndex } from '../../src/core/stride/index.js';
 import { Resolver, type Member } from '../../src/core/stride/resolve.js';
 import { BufferSource } from '../../src/core/stride/source.js';
 import {
-    DISTINCT_CAP, FIELD_SAMPLES, SHAPE_SAMPLE,
+    DISTINCT_CAP, FIELD_SAMPLES, SHAPE_SAMPLE, CENSUS_FIELD_CAP, CENSUS_SCAN_CAP,
+    CENSUS_NAME_BYTES, MARKER_RE,
     type StrideNode, type StrideShape,
 } from '../../src/core/stride/types.js';
 import { censusOf, knee, noveltyOf, redundancyOf, ELEMENT_FIELD } from '../../src/core/stride/shape.js';
@@ -818,6 +819,264 @@ describe('knee is two detectors, and both of them fire', () => {
 });
 
 // ── cost ──────────────────────────────────────────────────────────────────
+
+/**
+ * A census's cost has to be a function of the request, not of the document
+ * (I6). The failure this guards was not subtle: the census allocated one tally
+ * per grandchild, so ONE wide record decided the memory. A 3.03 MiB array
+ * holding a single 200,000-key record retained 207.34 MiB, 68.4x the document,
+ * and buildMap on a 4.76 MiB document died with FATAL heap under
+ * --max-old-space-size=256 — four orders of magnitude below the size this
+ * navigator exists to read.
+ *
+ * Heap is not asserted here, because a heap assertion inside a shared suite
+ * measures the suite. What is asserted is the mechanism that made it grow: how
+ * many members a census describes, whether it says that it stopped, and whether
+ * its output stops changing once the document outgrows the cap. Those are
+ * deterministic, and a regression cannot pass them.
+ */
+describe('a census is bounded by its cap, not by the width of a record', () => {
+    /** One array of `records` records, each with `keys` distinct members. */
+    function wide(records: number, keys: number, id: string): { resolver: CountingResolver; node: StrideNode } {
+        const rec = (r: number): string => '{' + Array.from(
+            { length: keys },
+            (_, i) => `"f${String(records === 1 ? i : r * keys + i).padStart(7, '0')}":${i}`,
+        ).join(',') + '}';
+        const doc = '[' + Array.from({ length: records }, (_, r) => rec(r)).join(',') + ']';
+        const resolver = build(doc, id);
+        return { resolver, node: resolver.root() };
+    }
+
+    it('describes at most CENSUS_FIELD_CAP members however wide one record is', () => {
+        for (const keys of [CENSUS_FIELD_CAP - 1, CENSUS_FIELD_CAP, CENSUS_FIELD_CAP + 1, 20_000]) {
+            const { resolver, node } = wide(1, keys, `wide-${keys}`);
+            const shape = censusOf(resolver, node);
+            expect(
+                shape.fields.length,
+                `a record with ${keys} members produced ${shape.fields.length} fields. The census keeps one tally `
+                + `per described name, so an uncapped count is the memory bound being set by the document.`,
+            ).toBeLessThanOrEqual(CENSUS_FIELD_CAP);
+            expect(
+                shape.widestMember,
+                `the census must count the record's true width even where it stops describing it, or a caller `
+                + 'cannot tell a 64-member record from a 20,000-member one (I4).',
+            ).toBe(keys);
+            expect(
+                shape.fieldsCapped,
+                `a ${keys}-member record with a cap of ${CENSUS_FIELD_CAP} reported fieldsCapped=${shape.fieldsCapped}. `
+                + 'Withholding members without saying so is silent truncation.',
+            ).toBe(keys > CENSUS_FIELD_CAP);
+        }
+    }, 120_000);
+
+    it('caps distinct names across the sample, not only inside one record', () => {
+        // No single record is wide, but the sample's union is: 200 records of 250
+        // members each carry 50,000 distinct names between them. A per-record cap
+        // alone leaves the tally map unbounded.
+        const { resolver, node } = wide(200, 250, 'wide-union');
+        const shape = censusOf(resolver, node);
+        expect(
+            shape.fields.length,
+            `250 members per record across 200 records produced ${shape.fields.length} fields from a union of `
+            + '50,000 distinct names.',
+        ).toBeLessThanOrEqual(CENSUS_FIELD_CAP);
+        expect(shape.fieldsCapped, 'the union overflowed the cap, so the census has to say so').toBe(true);
+        expect(shape.widestMember, 'each record holds 250 members').toBe(250);
+    }, 120_000);
+
+    it('stops changing once the document outgrows the cap', () => {
+        // The census of a 16x larger document must describe the same members in
+        // the same way. A field list that keeps growing with the input is the
+        // defect restated, whatever the constant in front of it.
+        const small = censusOf(...(() => { const w = wide(1, 50_000, 'flat-small'); return [w.resolver, w.node] as const; })());
+        const large = censusOf(...(() => { const w = wide(1, 800_000, 'flat-large'); return [w.resolver, w.node] as const; })());
+        expect(
+            JSON.stringify(large.fields),
+            `the census of an 800,000-member record described ${large.fields.length} fields against `
+            + `${small.fields.length} for a 50,000-member one. Same cap, same first members, so the same output.`,
+        ).toBe(JSON.stringify(small.fields));
+        expect(small.widestMember, 'the true width is still reported exactly').toBe(50_000);
+        expect(large.widestMember, 'the true width is still reported exactly').toBe(800_000);
+    }, 300_000);
+
+    it('describes an oversized member name by its length instead of its text', () => {
+        // A member name is bytes the document chose. Reading it in full puts the
+        // document's own scale back into the census's memory: measured at 60.66
+        // MiB retained on a 31.26 MiB document of 40-KiB names, held twice over
+        // in the tally keys and the key-set signatures.
+        const long = 'k'.repeat(40_960);
+        const doc = `[{"${long}":1,"ok":2},{"${long}":3,"ok":4}]`;
+        const resolver = build(doc, 'long-names');
+        const shape = censusOf(resolver, resolver.root());
+        const oversized = shape.fields.filter((f) => f.key !== 'ok');
+        expect(oversized.length, 'the oversized member still has to appear; dropping it would be a silent omission').toBe(1);
+        const [only] = oversized;
+        expect(only, 'the oversized field is missing').toBeTruthy();
+        if (only === undefined) return;
+        expect(
+            only.key.includes('kkkk'),
+            `the census emitted ${only.key.length} characters of a ${long.length}-byte member name. A name longer `
+            + `than CENSUS_NAME_BYTES (${CENSUS_NAME_BYTES}) is described, not copied.`,
+        ).toBe(false);
+        expect(
+            MARKER_RE.test(only.key),
+            `an abbreviated member name must be in the one sanctioned marker form so no reader takes it for a `
+            + `document key; got ${JSON.stringify(only.key)}.`,
+        ).toBe(true);
+        expect(
+            only.key,
+            'the marker has to carry the name\'s true byte length, which is the only thing left of it',
+        ).toContain(String(long.length));
+    }, 60_000);
+
+    it('keeps a name at exactly the bound verbatim, and the next byte abbreviated', () => {
+        // The boundary itself: CENSUS_NAME_BYTES is inclusive, so a name of
+        // exactly that many bytes is a real key and one byte more is not.
+        const at = 'a'.repeat(CENSUS_NAME_BYTES);
+        const over = 'b'.repeat(CENSUS_NAME_BYTES + 1);
+        const resolver = build(`[{"${at}":1,"${over}":2}]`, 'name-boundary');
+        const keys = censusOf(resolver, resolver.root()).fields.map((f) => f.key);
+        expect(keys, `a ${CENSUS_NAME_BYTES}-byte name is inside the bound and must be reported verbatim`).toContain(at);
+        expect(keys, `a ${CENSUS_NAME_BYTES + 1}-byte name is past the bound and must not be reported verbatim`).not.toContain(over);
+    });
+
+    it('scans a record past the field cap, and says where it stopped', () => {
+        // The two caps bound different costs and must not be confused: a record
+        // of 300 members is fully scanned, and only its DESCRIPTION is capped at
+        // 64. Collapsing the scan onto the field cap is what made novelty blind
+        // past the 64th member.
+        const mid = censusOf(...(() => {
+            const rec = '{' + Array.from({ length: 300 }, (_, i) => `"f${String(i).padStart(4, '0')}":${i}`).join(',') + '}';
+            const r = build(`[${rec},${rec}]`, 'scan-mid');
+            return [r, r.root()] as const;
+        })());
+        expect(mid.widestMember, 'a 300-member record is scanned in full').toBe(300);
+        expect(mid.fields.length, 'and described only up to the field cap').toBe(CENSUS_FIELD_CAP);
+
+        const over = censusOf(...(() => {
+            const rec = '{' + Array.from({ length: CENSUS_SCAN_CAP + 500 }, (_, i) => `"f${String(i).padStart(5, '0')}":${i}`).join(',') + '}';
+            const r = build(`[${rec},${rec}]`, 'scan-over');
+            return [r, r.root()] as const;
+        })());
+        expect(
+            over.widestMember,
+            'a record past the scan cap is still COUNTED in full, or the caller cannot tell how much of the record '
+            + 'it is looking at (I4).',
+        ).toBe(CENSUS_SCAN_CAP + 500);
+        expect(over.fieldsCapped, 'and the census has to say that it stopped').toBe(true);
+    }, 120_000);
+
+    it('reports the scan cap on a record the field cap cannot reach', () => {
+        // Every assertion above survives deleting the scan cap, because on those
+        // fixtures the FIELD cap sets `fieldsCapped` on its own — 1,524 distinct
+        // names would cap the description whatever the scan did. A memory bound
+        // whose removal changes no output is a bound one silent edit away from
+        // being gone, so it needs a fixture only it can explain.
+        //
+        // Duplicate keys give one: a record of N members carrying a single
+        // distinct name never fills the field cap, so `fieldsCapped` can only mean
+        // the scan stopped. Legal JSON text, and not a contrivance — documents
+        // that repeat a key are exactly the ones this navigator meets in the wild.
+        const dup = (members: number): StrideShape => {
+            const rec = '{' + new Array(members).fill('"a":1').join(',') + '}';
+            const resolver = build(`[${rec}]`, `dup-${members}`);
+            return censusOf(resolver, resolver.root());
+        };
+
+        const under = dup(CENSUS_SCAN_CAP);
+        expect(under.fields.length, 'one distinct name is one field, however often it repeats').toBe(1);
+        expect(under.widestMember, 'and every repeat is counted').toBe(CENSUS_SCAN_CAP);
+        expect(
+            under.fieldsCapped,
+            `a record of exactly CENSUS_SCAN_CAP members is scanned whole, so nothing is withheld and the census `
+            + 'must not claim otherwise.',
+        ).toBe(false);
+
+        const over = dup(CENSUS_SCAN_CAP + 1);
+        expect(over.fields.length, 'still one field').toBe(1);
+        expect(over.widestMember, 'still counted in full past the cap').toBe(CENSUS_SCAN_CAP + 1);
+        expect(
+            over.fieldsCapped,
+            'one member more and the scan stopped short, which the census must report. False here means the scan '
+            + 'read the whole record and the memory bound on CENSUS_SCAN_CAP is not in force.',
+        ).toBe(true);
+    }, 120_000);
+
+    it('still scores novelty over records wider than the field cap', () => {
+        // noveltyOf reaches the same per-member scan through profileOf, so the
+        // cap has to leave scoring working rather than merely bounded.
+        const shared = Array.from({ length: 200 }, (_, f) => `"s${f}":${f}`).join(',');
+        const rows = Array.from({ length: 40 }, () => `{${shared},"tag":"routine"}`);
+        rows[17] = `{${shared},"tag":"anomaly","extra":[1,2,3]}`;
+        const resolver = build(`[${rows.join(',')}]`, 'wide-novelty');
+        const node = resolver.root();
+        const shape = censusOf(resolver, node);
+        const members = resolver.members(node, 0, node.count);
+        const novelty = noveltyOf(resolver, node, members, shape);
+        expect(novelty.length, 'every member must still be scored').toBe(rows.length);
+        for (const v of novelty) {
+            expect(Number.isFinite(v) && v >= 0 && v <= 1, `every novelty score must be finite and in [0,1]; found ${v}`).toBe(true);
+        }
+        expect(
+            ranking(novelty)[0],
+            'the one record with a different shape must still rank first for novelty; a cap that truncated the '
+            + 'scan into uniformity would score every record alike.',
+        ).toBe(17);
+    }, 120_000);
+
+    it('does not narrow the width over which novelty can still discriminate', () => {
+        // The regression this exists to catch was introduced by the field cap and
+        // found by measurement, not by reading: `censusSupport` answers 0 for a
+        // name the census does not describe, meaning "inspected the sample and
+        // never saw it" — real evidence of rarity. Once the census stops
+        // describing names at CENSUS_FIELD_CAP that inference is invalid, and
+        // charging the census's population against a gram it never voted on made
+        // every member past the 64th score as evidence of its own rarity. It was
+        // the same charge in every record, so it discriminated nothing and only
+        // grew `structuralRaw` with width, until softBound saturated at 1 and all
+        // scores collapsed to equal.
+        //
+        // Measured on this fixture: the widest record whose one differing member
+        // still scored was 1,022 members before the cap existed, 419 with the cap
+        // and the old censusSupport, and 1,022 again once an abstaining census
+        // stopped being counted as a silent one. The widths below straddle that:
+        // 65 is the first past the field cap, 419 is where it broke, 1000 is
+        // inside the ceiling that predates all of this.
+        //
+        // The difference is one of KIND, not of value. `profileOf` grams every
+        // member it scans structurally but reads value text only for names the
+        // census certified as enumerations, and a name past CENSUS_FIELD_CAP is
+        // never certified — so a value-only difference out here would be invisible
+        // for a reason that has nothing to do with either cap. Both values are
+        // nine bytes, so the records are identical in length too: `Profile.bytes`
+        // is a scoring input, and a shorter value would discriminate them by size
+        // whatever the scan did.
+        for (const width of [65, 419, 1000]) {
+            const filler = Array.from({ length: width - 1 }, (_, f) => `"s${String(f).padStart(6, '0')}":${f}`).join(',');
+            // Zero-padded names, so the odd member lands last in document order and
+            // stays there: the scan reads the document, not a sorted view of it.
+            const rows = Array.from({ length: 12 }, () => `{${filler},"tag":"routine"}`);
+            rows[5] = `{${filler},"tag":123456789}`;
+            const resolver = build(`[${rows.join(',')}]`, `kind-odd-${width}`);
+            const node = resolver.root();
+            const members = resolver.members(node, 0, node.count);
+            const shape = censusOf(resolver, node);
+            const novelty = noveltyOf(resolver, node, members, shape);
+
+            expect(shape.fields.length, `a ${width}-member record must still cap at CENSUS_FIELD_CAP fields`)
+                .toBe(Math.min(width, CENSUS_FIELD_CAP));
+            expect(
+                new Set(novelty).size,
+                `in ${width}-member records, the one holding a number where its eleven siblings hold a string must `
+                + 'score differently. A single distinct score means width alone saturated the scorer.',
+            ).toBeGreaterThan(1);
+            expect(
+                ranking(novelty)[0],
+                `and in ${width}-member records that record must be the novel one`,
+            ).toBe(5);
+        }
+    }, 300_000);
+});
 
 describe('cost', () => {
     it('censuses and scores a 50,000-record array', () => {

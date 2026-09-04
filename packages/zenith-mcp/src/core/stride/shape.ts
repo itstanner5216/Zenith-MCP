@@ -39,6 +39,7 @@
 
 import {
     StrideError, STRIDE_KEY, SHAPE_SAMPLE, DISTINCT_CAP, FIELD_SAMPLES,
+    CENSUS_FIELD_CAP, CENSUS_SCAN_CAP, CENSUS_NAME_BYTES,
     type StrideField, type StrideKind, type StrideNode, type StrideShape,
 } from './types.js';
 import type { StrideSource } from './source.js';
@@ -287,14 +288,26 @@ export function censusOf(resolver: Resolver, node: StrideNode, opts?: CensusOpti
     let sampled = 0;
     let byteSum = 0;
 
+    let widestMember = 0;
+    let fieldsCapped = false;
     for (const member of picks) {
         sampled++;
         byteSum += member.end - member.start;
         const names = new Set<string>();
-        // The census must read every value: distinct counts and sample values
-        // are the whole point of it, so there is no cheaper predicate here.
-        for (const obs of observe(source, member, alwaysWanted)) {
+        // The census must read every value it describes: distinct counts and
+        // sample values are the whole point of it, so there is no cheaper
+        // predicate here. What it must NOT do is describe every value —
+        // `observe` stops at CENSUS_SCAN_CAP observations and reports the
+        // record's true width separately.
+        const scan = observe(source, member, alwaysWanted);
+        if (scan.seen > widestMember) widestMember = scan.seen;
+        if (scan.items.length < scan.seen) fieldsCapped = true;
+        for (const obs of scan.items) {
             const tally = tallyFor(tallies, obs.name);
+            // The cap on distinct names, which is separate from the cap on any
+            // one record: 256 records of 64 names each can carry 16,384
+            // distinct names between them without any single record being wide.
+            if (tally === null) { fieldsCapped = true; continue; }
             tally.kinds.set(obs.kind, (tally.kinds.get(obs.kind) ?? 0) + 1);
             // Presence counts MEMBERS, not observations: a document may repeat a
             // member name inside one object, and that must not read as 200%.
@@ -326,6 +339,8 @@ export function censusOf(resolver: Resolver, node: StrideNode, opts?: CensusOpti
         homogeneous: sampled === 0 ? true : dominant / sampled >= HOMOGENEITY_DOMINANCE,
         fields,
         meanBytes: sampled === 0 ? 0 : Math.round((byteSum / sampled) * 10) / 10,
+        widestMember,
+        fieldsCapped,
     };
 }
 
@@ -385,9 +400,15 @@ function samplePositions(resolver: Resolver, node: StrideNode, total: number, bu
     return out;
 }
 
-function tallyFor(tallies: Map<string, Tally>, name: string): Tally {
+/**
+ * The tally for `name`, or null once the census has described
+ * CENSUS_FIELD_CAP distinct names. Null is the cap firing, not an error: the
+ * caller records that `fields` is a subset and keeps counting.
+ */
+function tallyFor(tallies: Map<string, Tally>, name: string): Tally | null {
     const found = tallies.get(name);
     if (found !== undefined) return found;
+    if (tallies.size >= CENSUS_FIELD_CAP) return null;
     const fresh: Tally = {
         kinds: new Map<StrideKind, number>(),
         present: 0,
@@ -470,6 +491,14 @@ interface Observation {
     readonly text: string | null;
 }
 
+/** What one member contributed, and how wide that member actually was. */
+interface MemberScan {
+    /** At most CENSUS_SCAN_CAP observations, in document order. */
+    readonly items: readonly Observation[];
+    /** Members the record holds, counted past the cap. Exact. */
+    readonly seen: number;
+}
+
 const alwaysWanted = (): boolean => true;
 
 /**
@@ -487,24 +516,43 @@ const alwaysWanted = (): boolean => true;
  * resolver's bounded caches, evicting the pointers an agent is actually
  * navigating with, to learn nothing the span scan does not already give us.
  */
-function observe(source: StrideSource, member: Member, wantText: (name: string) => boolean): Observation[] {
-    const out: Observation[] = [];
+function observe(source: StrideSource, member: Member, wantText: (name: string) => boolean): MemberScan {
+    const items: Observation[] = [];
     if (member.kind !== 'object') {
         const name = member.key ?? ELEMENT_FIELD;
-        out.push(read(source, name, member.kind, member.start, member.end, wantText(name)));
-        return out;
+        items.push(read(source, name, member.kind, member.start, member.end, wantText(name)));
+        return { items, seen: 1 };
     }
 
     let keyStart = -1;
     let keyEnd = -1;
+    let seen = 0;
     const take = (kind: StrideKind, start: number, end: number): void => {
         // A value with no preceding member name cannot occur in a well-formed
         // object; if the scanner hands us one the document is malformed there
         // and inventing a name for it would be inventing structure (I1).
         if (keyStart < 0) return;
-        const name = decodeJsonString(source.slice(keyStart, keyEnd));
+        const nameStart = keyStart;
+        const nameEnd = keyEnd;
         keyStart = -1;
-        out.push(read(source, name, kind, start, end, wantText(name)));
+        seen++;
+        // Counted but not kept. The scan continues to the end of the record so
+        // `seen` is the record's TRUE width — the count is what makes the cap
+        // an addressed omission rather than a silent one (I4) — but nothing
+        // past the cap is decoded, sliced or stored, so a 200,000-key record
+        // costs the same as a 1,024-key one.
+        if (items.length >= CENSUS_SCAN_CAP) return;
+        // A name is bytes the document chose; the census's memory must not be.
+        // Past the bound the name is described by its length in the marker form
+        // `absorbValue` already uses for a value too large to read. Two
+        // oversized names of equal length therefore share one tally, which is
+        // visible in the output rather than implied: the key is not a document
+        // key and does not look like one.
+        const nameBytes = Math.max(0, nameEnd - nameStart - 2);
+        const name = nameBytes <= CENSUS_NAME_BYTES
+            ? decodeJsonString(source.slice(nameStart, nameEnd))
+            : `[TRUNCATED: name of ${nameBytes} bytes]`;
+        items.push(read(source, name, kind, start, end, wantText(name)));
     };
 
     scanStructure(source, member.start + 1, member.end, {
@@ -514,7 +562,7 @@ function observe(source: StrideSource, member: Member, wantText: (name: string) 
         scalar(kind, start, end, d) { if (d === 1) take(KIND_NAMES[kind] ?? 'null', start, end); },
     }, 0);
 
-    return out;
+    return { items, seen };
 }
 
 function read(
@@ -564,7 +612,7 @@ function profileOf(source: StrideSource, member: Member, eligible: ReadonlySet<s
     // Value text is read ONLY for members the census certified as enumerations.
     // On a ten-member record with three enumerated members that is three slices
     // instead of ten, and it is what keeps scoring a large page affordable.
-    for (const obs of observe(source, member, (name) => eligible.has(name))) {
+    for (const obs of observe(source, member, (name) => eligible.has(name)).items) {
         names.add(obs.name);
         structural.add(structuralGram(obs.name, obs.kind));
         if (obs.text !== null) values.add(valueGram(obs.name, obs.text));
@@ -710,7 +758,19 @@ function scoreProfiles(
 
         let structuralRaw = 0;
         for (const g of p.structural) {
-            structuralRaw += surprisal((pop.df.get(g) ?? 0) + censusSupport(g, byKey, censusN), n + censusN);
+            const support = censusSupport(g, byKey, censusN, census?.fieldsCapped ?? false);
+            // Null is the census abstaining, and an abstention has to cost its
+            // population as well as its support. Counting `censusN` in the
+            // denominator while contributing nothing to the numerator is what
+            // makes silence look like rarity: every member past CENSUS_FIELD_CAP
+            // scored -ln(n / (n + censusN)) in EVERY record, so `structuralRaw`
+            // grew with record width alone until softBound saturated at 1 and no
+            // record could be told from another. Measured on twelve records
+            // differing by one member's kind: the widest record whose difference
+            // still scored was 1,022 members before the cap existed and 419 after.
+            structuralRaw += support === null
+                ? surprisal(pop.df.get(g) ?? 0, n)
+                : surprisal((pop.df.get(g) ?? 0) + support, n + censusN);
         }
         structuralRaw += surprisal(
             (pop.df.get(p.keySet) ?? 0) + (p.keySet === dominantKeySet ? keySetSupport : 0),
@@ -727,13 +787,19 @@ function scoreProfiles(
 }
 
 /**
- * How many of the census's sampled members support a (name, kind) gram.
+ * How many of the census's sampled members support a (name, kind) gram, or null
+ * when the census has no evidence to offer about it at all.
  *
  * StrideField keeps kinds ordered by frequency but not the counts, so this is a
  * bound rather than a count, and it is chosen to err in the safe direction at
  * each branch:
- *   - name absent from the census: 0. The census inspected `sampled` members and
- *     never saw this name, which is real evidence of rarity.
+ *   - name absent from a census that described every name it met: 0. It
+ *     inspected `sampled` members and never saw this name, which is real
+ *     evidence of rarity.
+ *   - name absent from a CAPPED census: null, no evidence. The census stopped
+ *     describing names at CENSUS_FIELD_CAP, so it never looked for this one and
+ *     its absence says nothing. Reporting 0 here would turn every member of a
+ *     wide record into evidence of its own rarity; see the caller.
  *   - dominant kind: presence x sampled. An over-estimate when the member holds
  *     several kinds, which SUPPRESSES novelty for the ordinary case.
  *   - a non-dominant kind the census did see: 1, the only number we can prove.
@@ -742,7 +808,12 @@ function scoreProfiles(
  *     document frequency corrects it as soon as there is enough local evidence.
  *   - a kind the census never saw at this name: 0.
  */
-function censusSupport(gram: string, byKey: Map<string, StrideField>, censusN: number): number {
+function censusSupport(
+    gram: string,
+    byKey: Map<string, StrideField>,
+    censusN: number,
+    capped: boolean,
+): number | null {
     if (censusN === 0) return 0;
     const cut = gram.indexOf('\u0000');
     if (cut < 0) return 0;
@@ -750,7 +821,7 @@ function censusSupport(gram: string, byKey: Map<string, StrideField>, censusN: n
     if (!Number.isFinite(nameLen)) return 0;
     const name = gram.slice(cut + 1, cut + 1 + nameLen);
     const field = byKey.get(name);
-    if (field === undefined) return 0;
+    if (field === undefined) return capped ? null : 0;
     const kind = gram.slice(cut + 1 + nameLen + 3);
     const dominant = field.kinds[0];
     if (dominant === kind) return Math.round(field.presence * censusN);
