@@ -407,7 +407,7 @@ Do not use `target`/`fileScope` for `restore` or `history`; those use `symbol`/`
 Runs `bash -c <command>` and returns a terminal-style transcript.
 
 - First line is the prompt: `<cwd>$ <command>`.
-- Last line is the status: `[exit code N]`, `[terminated by SIGxxx]`, `[timed out after Ns; process group killed]`, or `[cancelled; process group killed]`.
+- Last line is the status: `[exit code N]`, `[terminated by SIGxxx]`, `[timed out after Ns; process group killed]`, `[cancelled; process group killed]`, or `[cancelled]` when the request was cancelled before the shell started. `[exit code unknown]` is the fallback for an exit Node reports with neither a code nor a signal, which its `exit` event documents as never happening.
 - A non-zero exit is data on the status line, not a tool error. The error channel is only for the tool itself failing: invalid `cwd`, `bash not found.`, spawn failure.
 - `timeout` defaults to `bash_timeout_seconds` (120) and is clamped to `bash_max_timeout_seconds` (600); both live under `### Advanced`.
 - Output is returned in full, rendered as it arrives the way a terminal shows it: `\r`, backspace, erase-in-line and cursor-to-column are modelled per line (cells are code points, so a tab or a wide character is one cell); colours and other sequences, control strings (OSC/DCS/SOS/PM/APC, newlines included) and stray control bytes are removed.

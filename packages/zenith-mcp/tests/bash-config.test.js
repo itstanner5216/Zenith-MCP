@@ -30,7 +30,9 @@ describe('bash tool — configured timeout default and cap', () => {
     });
 
     afterAll(() => {
-        process.env.HOME = originalHome;
+        // Assigning undefined to process.env stores the string "undefined".
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
         fs.rmSync(tmpDir, { recursive: true, force: true });
         fs.rmSync(home, { recursive: true, force: true });
     });

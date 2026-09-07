@@ -105,7 +105,7 @@ The `zenith-toon` package provides intelligent context compression for tool outp
 - **Code awareness** — Tree-sitter AST parsing for 40+ languages (lazy-loaded WASM grammars)
 - **Symbol indexing & versioning** — per-project SQLite index with impact graphs and automatic version snapshots
 - **Stash & restore** — retry failed edits and restore symbol versions
-- **Dynamic directory access control** via [MCP Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots)
+- **Per-call project scope** — no session state and no MCP Roots: every call derives its scope from path evidence, the project registry and client detection, with an opt-in allowed-directory sandbox (`Sandbox: enabled`)
 - **Dual transport** — stdio (local) and HTTP (remote with Streamable HTTP + legacy SSE)
 
 ---
@@ -306,7 +306,7 @@ Run a bash command and get a terminal-style transcript.
 - `cwd` (string, optional) — validated working directory; defaults to the project root, else the first allowed directory, else the server's working directory. An explicit `cwd` is path evidence: it rebinds project detection exactly like a file tool's path
 - `timeout` (integer seconds ≥ 1, optional) — defaults to `bash_timeout_seconds` (120); anything above `bash_max_timeout_seconds` (600) is clamped to that cap
 - The allowed-directory sandbox confines only `cwd`. The command runs with the server's own privileges and can reach anything the server process can; `bash: disabled` under `### Tools` turns the tool off where that is not acceptable
-- Output is a transcript: `<cwd>$ <command>` on the first line, then stdout and stderr merged in arrival order and rendered as a terminal shows them (ANSI stripped; `\r`, backspace, erase-line and cursor-to-column replayed per line; control-string payloads such as titles and hyperlinks dropped), then a status line — `[exit code N]`, `[terminated by SIGxxx]`, `[timed out after Ns; process group killed]`, or `[cancelled; process group killed]`
+- Output is a transcript: `<cwd>$ <command>` on the first line, then stdout and stderr merged in arrival order and rendered as a terminal shows them (ANSI stripped; `\r`, backspace, erase-line and cursor-to-column replayed per line; control-string payloads such as titles and hyperlinks dropped), then a status line — `[exit code N]`, `[terminated by SIGxxx]`, `[timed out after Ns; process group killed]`, `[cancelled; process group killed]`, or `[cancelled]` when the request was cancelled before the shell started (nothing ran). `[exit code unknown]` is the fallback for an exit Node reports with neither a code nor a signal, which its `exit` event documents as never happening
 - On timeout, or when the client cancels the request, the command's process group gets SIGTERM, then SIGKILL after 2 s (Windows: `taskkill /T /F`); the output captured so far is still returned. A job the command moved to its own group (`set -m`) is not reached. Commands still running when the server exits or receives SIGTERM/SIGINT/SIGHUP are swept; a process that outlives its command (a detached service) is not
 - Output is returned in full. stdin is closed — start services detached with output redirected
 - A non-zero exit is reported as data on the status line, not as an error; the error channel is only for the tool itself failing (bad `cwd`, bash missing, spawn failure)

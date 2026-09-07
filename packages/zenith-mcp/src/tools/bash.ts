@@ -451,7 +451,7 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         description: "Run a bash command. Returns a terminal transcript: a prompt line (<cwd>$ <command>), stdout and stderr merged with ANSI stripped, and a status line with the exit code. Output is returned in full. stdin is closed; start services detached with output redirected.",
         inputSchema: z.object({
             command: z.string().min(1).describe("Command to run."),
-            cwd: z.string().optional().describe("Working directory. Defaults to the project root."),
+            cwd: z.string().optional().describe("Working directory. Defaults to the project root, else the first allowed directory, else the server's working directory."),
             timeout: z.number().int().min(1).optional().describe("Seconds. Default and cap come from config (bash_timeout_seconds, bash_max_timeout_seconds)."),
         }).strict(),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
@@ -460,8 +460,10 @@ export function register(server: ToolServer, ctx: ToolContext): void {
         const signal = extra?.signal;
 
         // An explicit cwd is path evidence for project detection exactly like a
-        // file tool's path. The default never refuses: project root (any tier) →
-        // first allowed directory → this process's own cwd.
+        // file tool's path. The default never refuses for want of a root: project
+        // root (any tier) → first allowed directory → this process's own cwd.
+        // validatePath then applies the sandbox policy, when one is enabled, to
+        // that directory exactly as it does to every other tool's path.
         const pc = getProjectContext(ctx);
         const cwd = args.cwd !== undefined
             ? await ctx.validatePath(args.cwd)

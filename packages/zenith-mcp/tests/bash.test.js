@@ -36,6 +36,13 @@ function mkCtx(baseDir) {
 // Timeout cases spend a 1 s limit plus up to 2 s of SIGTERM grace before SIGKILL.
 const SLOW = 10_000;
 
+// The stopping contract these cases pin — process groups, SIGTERM then SIGKILL,
+// `$$`/`$!` pids — is POSIX; on Windows the tool stops a command with taskkill
+// and none of it applies.
+const posixOnly = it.skipIf(process.platform === 'win32');
+// Only Linux refuses a single argument over 128 KiB (MAX_ARG_STRLEN) at spawn time.
+const linuxOnly = it.skipIf(process.platform !== 'linux');
+
 // Once a spawn has happened the tool listens for SIGTERM/SIGINT/SIGHUP to sweep its
 // children (re-raising when it is the only listener). Vitest's worker has its own
 // listeners, so nothing is re-raised here — this only checks the hook is present.
@@ -347,12 +354,12 @@ describe('bash tool', () => {
     }, SLOW);
 
     // Contract throw: a spawn that fails synchronously (an over-long argument list) is normalised.
-    it('reports a synchronous spawn failure through the throw channel', async () => {
+    linuxOnly('reports a synchronous spawn failure through the throw channel', async () => {
         await expect(run({ command: `: ${'x'.repeat(200_000)}`, cwd: tmpDir })).rejects.toThrow(/^Spawn failed: /);
     });
 
     // Contract timeout: SIGTERM to the group, output captured before the kill is kept, status line.
-    it('kills the process group on timeout and keeps the output captured before it', async () => {
+    posixOnly('kills the process group on timeout and keeps the output captured before it', async () => {
         const t0 = Date.now();
         const text = await run({ command: 'echo $$; sleep 30', cwd: tmpDir, timeout: 1 });
         const wall = Date.now() - t0;
@@ -363,7 +370,7 @@ describe('bash tool', () => {
     }, SLOW);
 
     // Contract timeout: a shell ignoring SIGTERM is SIGKILLed after the grace period.
-    it('escalates to SIGKILL when the shell ignores SIGTERM', async () => {
+    posixOnly('escalates to SIGKILL when the shell ignores SIGTERM', async () => {
         const t0 = Date.now();
         const text = await run({ command: "trap '' TERM; echo $$; sleep 30", cwd: tmpDir, timeout: 1 });
         const wall = Date.now() - t0;
@@ -375,7 +382,7 @@ describe('bash tool', () => {
     }, SLOW);
 
     // Contract timeout: the whole process group dies — background children included.
-    it('kills background children on timeout', async () => {
+    posixOnly('kills background children on timeout', async () => {
         const lines = (await run({ command: 'sleep 30 & echo $!; wait', cwd: tmpDir, timeout: 1 })).split('\n');
         expect(lines[lines.length - 1]).toBe('[timed out after 1s; process group killed]');
         const bgPid = Number(lines[1]);
@@ -385,7 +392,7 @@ describe('bash tool', () => {
 
     // Contract timeout: the shell dies on SIGTERM but a descendant ignores it — the
     // SIGKILL still goes out after the grace, and the status line stays true.
-    it('SIGKILLs a TERM-ignoring descendant after the shell itself has died', async () => {
+    posixOnly('SIGKILLs a TERM-ignoring descendant after the shell itself has died', async () => {
         const t0 = Date.now();
         const lines = (await run({ command: "( trap '' TERM; sleep 30 ) & echo $!; wait", cwd: tmpDir, timeout: 1 })).split('\n');
         const wall = Date.now() - t0;
@@ -399,7 +406,7 @@ describe('bash tool', () => {
 
     // Contract timeout: the shell dies on SIGTERM, a TERM-ignoring descendant redirected
     // its output so the pipes close at once — the call still waits for the SIGKILL.
-    it('SIGKILLs a TERM-ignoring descendant that does not hold the pipes', async () => {
+    posixOnly('SIGKILLs a TERM-ignoring descendant that does not hold the pipes', async () => {
         const t0 = Date.now();
         const lines = (await run({ command: "( trap '' TERM; sleep 30 ) >/dev/null 2>&1 & echo $!; wait", cwd: tmpDir, timeout: 1 })).split('\n');
         const wall = Date.now() - t0;
@@ -413,7 +420,7 @@ describe('bash tool', () => {
 
     // Contract timeout: the shell exits just before the deadline leaving a TERM-ignoring
     // child on the pipes — the pending exit grace must not complete the call under the kill.
-    it('does not let a pending exit grace pre-empt the SIGKILL escalation', async () => {
+    posixOnly('does not let a pending exit grace pre-empt the SIGKILL escalation', async () => {
         const t0 = Date.now();
         const lines = (await run({ command: "trap '' TERM; sleep 30 & echo $!; sleep 0.9; exit 0", cwd: tmpDir, timeout: 1 })).split('\n');
         const wall = Date.now() - t0;
@@ -429,7 +436,7 @@ describe('bash tool', () => {
     // without waiting out the SIGKILL grace. `exec` keeps the group to one process that
     // Node itself reaps — an orphaned child would linger as a zombie (still a group
     // member) for as long as its reaper takes, which is not the tool's to control.
-    it('completes as soon as the whole group is gone after SIGTERM', async () => {
+    posixOnly('completes as soon as the whole group is gone after SIGTERM', async () => {
         const t0 = Date.now();
         const lines = (await run({ command: 'echo $$; exec sleep 30', cwd: tmpDir, timeout: 1 })).split('\n');
         expect(Date.now() - t0).toBeLessThan(2400);
@@ -438,7 +445,7 @@ describe('bash tool', () => {
     }, SLOW);
 
     // Contract cancel: aborting the request's signal stops the command like a timeout does.
-    it('kills the process group when the request is cancelled', async () => {
+    posixOnly('kills the process group when the request is cancelled', async () => {
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 300);
         const t0 = Date.now();
@@ -469,7 +476,7 @@ describe('bash tool', () => {
     }, SLOW);
 
     // Contract status: a signal death renders `[terminated by <signal>]`.
-    it('reports a signal death in the status line', async () => {
+    posixOnly('reports a signal death in the status line', async () => {
         const text = await run({ command: 'kill -SEGV $$', cwd: tmpDir });
         expect(text.startsWith(`${real}$ kill -SEGV $$\n`)).toBe(true);
         expect(text.endsWith('[terminated by SIGSEGV]')).toBe(true);
