@@ -158,25 +158,22 @@ pnpm build     # Builds zenith-toon first, then zenith-mcp
 
 ## Directory Access Control
 
-Directories can be specified via command-line arguments or dynamically via [MCP Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots).
+Allowed directories come from the command line:
 
-### Method 1: Command-line Arguments
 ```bash
 zenith-mcp /path/to/dir1 /path/to/dir2
 ```
 
-### Method 2: MCP Roots (Recommended)
-MCP clients that support Roots can dynamically update allowed directories at runtime via `roots/list_changed` notifications. Roots completely replace server-side directories when provided.
+The server also starts with none: tools then resolve project scope per call (path evidence, the project registry, client detection) or fall back to the global workspace. MCP Roots are not used — the server is stateless and derives scope per call.
 
-**Important:** If the server starts without CLI directories AND the client doesn't support roots (or provides empty roots), initialization will fail.
+By default the allowed directories are project-context hints and do not restrict access. `Sandbox: enabled` in the config file turns them into the enforced boundary:
 
-> **Why no fallback?** Allowed directories are a strict security sandbox — they determine what the AI can read and write. The server intentionally does *not* fall back to `process.cwd()` or auto-detected git roots for allowed directories, because that could accidentally expose sensitive files. A separate "project root" resolver (used only for the symbol index and stash database) does have fallbacks (git → marker detection → registry → global), but that layer never grants filesystem access.
+> **Why no fallback?** With the sandbox enabled, allowed directories are a strict security boundary — they determine what the AI can read and write through the filesystem tools. The server intentionally does *not* fall back to `process.cwd()` or auto-detected git roots for allowed directories, because that could accidentally expose sensitive files. A separate "project root" resolver (used only for the symbol index and stash database) does have fallbacks (git → marker detection → registry → global), but that layer never grants filesystem access.
 
 ### How It Works
-1. **Server Startup** — uses CLI directories as the baseline
-2. **Client Initialization** — if the client supports roots, the server requests `roots/list` and replaces allowed directories
-3. **Runtime Updates** — `notifications/roots/list_changed` triggers a refresh
-4. **Access Control** — all filesystem operations are restricted to allowed directories; symlinks are resolved and validated
+1. **Server Startup** — the CLI directories are resolved, validated and recorded
+2. **Sandbox** — with `Sandbox: enabled`, all filesystem tool operations are restricted to those directories; symlinks are resolved and validated. With the default (`disabled`) they are project-context hints only
+3. **`bash`** — the [`bash`](#bash) tool is the one exception: the sandbox confines only its `cwd`, and the command itself runs with the server's privileges
 
 ---
 
@@ -303,6 +300,17 @@ Cross-file symbol refactoring with impact analysis and version rollback.
 - **`restore`**: `symbol`, `file`, `version`, `dryRun` — rollback to snapshot
 - **`history`**: `symbol`, `file` — view version history
 
+### `bash`
+Run a bash command and get a terminal-style transcript.
+- `command` (string) — run with `bash -c`
+- `cwd` (string, optional) — validated working directory; defaults to the project root, else the first allowed directory, else the server's working directory. An explicit `cwd` is path evidence: it rebinds project detection exactly like a file tool's path
+- `timeout` (integer seconds ≥ 1, optional) — defaults to `bash_timeout_seconds` (120); anything above `bash_max_timeout_seconds` (600) is clamped to that cap
+- The allowed-directory sandbox confines only `cwd`. The command runs with the server's own privileges and can reach anything the server process can; `bash: disabled` under `### Tools` turns the tool off where that is not acceptable
+- Output is a transcript: `<cwd>$ <command>` on the first line, then stdout and stderr merged in arrival order and rendered as a terminal shows them (ANSI stripped; `\r`, backspace, erase-line and cursor-to-column replayed per line; control-string payloads such as titles and hyperlinks dropped), then a status line — `[exit code N]`, `[terminated by SIGxxx]`, `[timed out after Ns; process group killed]`, or `[cancelled; process group killed]`
+- On timeout, or when the client cancels the request, the command's process group gets SIGTERM, then SIGKILL after 2 s (Windows: `taskkill /T /F`); the output captured so far is still returned. A job the command moved to its own group (`set -m`) is not reached. Commands still running when the server exits or receives SIGTERM/SIGINT/SIGHUP are swept; a process that outlives its command (a detached service) is not
+- Output is returned in full. stdin is closed — start services detached with output redirected
+- A non-zero exit is reported as data on the status line, not as an error; the error channel is only for the tool itself failing (bad `cwd`, bash missing, spawn failure)
+
 ---
 
 ## Architecture
@@ -361,6 +369,8 @@ backup_mode: file
 char_budget: 400000
 search_char_budget: 15000
 session_ttl_ms: 1800000
+bash_timeout_seconds: 120
+bash_max_timeout_seconds: 600
 default_excludes: node_modules,.git,.next,...
 sensitive_patterns: **/.env,**/*.pem,...
 ```
