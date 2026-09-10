@@ -649,6 +649,33 @@ describe('a number is the bytes the document wrote', () => {
         expect(checked, 'the battery must actually have run').toBe(600);
     }, 300_000);
 
+    it('does not spend a nesting level on a number at the depth limit', () => {
+        // A source number is carried in an object, so a depth check that treats
+        // every object as a level counts it as one. MAX_RENDER_DEPTH is 512 and
+        // is private to render.ts, so the two depths are written out here: at
+        // 512 the arrays use every level the walk allows and the number must
+        // cost nothing, at 513 the arrays alone are over the bound.
+        //
+        // Both halves are load-bearing. Without the first, the box costs a level
+        // and a payload that serialises perfectly well is refused and split --
+        // measured at 1,043 characters emitted whole versus 4,856 split. Without
+        // the second, deleting the bound entirely would still pass. Raising
+        // MAX_RENDER_DEPTH therefore turns this test red on purpose: the numbers
+        // have to be moved by whoever moves the constant.
+        const atLimit = `${'['.repeat(512)}1889283923049203712${']'.repeat(512)}`;
+        const atResolver = open(atLimit, 'depth-at-limit');
+        const limitView = renderNode(atResolver, atResolver.root(), { budget: 200_000 });
+        expect(toJsonText(limitView.data), 'a 512-level payload whose innermost value is a number must come back whole')
+            .toBe(atLimit);
+        expect(limitView.envelope.omitted, 'nothing was withheld, so no omission may be reported').toEqual([]);
+
+        const overLimit = `${'['.repeat(513)}1889283923049203712${']'.repeat(513)}`;
+        const overResolver = open(overLimit, 'depth-over-limit');
+        const overView = renderNode(overResolver, overResolver.root(), { budget: 200_000 });
+        expect(overView.envelope.omitted.length, 'a 513-level payload is past the bound and must be addressed, not emitted')
+            .toBeGreaterThan(0);
+    });
+
     it('agrees with estimateChars on every shape, including ones no document holds', () => {
         // `estimateChars` is what I3 enforces the budget against and `toJsonText`
         // is what the caller receives, so a disagreement is a budget applied to a
