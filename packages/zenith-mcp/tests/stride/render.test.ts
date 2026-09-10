@@ -26,7 +26,7 @@ import { StrideIndex } from '../../src/core/stride/index.js';
 import { Resolver } from '../../src/core/stride/resolve.js';
 import { decodeCursor } from '../../src/core/stride/cursor.js';
 import { MARKER_RE, SCALAR_PREVIEW_BYTES, STRIDE_KEY, type StrideView } from '../../src/core/stride/types.js';
-import { MIN_VIEW_BUDGET, estimateChars, renderNode, renderWindow, toJsonText } from '../../src/core/stride/render.js';
+import { MIN_VIEW_BUDGET, SourceObject, estimateChars, renderNode, renderWindow, toJsonText } from '../../src/core/stride/render.js';
 
 /** Seeded so a failing case is reproducible from the seed alone. */
 function mulberry32(seed: number): () => number {
@@ -103,6 +103,44 @@ function isMarker(value: unknown): boolean {
     return typeof value === 'string' && MARKER_RE.test(value);
 }
 
+/**
+ * The child values of a payload container, whatever representation carries it.
+ *
+ * A `SourceObject` holds its members as `[name, value]` pairs, so the plain
+ * `Object.values` walk these helpers used to do descended into the pair arrays
+ * and yielded member NAMES alongside values -- which made the unicode test read
+ * a key as claimed source content. Member names are not payload values, so this
+ * hands back only the values. Everything else keeps the previous behaviour
+ * exactly, `SourceNumber` included: a number token stays reachable as the source
+ * bytes it is.
+ */
+function payloadValues(value: object): readonly unknown[] {
+    if (value instanceof SourceObject) return value.members.map(([, member]) => member);
+    if (Array.isArray(value)) return value;
+    return Object.values(value as Record<string, unknown>);
+}
+
+/**
+ * The `[name, value]` members of a payload object, in the order emitted.
+ *
+ * `Object.entries` is wrong on a `SourceObject`: it reports the box's own
+ * `members` field as if the document had a member named `members`, which is
+ * exactly the collision that made two tests here read the box instead of the
+ * payload. A repeated name appears once per occurrence, which is the point of
+ * the representation.
+ */
+function payloadEntries(value: object): readonly (readonly [string, unknown])[] {
+    if (value instanceof SourceObject) return value.members;
+    return Object.entries(value as Record<string, unknown>);
+}
+
+/** The last value emitted under `key`, or undefined. Last, matching RFC 8259. */
+function payloadMember(value: object, key: string): unknown {
+    let found: unknown;
+    for (const [k, member] of payloadEntries(value)) if (k === key) found = member;
+    return found;
+}
+
 /** Every string in a payload that is shaped like a marker but is not one. */
 function malformedMarkers(value: unknown, out: string[] = []): string[] {
     if (typeof value === 'string') {
@@ -114,7 +152,7 @@ function malformedMarkers(value: unknown, out: string[] = []): string[] {
         return out;
     }
     if (value !== null && typeof value === 'object') {
-        for (const v of Object.values(value as Record<string, unknown>)) malformedMarkers(v, out);
+        for (const v of payloadValues(value)) malformedMarkers(v, out);
     }
     return out;
 }
@@ -127,7 +165,7 @@ function markersIn(value: unknown, out: string[] = []): string[] {
         return out;
     }
     if (value !== null && typeof value === 'object') {
-        for (const v of Object.values(value as Record<string, unknown>)) markersIn(v, out);
+        for (const v of payloadValues(value)) markersIn(v, out);
     }
     return out;
 }
@@ -145,7 +183,7 @@ function contentLeaves(value: unknown, out: unknown[] = []): unknown[] {
         return out;
     }
     if (value !== null && typeof value === 'object') {
-        for (const v of Object.values(value as Record<string, unknown>)) contentLeaves(v, out);
+        for (const v of payloadValues(value)) contentLeaves(v, out);
         return out;
     }
     out.push(value);
@@ -180,23 +218,41 @@ function contentStrings(value: unknown, out: string[] = []): string[] {
         return out;
     }
     if (value !== null && typeof value === 'object') {
-        for (const v of Object.values(value as Record<string, unknown>)) contentStrings(v, out);
+        for (const v of payloadValues(value)) contentStrings(v, out);
     }
     return out;
 }
 
-/** Container nesting depth of a payload. Iterative, so it cannot itself overflow. */
-function depthOf(root: unknown): number {
+/**
+ * Container nesting depth of a serialised payload. Iterative, so it cannot
+ * itself overflow.
+ *
+ * Measured on the TEXT rather than by walking `view.data`, because a payload's
+ * JS graph is not its JSON shape: a `SourceObject` holds its members as an array
+ * of `[name, value]` pairs, so a graph walk counts three JS levels for each one
+ * level of JSON and reported 1,536 for a payload nested 512 deep. The depth that
+ * matters is the one the caller's parser sees, which is this one.
+ */
+function jsonDepthOf(text: string): number {
     let deepest = 0;
-    const values: unknown[] = [root];
-    const depths: number[] = [0];
-    while (values.length > 0) {
-        const value = values.pop();
-        const depth = depths.pop() ?? 0;
-        if (value === null || typeof value !== 'object') continue;
-        if (depth + 1 > deepest) deepest = depth + 1;
-        const members = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
-        for (const member of members) { values.push(member); depths.push(depth + 1); }
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (inString) {
+            if (escaped) { escaped = false; continue; }
+            if (c === '\\') { escaped = true; continue; }
+            if (c === '"') inString = false;
+            continue;
+        }
+        if (c === '"') { inString = true; continue; }
+        if (c === '{' || c === '[') {
+            depth++;
+            if (depth > deepest) deepest = depth;
+            continue;
+        }
+        if (c === '}' || c === ']') depth--;
     }
     return deepest;
 }
@@ -399,7 +455,7 @@ describe('the 1,968x overrun case is bounded at every budget', () => {
             expect(data !== null && typeof data === 'object',
                 `nested share at budget ${budget}: payload is not a container`).toBe(true);
             if (data === null || typeof data !== 'object' || Array.isArray(data)) continue;
-            for (const [key, member] of Object.entries(data as Record<string, unknown>)) {
+            for (const [key, member] of payloadEntries(data)) {
                 if (key === STRIDE_KEY) continue;
                 expect(estimateChars(member), `nested share at budget ${budget}: member ${key} alone is `
                     + `${estimateChars(member)} chars of a ${budget}-char budget`).toBeLessThanOrEqual(view.chars);
@@ -484,7 +540,8 @@ describe('a complete view is the document itself', () => {
         const resolver = open(doc, 'deep-measure');
         const view = renderNode(resolver, resolver.root(), { budget: 400_000 });
         assertUniversal(view, byteLength(doc), 'document nested 20,000 levels at budget 400000');
-        expect(depthOf(view.data), `the payload nests ${depthOf(view.data)} levels deep, past MAX_RENDER_DEPTH`)
+        const emitted = toJsonText(view.data);
+        expect(jsonDepthOf(emitted), `the payload nests ${jsonDepthOf(emitted)} levels deep, past MAX_RENDER_DEPTH`)
             .toBeLessThanOrEqual(512);
         expect(view.envelope.omitted.some((o) => o.of === 'depth'),
             'a document truncated for depth did not record a depth omission').toBe(true);
@@ -698,6 +755,121 @@ describe('a number is the bytes the document wrote', () => {
     });
 });
 
+describe('a repeated object name keeps both members', () => {
+    // JSON permits a repeated member name; a JS object cannot hold one. So the
+    // payload used to lose a member AND deny having lost it -- measured on
+    // `{"a":1,"a":2}`, the view came back as `{"a":2}` with `total: 2`,
+    // `shown: [0,2]`, `omitted: []` and the hint "Nothing is withheld: this
+    // view is all of \"\". No further call is needed for this pointer." That is
+    // I1 and I4 failing together, and the hint makes it worse than a silent
+    // loss: the caller is told affirmatively not to look again.
+    //
+    // A third symptom, easy to miss: the surviving members are REORDERED.
+    // `{"a":1,"b":2,"a":3}` came back as `{"a":3,"b":2}`, because a JS object
+    // keeps a repeated key in its first-insertion position while taking the
+    // last value. So even the members that survived stopped being in the order
+    // the document wrote them.
+    const REPEATED: readonly { readonly name: string; readonly doc: string; readonly wasEmittedAs: string }[] = [
+        { name: 'two of the same name', doc: '{"a":1,"a":2}', wasEmittedAs: '{"a":2}' },
+        { name: 'a repeat around another name', doc: '{"a":1,"b":2,"a":3}', wasEmittedAs: '{"a":3,"b":2}' },
+        { name: 'three of the same name', doc: '{"dup":"first","dup":"second","dup":"third"}', wasEmittedAs: '{"dup":"third"}' },
+        { name: 'repeats inside array elements', doc: '[{"k":1,"k":2},{"k":3,"k":4}]', wasEmittedAs: '[{"k":2},{"k":4}]' },
+        { name: 'repeats whose values are containers', doc: '{"a":{"x":1},"a":{"y":2}}', wasEmittedAs: '{"a":{"y":2}}' },
+        { name: 'a repeat at the end of a longer record', doc: '{"id":7,"tag":"x","id":8}', wasEmittedAs: '{"id":8,"tag":"x"}' },
+    ];
+
+    it('returns every member the document wrote, in the order it wrote them', () => {
+        for (const c of REPEATED) {
+            const resolver = open(c.doc, `repeat:${c.name}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 200_000 });
+            const text = toJsonText(view.data);
+            expect(text, `${c.name}: the document holds ${c.doc} and STRIDE returned ${text}. It used to return ${c.wasEmittedAs}, which drops a member the document contains (I1).`)
+                .toBe(c.doc);
+        }
+    });
+
+    it('measures what it emitted, so a repeated name cannot overrun the budget', () => {
+        for (const c of REPEATED) {
+            const resolver = open(c.doc, `repeat-chars:${c.name}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 200_000 });
+            const text = toJsonText(view.data);
+            expect(view.chars, `${c.name}: chars disagrees with the payload it produced`).toBe(text.length);
+            expect(estimateChars(view.data), `${c.name}: estimateChars disagrees with toJsonText`).toBe(text.length);
+        }
+    });
+
+    it('claims completeness only when it kept every member', () => {
+        // The envelope's own arithmetic is what made the old loss dishonest:
+        // it counted the members it walked and reported them as shown. With
+        // both members emitted the same arithmetic is true, so this asserts the
+        // pairing rather than the fields in isolation -- a complete envelope
+        // beside a payload holding every member.
+        for (const c of REPEATED) {
+            const resolver = open(c.doc, `repeat-env:${c.name}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 200_000 });
+            expect(view.envelope.omitted, `${c.name}: nothing was withheld, so no omission may be reported`).toEqual([]);
+            expect(toJsonText(view.data), `${c.name}: the envelope reports a complete view, so the payload must be the whole document`)
+                .toBe(c.doc);
+        }
+    });
+
+    it('stays valid JSON, and parses to the last-wins value the routes agree on', () => {
+        // I2: whatever the payload carries, it parses. A parser applying
+        // RFC 8259's "last wins" to the text gets the same member `memberByKey`
+        // resolves to, so the text and the pointer routes cannot disagree.
+        for (const c of REPEATED) {
+            const resolver = open(c.doc, `repeat-parse:${c.name}`);
+            const view = renderNode(resolver, resolver.root(), { budget: 200_000 });
+            const text = toJsonText(view.data);
+            expect(() => JSON.parse(text), `${c.name}: payload must parse`).not.toThrow();
+            expect(JSON.parse(text), `${c.name}: parsing the payload must agree with parsing the document`)
+                .toEqual(JSON.parse(c.doc));
+        }
+    });
+
+    it('addresses what it withholds when a repeated name will not fit', () => {
+        // The honesty question again, this time where an omission is CORRECT.
+        // A budget too small for both members must still account for what it
+        // dropped -- not emit a halved record wearing a complete envelope.
+        //
+        // I4 is satisfied by the envelope's omission record, not necessarily by
+        // an in-payload marker: measured on this document, budgets 20-60 come
+        // back as the payload `null` with one omission, because the marker
+        // itself is 58 characters and does not fit. So the assertion is on the
+        // omission and its cursor, and on MARKER_RE only where a marker is
+        // actually present.
+        const doc = '{"alpha":"aaaaaaaaaaaaaaaaaaaaaaaaa","alpha":"bbbbbbbbbbbbbbbbbbbbbbbbb"}';
+        expect(doc.length, 'the fixture must be the length the budgets below are chosen against').toBe(73);
+        let sawShort = 0;
+        let sawWhole = 0;
+        for (const budget of [20, 30, 40, 50, 60, 68, 72, 73, 80, 200]) {
+            const resolver = open(doc, `repeat-split:${budget}`);
+            const view = renderNode(resolver, resolver.root(), { budget });
+            const text = toJsonText(view.data);
+            expect(view.chars, `budget ${budget}: chars disagrees with the payload it produced`).toBe(text.length);
+            expect(view.chars, `budget ${budget}: I3 -- payload longer than the budget`).toBeLessThanOrEqual(budget);
+            if (text === doc) {
+                sawWhole++;
+                expect(view.envelope.omitted, `budget ${budget}: a whole payload may not report an omission`).toEqual([]);
+                continue;
+            }
+            sawShort++;
+            expect(view.envelope.omitted.length, `budget ${budget}: a shortened payload must address what it withheld (I4)`)
+                .toBeGreaterThan(0);
+            for (const om of view.envelope.omitted) {
+                expect(() => decodeCursor(om.cursor), `budget ${budget}: every omission cursor must decode (I7)`).not.toThrow();
+            }
+            const marker = text.match(/\[TRUNCATED: [^\]]+\]/);
+            if (marker !== null) {
+                expect(MARKER_RE.test(marker[0]), `budget ${budget}: a marker in the payload must match MARKER_RE`).toBe(true);
+            }
+        }
+        // Both halves have to happen, or the loop proves only one of them.
+        expect(sawShort, 'some budget must force a shortened payload').toBeGreaterThan(0);
+        expect(sawWhole, 'some budget must fit the whole document, repeated name included').toBeGreaterThan(0);
+    });
+});
+
 describe('truncation is never silent', () => {
     it('addresses every withheld region with a cursor that resolves back to it', () => {
         const doc = wideObjectDocument(5_000);
@@ -749,7 +921,7 @@ describe('truncation is never silent', () => {
         expect(data !== null && typeof data === 'object' && !Array.isArray(data),
             'a truncated object did not render as an object').toBe(true);
         if (data === null || typeof data !== 'object' || Array.isArray(data)) return;
-        const marker = (data as Record<string, unknown>)[STRIDE_KEY];
+        const marker = payloadMember(data, STRIDE_KEY);
         expect(typeof marker === 'string' && /^\[TRUNCATED: \d+ of 200 keys \| next [^|]+ \| cursor s1\./.test(marker),
             `the object marker is not in the fixed form: ${String(marker)}`).toBe(true);
     });
@@ -1109,13 +1281,12 @@ describe('a document member literally named __stride stays unambiguous', () => {
         expect(data !== null && typeof data === 'object' && !Array.isArray(data),
             'the colliding document did not render as an object').toBe(true);
         if (data === null || typeof data !== 'object' || Array.isArray(data)) return;
-        const record = data as Record<string, unknown>;
-
         // Even with budget to spare, the reserved key holds STRIDE's marker and
         // never the document's value: a payload where `__stride` might be
         // either is a payload no reader can interpret.
-        expect(isMarker(record[STRIDE_KEY]),
-            `the reserved key carries document content instead of a marker: ${String(record[STRIDE_KEY])}`).toBe(true);
+        const reserved = payloadMember(data, STRIDE_KEY);
+        expect(isMarker(reserved),
+            `the reserved key carries document content instead of a marker: ${String(reserved)}`).toBe(true);
         expect(toJsonText(view.data).includes('SECRET-document-value'),
             'the colliding member leaked into the payload').toBe(false);
         const delivered = received(view);
@@ -1251,8 +1422,9 @@ describe('paging a container is addressed in both directions', () => {
             expect(shown, `page ${pages}: a paged container view declared no shown range`).toBeDefined();
             if (shown === undefined) break;
             expect(shown[0], `page ${pages}: the page starts before the offset asked for`).toBeGreaterThanOrEqual(offset);
-            const data = view.data as Record<string, unknown>;
-            for (const key of Object.keys(data)) {
+            const data = view.data;
+            if (data === null || typeof data !== 'object') break;
+            for (const [key] of payloadEntries(data)) {
                 if (key === STRIDE_KEY) continue;
                 expect(seen.has(key), `page ${pages}: key ${key} was already delivered by an earlier page`).toBe(false);
                 seen.add(key);

@@ -1,6 +1,6 @@
 /**
  * Behavioral tests covering robustness gaps identified in PR #12 review.
- * Tests: roots-utils tilde, symbol-index purge,
+ * Tests: baseline-dirs tilde (stateless successor to roots-utils), symbol-index purge,
  * write_file stat errors, directory sensitive filtering, search_file errors,
  * refactor_batch schema strictness, path-validation prefix collisions.
  */
@@ -34,18 +34,19 @@ function captureHandler() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. roots-utils: file:~ and file:~/path resolve to $HOME paths
+// 1. baseline dirs: ~ and ~/path resolve to $HOME paths (stateless successor
+//    to roots-utils; roots `file:` URI forms retired with the roots protocol)
 // ─────────────────────────────────────────────────────────────────────────────
-describe('roots-utils — tilde URI forms', () => {
+describe('baseline dirs — tilde forms', () => {
     it('resolves ~ (bare tilde) to home directory', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
+        const { resolveInitialAllowedDirectories } = await import('../dist/core/server.js');
         const home = os.homedir();
-        const result = await getValidRootDirectories([{ uri: '~' }]);
+        const result = await resolveInitialAllowedDirectories(['~']);
         expect(result).toContain(home);
     });
 
     it('resolves ~/existing-subdir to home subdir', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
+        const { resolveInitialAllowedDirectories } = await import('../dist/core/server.js');
         const home = os.homedir();
         // Use a subdir that definitely exists under $HOME
         const entries = fs.readdirSync(home);
@@ -53,35 +54,37 @@ describe('roots-utils — tilde URI forms', () => {
             try { return fs.statSync(path.join(home, e)).isDirectory(); } catch { return false; }
         });
         if (!subdir) return; // skip if home has no subdirs (very unlikely)
-        const result = await getValidRootDirectories([{ uri: `~/${subdir}` }]);
+        const result = await resolveInitialAllowedDirectories([`~/${subdir}`]);
         expect(result).toContain(path.join(home, subdir));
     });
 
-    it('resolves file:~ to home directory', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
+    it('expandHome resolves bare ~ to home directory (file:~ scheme retired)', async () => {
+        const { expandHome } = await import('../dist/core/path-utils.js');
         const home = os.homedir();
-        const result = await getValidRootDirectories([{ uri: 'file:~' }]);
-        // Should resolve to home, not be empty
-        expect(result.length).toBeGreaterThanOrEqual(1);
-        expect(result[0]).toBe(home);
+        // The `file:` URI scheme died with the roots protocol — entrypoints now
+        // pass plain CLI paths, so the surviving contract is bare-tilde expansion.
+        expect(expandHome('~')).toBe(home);
     });
 
-    it('resolves file:~/existing-subdir to home subdir', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
+    it('resolves ~/existing-subdir via baseline dirs (file:~/... retired)', async () => {
+        const { resolveInitialAllowedDirectories } = await import('../dist/core/server.js');
         const home = os.homedir();
         const entries = fs.readdirSync(home);
         const subdir = entries.find(e => {
             try { return fs.statSync(path.join(home, e)).isDirectory(); } catch { return false; }
         });
         if (!subdir) return;
-        const result = await getValidRootDirectories([{ uri: `file:~/${subdir}` }]);
+        const result = await resolveInitialAllowedDirectories([`~/${subdir}`]);
         expect(result).toContain(path.join(home, subdir));
     });
 
-    it('file:~/nonexistent returns empty', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const result = await getValidRootDirectories([{ uri: 'file:~/nonexistent_dir_xyz_9999' }]);
-        expect(result).toHaveLength(0);
+    it('nonexistent baseline dir fails validation (was: silently skipped)', async () => {
+        const { resolveInitialAllowedDirectories, validateDirectories } = await import('../dist/core/server.js');
+        // Stateless split: resolve passes the lexical path through, validation
+        // rejects it — the old roots behavior of returning [] is gone.
+        const lexical = await resolveInitialAllowedDirectories(['~/nonexistent_dir_xyz_9999']);
+        expect(lexical).toHaveLength(1);
+        await expect(validateDirectories(lexical)).rejects.toThrow(/Directory validation failed/);
     });
 });
 

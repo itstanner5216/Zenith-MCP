@@ -179,6 +179,37 @@ export class SourceNumber {
     constructor(readonly text: string) {}
 }
 
+/**
+ * A JSON object carried as the ordered member list the document wrote, not as a
+ * JS record.
+ *
+ * RFC 8259 permits a repeated member name; a JS object cannot hold one. So the
+ * record built by assigning member after member loses one of them, and it loses
+ * them silently — measured before this box existed, `{"a":1,"a":2}` came back
+ * as `{"a":2}` while the envelope reported `total: 2`, `shown: [0,2]`,
+ * `omitted: []` and the hint "Nothing is withheld". That is I1 and I4 failing
+ * together, and the hint makes it worse than a quiet loss: the caller is told
+ * affirmatively that no further call is needed.
+ *
+ * It also reorders the members that DO survive, which is easy to miss.
+ * `{"a":1,"b":2,"a":3}` came back as `{"a":3,"b":2}`, because a JS object keeps
+ * a repeated key in its first-insertion position while taking the last value.
+ * Both the membership and the order of a document's own bytes are I1's to keep.
+ *
+ * Boxing every object read from source, rather than only the ones with a
+ * repeat, follows `SourceNumber`: deciding representability per value is itself
+ * the round-trip that loses the information. It also makes one rule instead of
+ * two — a plain record in a payload is STRIDE's own metadata, a `SourceObject`
+ * is the document's content — so there is no shape where `JSON.stringify`
+ * happens to be right and a caller learns the wrong habit.
+ *
+ * No `toJSON`, for `SourceNumber`'s reason: one returning a record would
+ * reintroduce exactly the collapse this exists to prevent, and silently.
+ */
+export class SourceObject {
+    constructor(readonly members: readonly (readonly [string, unknown])[]) {}
+}
+
 const C_TAB = 9;
 const C_LF = 10;
 const C_CR = 13;
@@ -202,7 +233,7 @@ const C_CLOSE_BRACE = 125;
 /** A container the reader has entered and not yet closed. */
 type Frame =
     | { readonly kind: 'array'; readonly items: unknown[] }
-    | { readonly kind: 'object'; readonly record: Record<string, unknown>; key: string };
+    | { readonly kind: 'object'; readonly members: (readonly [string, unknown])[]; key: string };
 
 /**
  * Read one JSON value from a slice, keeping every number as its source text.
@@ -328,13 +359,13 @@ function readSourceValue(raw: Buffer): { readonly value: unknown } | null {
             if (c === C_OPEN_BRACE) {
                 i++;
                 ws();
-                if (raw[i] === C_CLOSE_BRACE) { i++; value = {}; want = false; continue; }
+                if (raw[i] === C_CLOSE_BRACE) { i++; value = new SourceObject([]); want = false; continue; }
                 const key = readString();
                 if (key === null) return null;
                 ws();
                 if (raw[i] !== C_COLON) return null;
                 i++;
-                frames.push({ kind: 'object', record: {}, key });
+                frames.push({ kind: 'object', members: [], key });
                 continue;
             }
             if (c === C_QUOTE) {
@@ -375,11 +406,10 @@ function readSourceValue(raw: Buffer): { readonly value: unknown } | null {
             frames.pop();
             continue;
         }
-        // Last occurrence of a repeated key wins, which is what `JSON.parse`
-        // does. Preserving both is a separate question from preserving numbers,
-        // and answering it here would change this path's output for documents
-        // that have nothing to do with the defect being fixed.
-        frame.record[frame.key] = value;
+        // Appended, not assigned: a repeated name is two members of this object
+        // and both are the document's. Assignment is what used to drop one and
+        // move the survivor to the earlier member's position.
+        frame.members.push([frame.key, value]);
         ws();
         if (raw[i] === C_COMMA) {
             i++;
@@ -395,7 +425,7 @@ function readSourceValue(raw: Buffer): { readonly value: unknown } | null {
         }
         if (raw[i] !== C_CLOSE_BRACE) return null;
         i++;
-        value = frame.record;
+        value = new SourceObject(frame.members);
         frames.pop();
     }
 }
@@ -436,6 +466,18 @@ export function estimateChars(value: unknown): number {
         // Before the object branch, which would otherwise walk `text` as a
         // member and measure the box instead of the number it carries.
         if (v instanceof SourceNumber) { total += v.text.length; continue; }
+        if (v instanceof SourceObject) {
+            total += 2;
+            let kept = 0;
+            for (const [k, member] of v.members) {
+                if (member === undefined || typeof member === 'function' || typeof member === 'symbol') continue;
+                kept++;
+                total += jsonStringChars(k) + 1;
+                pending.push(member);
+            }
+            total += kept > 0 ? kept - 1 : 0;
+            continue;
+        }
         if (Array.isArray(v)) {
             // Brackets plus one comma between each pair of elements. An element
             // stringify would drop still occupies a slot, as `null`.
@@ -499,6 +541,20 @@ export function toJsonText(value: unknown): string {
             default: out.push('null'); continue;    // undefined/function/symbol
         }
         if (v instanceof SourceNumber) { out.push(v.text); continue; }
+        if (v instanceof SourceObject) {
+            const kept = v.members
+                .filter(([, m]) => m !== undefined && typeof m !== 'function' && typeof m !== 'symbol');
+            stack.push({ text: '}' });
+            for (let k = kept.length - 1; k >= 0; k--) {
+                const entry = kept[k];
+                if (entry === undefined) continue;  // unreachable: k indexes kept
+                stack.push({ render: entry[1] });
+                stack.push({ text: `${JSON.stringify(entry[0])}:` });
+                if (k > 0) stack.push({ text: ',' });
+            }
+            out.push('{');
+            continue;
+        }
         if (Array.isArray(v)) {
             stack.push({ text: ']' });
             for (let k = v.length - 1; k >= 0; k--) {
@@ -703,6 +759,14 @@ function emittable(root: unknown, allowedDepth: number): boolean {
         // value at MAX_RENDER_DEPTH that serialises perfectly well.
         if (value instanceof SourceNumber) continue;
         if (depth >= allowedDepth) return false;
+        if (value instanceof SourceObject) {
+            // Same gate as the record branch below: a document member named
+            // `__stride` makes the payload unreadable, so the walk refuses and
+            // the split path addresses it at its own pointer.
+            for (const [k] of value.members) if (k === STRIDE_KEY) return false;
+            for (const [, member] of value.members) { values.push(member); depths.push(depth + 1); }
+            continue;
+        }
         if (Array.isArray(value)) {
             for (const item of value) { values.push(item); depths.push(depth + 1); }
             continue;
@@ -1389,15 +1453,20 @@ function assemble(
 
     let value: unknown;
     if (isObject) {
-        const out: Record<string, unknown> = {};
+        // An ordered member list, not a record: `taken` is sorted by ordinal
+        // and a repeated name occupies two ordinals, so assigning into a record
+        // here would drop one of them and move the survivor to the earlier
+        // one's position. The marker member is appended last, which is where
+        // assignment used to put it too.
+        const out: (readonly [string, unknown])[] = [];
         // The scanner always hands an object member its name, so the fallback
         // is unreachable; `''` is nonetheless the only name that costs exactly
         // what the walk already charged for this slot.
-        for (const s of taken) out[s.key ?? ''] = s.value;
+        for (const s of taken) out.push([s.key ?? '', s.value]);
         const only = markers[0];
-        if (markers.length === 1 && only !== undefined) out[STRIDE_KEY] = only;
-        else if (markers.length > 1) out[STRIDE_KEY] = markers;
-        value = out;
+        if (markers.length === 1 && only !== undefined) out.push([STRIDE_KEY, only]);
+        else if (markers.length > 1) out.push([STRIDE_KEY, markers]);
+        value = new SourceObject(out);
     } else {
         // Runs and shown members partition [0, count), so walking the two in
         // lockstep puts every marker at the ordinal its elements occupied —

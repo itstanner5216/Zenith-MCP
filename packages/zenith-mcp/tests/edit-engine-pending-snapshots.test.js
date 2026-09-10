@@ -63,24 +63,16 @@ describe('applyEditList pendingSnapshots', () => {
         expect(snap.originalText).toBe('function alpha(x) {\n    return x + 1;\n}');
     });
 
-    // TODO(edit-engine in-flight line tracking): this test exercises a
-    // multi-symbol-edit sequence where the FIRST edit changes line
-    // counts. Under the new DB-backed symbol-index path (per
-    // docs/toon-constraints/constraints.md §0.5), each `loadSymbolInFile`
-    // call returns positions from the persisted index, which reflects
-    // disk content — not the in-flight `workingContent` buffer that
-    // already absorbed the first edit. So the second symbol's reported
-    // line range no longer matches its position in `workingContent`,
-    // and the joined-lines extraction produces stale `originalText`.
-    //
-    // The architectural decision (Tanner, PR #20): the symbol-fact
-    // layer is correct as-is. The fix for this scenario belongs to
-    // edit-engine itself — e.g. resolve all symbol ranges from the
-    // pristine source up front, then apply each edit with explicit
-    // line-shift accounting between iterations. That work is deferred
-    // to a separate PR. Skipping here so the suite stays honest about
-    // current behavior without losing the regression intent.
-    it.skip('originalText equals joined lines [sym.line, sym.endLine] of working content AT time of edit', async () => {
+    // Multi-symbol-edit sequence where the FIRST edit changes line counts.
+    // Symbol lookups (`loadSymbolInFile`) return DISK-frame coordinates from
+    // the persisted index, which no longer match the in-flight
+    // `workingContent` buffer once an earlier edit has shifted lines.
+    // edit-engine replays its splice ledger (`lineShifts` / `mapDiskLine`
+    // in edit-engine.ts) to map each disk line into the current working
+    // frame before extracting `originalText` — this test pins that mapping.
+    // Overlapping targets fail closed with the overlap error shape
+    // (Locked Decision #13 + Finding N5).
+    it('originalText equals joined lines [sym.line, sym.endLine] of working content AT time of edit', async () => {
         // Two symbol edits — second's originalText must reflect post-first-edit state
         const edits = [
             {
