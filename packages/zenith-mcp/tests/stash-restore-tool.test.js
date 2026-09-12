@@ -14,10 +14,18 @@ function mkTmpGitRepo() {
 
 function captureHandler() {
     let captured = null;
+    let registration = null;
     const server = {
-        registerTool: (_name, _meta, handler) => { captured = handler; },
+        registerTool: (_name, meta, handler) => {
+            registration = meta;
+            captured = handler;
+        },
     };
-    return { server, get: () => captured };
+    return {
+        server,
+        get: () => captured,
+        getInputSchema: () => registration?.inputSchema,
+    };
 }
 
 function mkCtx(repoDir, sessionId) {
@@ -67,6 +75,30 @@ describe('stashRestore — registration', () => {
             const mod = await importStashRestore();
             mod.register(server, ctx);
             expect(get()).toBeDefined();
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects unknown fields at every object boundary', async () => {
+        vi.resetModules();
+        const dir = mkTmpGitRepo();
+        try {
+            const ctx = mkCtx(dir);
+            const { server, getInputSchema } = captureHandler();
+            const mod = await importStashRestore();
+            mod.register(server, ctx);
+            const inputSchema = getInputSchema();
+
+            expect(inputSchema.safeParse({ mode: 'list', unknown: true }).success).toBe(false);
+            expect(inputSchema.safeParse({
+                mode: 'apply',
+                corrections: [{ index: 1, unknown: true }],
+            }).success).toBe(false);
+            expect(inputSchema.safeParse({
+                mode: 'apply',
+                corrections: [{ index: 1, startLine: 2, nearLine: 3 }],
+            }).success).toBe(true);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
@@ -518,6 +550,24 @@ describe('stashRestore — apply mode: edit', () => {
         expect(content).toContain('beta');
         expect(content).toContain('GAMMA');
     });
+
+    it('passes explicit line corrections to a retried edit', async () => {
+        const filePath = path.join(dir, 'corrected.js');
+        fs.writeFileSync(filePath, 'hello world\n');
+        const core = await importStashCore();
+        const id = core.stashEntry(ctx, 'edit', filePath, {
+            edits: [{ mode: 'content', oldContent: 'hello', newContent: 'goodbye' }],
+            failedIndices: [0],
+        });
+
+        await handler({
+            mode: 'apply',
+            stashId: id,
+            corrections: [{ index: 1, startLine: 1, nearLine: 1 }],
+        });
+
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('goodbye world\n');
+    });
 });
 
 describe('stashRestore — apply mode: write', () => {
@@ -577,6 +627,33 @@ describe('stashRestore — apply mode: write', () => {
         const content = fs.readFileSync(filePath, 'utf-8');
         expect(content).toContain('existing line');
         expect(content).toContain('appended line');
+    });
+
+    it('creates a missing file in append mode', async () => {
+        const filePath = path.join(dir, 'new-append.js');
+        const core = await importStashCore();
+        const id = core.stashEntry(ctx, 'write', filePath, {
+            content: 'first line\n',
+            mode: 'append',
+        });
+
+        await handler({ mode: 'apply', stashId: id });
+
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('first line\n');
+    });
+
+    it('removes overlap and inserts a separator when appending', async () => {
+        const filePath = path.join(dir, 'resume-append.js');
+        fs.writeFileSync(filePath, 'first line\nshared line');
+        const core = await importStashCore();
+        const id = core.stashEntry(ctx, 'write', filePath, {
+            content: 'shared line\nlast line',
+            mode: 'append',
+        });
+
+        await handler({ mode: 'apply', stashId: id });
+
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('first line\nshared line\nlast line');
     });
 
     it('dryRun returns byte count without writing', async () => {
@@ -667,5 +744,37 @@ describe('stashRestore — error cases', () => {
 
     it('throws on invalid mode', async () => {
         await expect(handler({ mode: 'invalid' })).rejects.toThrow(/invalid mode/i);
+    });
+
+    it('rejects malformed stash rows without usable paths or types', async () => {
+        const { getProjectContext } = await importProjectContext();
+        const { insertStash } = await import('../dist/core/db-adapter.js');
+        const { db } = getProjectContext(ctx).getStashDb();
+        const createdAt = Date.now();
+        const editId = insertStash(db, {
+            type: 'edit',
+            filePath: null,
+            payload: JSON.stringify({ edits: [], failedIndices: [] }),
+            createdAt,
+        });
+        const writeId = insertStash(db, {
+            type: 'write',
+            filePath: null,
+            payload: JSON.stringify({ content: 'data', mode: 'overwrite' }),
+            createdAt,
+        });
+        const unknownId = insertStash(db, {
+            type: 'unknown',
+            filePath: null,
+            payload: JSON.stringify({}),
+            createdAt,
+        });
+
+        expect(text(await handler({ mode: 'read', stashId: editId }))).toContain('(no path)');
+        expect(text(await handler({ mode: 'read', stashId: writeId }))).toContain('(no path)');
+        await expect(handler({ mode: 'apply', stashId: editId })).rejects.toThrow(/no file path/i);
+        await expect(handler({ mode: 'apply', stashId: writeId })).rejects.toThrow(/provide newPath/i);
+        await expect(handler({ mode: 'read', stashId: unknownId })).rejects.toThrow(/unknown stash type/i);
+        await expect(handler({ mode: 'apply', stashId: unknownId })).rejects.toThrow(/unknown stash type/i);
     });
 });

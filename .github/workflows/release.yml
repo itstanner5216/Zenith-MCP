@@ -25,7 +25,6 @@ permissions:
 
 env:
   NODE_VERSION: "26"
-  PNPM_VERSION: "11.13.1"
 
 jobs:
   release:
@@ -39,8 +38,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

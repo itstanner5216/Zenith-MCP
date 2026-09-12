@@ -93,10 +93,10 @@ describe('tool compression behavior', () => {
         await writeFixture(rootDir, 'one.js', 'export const one = 1;\n'.repeat(50));
         await writeFixture(rootDir, 'two.js', 'export const two = 2;\n'.repeat(50));
 
-        // compressForTool returns a string directly (not { text: ... })
-        compressForToolMock
-            .mockResolvedValueOnce('ONE_COMPRESSED')
-            .mockResolvedValueOnce('TWO_COMPRESSED');
+        // File reads run concurrently, so return a result based on the requested path.
+        compressForToolMock.mockImplementation(async (filePath) => (
+            filePath.endsWith('one.js') ? 'ONE_COMPRESSED' : 'TWO_COMPRESSED'
+        ));
 
         const handler = await registerTool('../dist/tools/read_multiple_files.js', 'read_multiple_files', rootDir);
         const compressed = await handler({ paths: ['one.js', 'two.js'] });

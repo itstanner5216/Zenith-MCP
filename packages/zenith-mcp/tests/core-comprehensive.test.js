@@ -4,7 +4,6 @@
  * Target Files:
  *   - src/core/lib.ts (tailFile, headFile, offsetReadFile, writeFileContent, formatSize)
  *   - src/core/shared.ts (isSensitive, ripgrepSearch, lastRipgrepError, ripgrepCountMatches)
- *   - src/core/roots-utils.ts (getValidRootDirectories, parseRootUri)
  *
  * Detected Framework: Vitest 4.x
  * Mocking Strategy: Filesystem I/O via temp dirs; ripgrep via live binary.
