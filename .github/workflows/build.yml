@@ -1,12 +1,10 @@
-name: Build
+name: SonarQube
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches:
       - main
-  pull_request:
-    branches:
-      - main
-    types: [opened, synchronize, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,38 +12,46 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
-    env:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      SONAR_HOST_URL: https://sonarcloud.io
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'
+      }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: "26.3.0"
-          cache: pnpm
-      - name: Install ripgrep
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Check Sonar configuration
+        id: sonar-config
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm build
-      - name: Test with coverage
-        run: pnpm --filter zenith-mcp run test:coverage
+          if [ -n "$SONAR_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download coverage
+        if: steps.sonar-config.outputs.enabled == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: coverage-${{ github.event.workflow_run.head_sha }}
+          path: packages/zenith-mcp/coverage
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
       - name: Normalize coverage paths
+        if: steps.sonar-config.outputs.enabled == 'true'
         run: sed -i 's|^SF:src/|SF:packages/zenith-mcp/src/|' packages/zenith-mcp/coverage/lcov.info
       - name: SonarQube Scan
-        if: env.SONAR_TOKEN != ''
+        if: steps.sonar-config.outputs.enabled == 'true'
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io

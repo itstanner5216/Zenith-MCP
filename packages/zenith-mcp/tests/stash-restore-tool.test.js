@@ -551,22 +551,45 @@ describe('stashRestore — apply mode: edit', () => {
         expect(content).toContain('GAMMA');
     });
 
-    it('passes explicit line corrections to a retried edit', async () => {
+    it('uses an explicit line correction to select an ambiguous block edit', async () => {
         const filePath = path.join(dir, 'corrected.js');
-        fs.writeFileSync(filePath, 'hello world\n');
+        fs.writeFileSync(filePath, [
+            'function target() {',
+            '    return "first";',
+            '}',
+            '',
+            'function target() {',
+            '    return "second";',
+            '}',
+            '',
+        ].join('\n'));
         const core = await importStashCore();
         const id = core.stashEntry(ctx, 'edit', filePath, {
-            edits: [{ mode: 'content', oldContent: 'hello', newContent: 'goodbye' }],
+            edits: [{
+                mode: 'block',
+                block_start: 'function target() {',
+                block_end: '}',
+                replacement_block: 'function target() {\n    return "updated";\n}',
+            }],
             failedIndices: [0],
         });
 
         await handler({
             mode: 'apply',
             stashId: id,
-            corrections: [{ index: 1, startLine: 1, nearLine: 1 }],
+            corrections: [{ index: 1, startLine: 5 }],
         });
 
-        expect(fs.readFileSync(filePath, 'utf-8')).toBe('goodbye world\n');
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe([
+            'function target() {',
+            '    return "first";',
+            '}',
+            '',
+            'function target() {',
+            '    return "updated";',
+            '}',
+            '',
+        ].join('\n'));
     });
 });
 

@@ -19,6 +19,7 @@
     "clean": "shx rm -rf dist tsconfig.tsbuildinfo",
     "build": "tsc --build",
     "rebuild": "tsc --build --force",
+    "lint": "tsc --noEmit --pretty false",
     "test": "vitest run",
     "test:watch": "vitest"
   },
