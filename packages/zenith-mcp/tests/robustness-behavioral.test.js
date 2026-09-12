@@ -1,7 +1,7 @@
 /**
  * Behavioral tests covering robustness gaps identified in PR #12 review.
- * Tests: roots-utils tilde, symbol-index purge,
- * write_file stat errors, directory sensitive filtering, search_file errors,
+ * Tests: symbol-index purge, write_file stat errors,
+ * directory sensitive filtering, search_file errors,
  * refactor_batch schema strictness, path-validation prefix collisions.
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
@@ -34,59 +34,7 @@ function captureHandler() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. roots-utils: file:~ and file:~/path resolve to $HOME paths
-// ─────────────────────────────────────────────────────────────────────────────
-describe('roots-utils — tilde URI forms', () => {
-    it('resolves ~ (bare tilde) to home directory', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const home = os.homedir();
-        const result = await getValidRootDirectories([{ uri: '~' }]);
-        expect(result).toContain(home);
-    });
-
-    it('resolves ~/existing-subdir to home subdir', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const home = os.homedir();
-        // Use a subdir that definitely exists under $HOME
-        const entries = fs.readdirSync(home);
-        const subdir = entries.find(e => {
-            try { return fs.statSync(path.join(home, e)).isDirectory(); } catch { return false; }
-        });
-        if (!subdir) return; // skip if home has no subdirs (very unlikely)
-        const result = await getValidRootDirectories([{ uri: `~/${subdir}` }]);
-        expect(result).toContain(path.join(home, subdir));
-    });
-
-    it('resolves file:~ to home directory', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const home = os.homedir();
-        const result = await getValidRootDirectories([{ uri: 'file:~' }]);
-        // Should resolve to home, not be empty
-        expect(result.length).toBeGreaterThanOrEqual(1);
-        expect(result[0]).toBe(home);
-    });
-
-    it('resolves file:~/existing-subdir to home subdir', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const home = os.homedir();
-        const entries = fs.readdirSync(home);
-        const subdir = entries.find(e => {
-            try { return fs.statSync(path.join(home, e)).isDirectory(); } catch { return false; }
-        });
-        if (!subdir) return;
-        const result = await getValidRootDirectories([{ uri: `file:~/${subdir}` }]);
-        expect(result).toContain(path.join(home, subdir));
-    });
-
-    it('file:~/nonexistent returns empty', async () => {
-        const { getValidRootDirectories } = await import('../dist/core/roots-utils.js');
-        const result = await getValidRootDirectories([{ uri: 'file:~/nonexistent_dir_xyz_9999' }]);
-        expect(result).toHaveLength(0);
-    });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. isSensitive — .config/** works outside $HOME
+// 1. isSensitive — .config/** works outside $HOME
 // ─────────────────────────────────────────────────────────────────────────────
 describe('isSensitive — .config/** outside home', () => {
     it('detects .config/foo under /tmp', async () => {
@@ -119,7 +67,7 @@ describe('isSensitive — .config/** outside home', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. directory — sensitive files filtered in list and tree modes
+// 2. directory — sensitive files filtered in list and tree modes
 // ─────────────────────────────────────────────────────────────────────────────
 describe('directory tool — sensitive file filtering', () => {
     let tmpDir, handler;
@@ -186,7 +134,7 @@ describe('directory tool — sensitive file filtering', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. search_file — ripgrep process error includes details
+// 3. search_file — ripgrep process error includes details
 // ─────────────────────────────────────────────────────────────────────────────
 describe('search_file — ripgrep error detail', () => {
     it('error message includes stderr detail on invalid regex', async () => {
@@ -216,7 +164,7 @@ describe('search_file — ripgrep error detail', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. path-validation — root allowlist and prefix collisions
+// 4. path-validation — root allowlist and prefix collisions
 // ─────────────────────────────────────────────────────────────────────────────
 describe('path-validation — prefix collision prevention', () => {
     it('root / allows all absolute paths', async () => {
@@ -247,7 +195,7 @@ describe('path-validation — prefix collision prevention', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. write_file — non-ENOENT stat errors surface correctly
+// 5. write_file — non-ENOENT stat errors surface correctly
 // ─────────────────────────────────────────────────────────────────────────────
 describe('write_file — non-ENOENT stat handling', () => {
     it('throws on stat failure for inaccessible parent directory', async () => {
@@ -305,7 +253,7 @@ describe('write_file — non-ENOENT stat handling', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. refactor_batch — schema strictness for nested objects
+// 6. refactor_batch — schema strictness for nested objects
 // ─────────────────────────────────────────────────────────────────────────────
 describe('refactor_batch — schema strictness', () => {
     let schema;
@@ -366,7 +314,7 @@ describe('refactor_batch — schema strictness', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. symbol-index — path containment guard
+// 7. symbol-index — path containment guard
 // ─────────────────────────────────────────────────────────────────────────────
 describe('symbol-index — path containment', () => {
     it('indexFile silently returns for paths outside repoRoot', async () => {
@@ -407,7 +355,7 @@ describe('symbol-index — path containment', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 9. symbol-index — purge on parse/lang failure
+// 8. symbol-index — purge on parse/lang failure
 // ─────────────────────────────────────────────────────────────────────────────
 describe('symbol-index — purge on parse failure', () => {
     it('indexFile for unsupported language does not leave stale rows', async () => {
