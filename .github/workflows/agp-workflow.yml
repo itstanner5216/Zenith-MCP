@@ -119,3 +119,4 @@ jobs:
           verbose: ${{ inputs.verbose || 'false' }}
         env:
           AGP_API_URL: ${{ vars.AGP_API_URL }}
+          AGP_API_TOKEN: ${{ secrets.AGP_API_TOKEN }}
