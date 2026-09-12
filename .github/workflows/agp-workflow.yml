@@ -62,12 +62,11 @@ on:
         type: string
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
   id-token: write  # Required for Sonatype Guide OIDC authentication
 
 concurrency:
-  group: agp-workflow
+  group: ${{ inputs.mode == 'security' && github.run_id || 'agp-workflow' }}
   cancel-in-progress: false
 
 jobs:
@@ -92,6 +91,10 @@ jobs:
     if: needs.gate.outputs.directive == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -99,14 +102,14 @@ jobs:
       - name: Fetch governed configuration
         # GitHub jobs run separately and don't share files, so fetch the governed configuration
         # again here for the AGP run below to use.
+        id: gate
         uses: sonatype/agp-action/gate@v1
         with:
           guide-url: ${{ vars.AGP_API_URL }}
 
       - name: Run AGP
+        if: steps.gate.outputs.directive == 'run'
         uses: sonatype/agp-action@v1
-        with:
-          create-pr: true
         with:
           # Forward the dispatch inputs so a backend-triggered run targets the right mode.
           # A full/scheduled run sends mode=full; security-fix sends mode=security
@@ -117,5 +120,7 @@ jobs:
           repo_id: ${{ inputs.repo_id || '' }}
           vulnerabilities: ${{ inputs.vulnerabilities }}
           verbose: ${{ inputs.verbose || 'false' }}
+          create-pr: true
         env:
           AGP_API_URL: ${{ vars.AGP_API_URL }}
+          AGP_API_TOKEN: ${{ secrets.AGP_API_TOKEN }}
