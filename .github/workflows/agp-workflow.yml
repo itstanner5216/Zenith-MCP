@@ -99,11 +99,13 @@ jobs:
       - name: Fetch governed configuration
         # GitHub jobs run separately and don't share files, so fetch the governed configuration
         # again here for the AGP run below to use.
+        id: gate
         uses: sonatype/agp-action/gate@v1
         with:
           guide-url: ${{ vars.AGP_API_URL }}
 
       - name: Run AGP
+        if: steps.gate.outputs.directive == 'run'
         uses: sonatype/agp-action@v1
         with:
           create-pr: true
