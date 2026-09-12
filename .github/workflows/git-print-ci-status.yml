@@ -27,14 +27,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install git-print
-        run: npm install -g github:itstanner5216/Git-Print
+        run: npm install --prefix "$RUNNER_TEMP/git-print" "github:itstanner5216/Git-Print#f7fc772cdb12d0756187ed339acb37178d8959fa"
 
       - name: Resolve PR number
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
+          PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
         run: |
-          PR=$(jq -r '.[0].number // empty' <<< '${{ toJSON(github.event.workflow_run.pull_requests) }}')
+          PR=$(jq -r '.[0].number // empty' <<< "$PULL_REQUESTS")
           if [ -z "$PR" ]; then
             PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
           fi
@@ -46,7 +47,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git-print ci-status --pr "${{ steps.pr.outputs.number }}" --sha "${{ github.event.workflow_run.head_sha }}" --out Git-Print-CI-Status.md
+          "$RUNNER_TEMP/git-print/node_modules/.bin/git-print" ci-status --pr "${{ steps.pr.outputs.number }}" --sha "${{ github.event.workflow_run.head_sha }}" --out Git-Print-CI-Status.md
 
       - name: Upload report artifact
         if: ${{ always() && steps.pr.outputs.number != '' }}
@@ -54,3 +55,4 @@ jobs:
         with:
           name: Git-Print-CI-Status
           path: Git-Print-CI-Status.md
+          if-no-files-found: error

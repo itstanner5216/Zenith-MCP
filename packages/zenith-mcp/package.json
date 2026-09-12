@@ -27,8 +27,9 @@
     "build": "tsc --build && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "rebuild": "tsc --build --force && shx cp -r grammars dist/ && shx chmod +x dist/cli/*.js dist/server/*.js",
     "watch": "tsc --watch",
+    "lint": "tsc --noEmit --pretty false",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --coverage.reporter=text --coverage.reporter=json --coverage.reporter=html --coverage.reporter=lcov",
     "start": "node dist/cli/stdio.js",
     "start:http": "node dist/server/http.js",
     "verify-grammar-pins": "node dist/scripts/verify-grammar-pins.js"

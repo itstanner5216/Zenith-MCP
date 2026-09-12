@@ -39,6 +39,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: pnpm lint
+
       - name: Build
         # Builds zenith-toon first (workspace dep), then zenith-mcp.
         # tsc --build also performs full type-checking — no separate typecheck step needed.
