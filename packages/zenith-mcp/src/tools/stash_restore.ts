@@ -96,7 +96,12 @@ function readEntry(ctx: ToolContext, args: StashRestoreArgs, routedFile?: string
         const failed = entry.payload.failedIndices;
         const lines = edits.map((edit: { symbol?: string; block_start?: number; block_end?: number }, index: number) => {
             const status = failed.includes(index) ? 'FAILED' : 'ok';
-            const mode = edit.symbol ? `symbol:${edit.symbol}` : edit.block_start ? `block:${edit.block_start}...${edit.block_end}` : 'content';
+            let mode = 'content';
+            if (edit.symbol) {
+                mode = `symbol:${edit.symbol}`;
+            } else if (edit.block_start) {
+                mode = `block:${edit.block_start}...${edit.block_end}`;
+            }
             return `#${index + 1} [${status}] ${mode}`;
         });
         return { content: [{ type: 'text' as const, text: `[edit] ${entry.filePath || '(no path)'}\n${lines.join('\n')}` }] };
