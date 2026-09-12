@@ -54,7 +54,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 index: z.number().describe("1-based edit index."),
                 startLine: z.number().optional().describe("Exact line for block edits."),
                 nearLine: z.number().optional().describe("Approximate line for symbol edits."),
-            })).optional().describe("apply: disambiguation hints for ambiguous edits."),
+            }).strict()).optional().describe("apply: disambiguation hints for ambiguous edits."),
             newPath: z.string().optional().describe("apply: redirect write to a different path."),
             dryRun: z.boolean().optional().default(false).describe("apply: preview the result without writing."),
             file: z.string().optional().describe("list: exact file path filter; read/restore/apply: DB routing hint. Relative and missing paths are normalized safely."),
@@ -63,7 +63,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 z.number().int().positive(),
                 z.string().regex(/^\d+\s*-\s*\d+$/),
             ]).optional().describe("list only. Omit to return the 10 newest entries. A number N returns the newest N. A string like '10-30' returns that inclusive 1-based slice of newest-first history."),
-        }),
+        }).strict(),
         annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
     }, async (args: StashRestoreArgs) => {
         const routedFile = args.file ? await ctx.validateNewFilePath(args.file) : undefined;
@@ -78,7 +78,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
         if (args.mode === 'list') {
             const { start, end } = parseListRange(args.range);
             const { entries, isGlobal } = listStash(ctx, routedFile, {
-                type: args.type,
+                ...(args.type !== undefined ? { type: args.type } : {}),
                 start,
                 end,
             });
@@ -138,20 +138,21 @@ export function register(server: ToolServer, ctx: ToolContext) {
             const entry = getStashEntry(ctx, args.stashId, routedFile);
             if (!entry)
                 throw new Error(`Stash #${args.stashId} not found or expired.`);
-            if (!entry.filePath && entry.type === 'edit') {
-                throw new Error(`Stash #${args.stashId} has no file path.`);
-            }
             if (!entry.filePath && entry.type === 'write' && !args.newPath) {
                 throw new Error(`Stash #${args.stashId} has no file path. Provide newPath.`);
             }
             // --- Edit apply ---
             if (entry.type === 'edit') {
+                const entryFilePath = entry.filePath;
+                if (!entryFilePath) {
+                    throw new Error(`Stash #${args.stashId} has no file path.`);
+                }
                 if (!args.dryRun) {
-                    const canRetry = consumeAttempt(ctx, args.stashId, entry.filePath!);
+                    const canRetry = consumeAttempt(ctx, args.stashId, entryFilePath);
                     if (!canRetry)
                         throw new Error(`Stash #${args.stashId}: max retries (2) exceeded. Stash removed.`);
                 }
-                const validPath = await ctx.validatePath(entry.filePath!);
+                const validPath = await ctx.validatePath(entryFilePath);
                 const originalContent = normalizeLineEndings(await fs.readFile(validPath, 'utf-8'));
                 const edits = entry.payload.edits;
                 const corrections = args.corrections || [];
@@ -176,7 +177,7 @@ export function register(server: ToolServer, ctx: ToolContext) {
                 try {
                     await fs.writeFile(tempPath, workingContent, 'utf-8');
                     await fs.rename(tempPath, validPath);
-                    clearStash(ctx, args.stashId, entry.filePath ?? undefined);
+                    clearStash(ctx, args.stashId, entryFilePath);
                 }
                 catch (error) {
                     try {
