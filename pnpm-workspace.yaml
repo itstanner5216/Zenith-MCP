@@ -8,10 +8,23 @@ minimumReleaseAge: 0
 # Security overrides for transitive deps flagged by Dependabot (not reachable in
 # Zenith's own code — no CORS/Lambda/cookies; HTTP is Express + bearer auth — but
 # pinned to patched versions to clear the alerts).
-#   hono <4.12.25: CORS-credentials origin reflection (high), Lambda@Edge repeated
-#     request-header drop, Lambda Set-Cookie merge, body-limit bypass, serve-static %5C.
+#   hono <4.13.5: CORS-credentials origin reflection (high), CORS ReDoS, language
+#     middleware DoS, memo() SSR cross-request reuse, query parsing after fragment,
+#     parseBody dot-notation nesting, toSSG path traversal (CVE-2026-84365).
+#   @hono/node-server <1.19.15: serve-static path traversal via %5C on Windows.
+#   fast-uri <3.1.6: host confusion (backslash authority, percent-encoded scheme,
+#     skipped IDN canonicalization) and SSRF (IPv6 normalization, repeated
+#     hostname percent-decoding) — all high.
+#   qs <6.16.0: arrayLimit bypass via bracket-key comma parsing, DoS via
+#     attacker-controlled isBuffer.
+#   ip-address <10.3.1: leading-zero octet decimal/octal SSRF (high), CIDR-suffix
+#     classification suppression, IPv4-mapped/NAT64 misclassification.
 #   vite 8.0.0–8.0.15: server.fs.deny bypass (high), launch-editor NTLMv2 disclosure.
 overrides:
-  hono: ">=4.12.25"
+  hono: ">=4.13.5"
+  "@hono/node-server": "^1.19.15"
+  fast-uri: "^3.1.6"
+  qs: ">=6.16.0"
+  ip-address: ">=10.3.1"
   vite: ">=8.0.16"
 
