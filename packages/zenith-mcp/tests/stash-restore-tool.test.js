@@ -14,10 +14,18 @@ function mkTmpGitRepo() {
 
 function captureHandler() {
     let captured = null;
+    let registration = null;
     const server = {
-        registerTool: (_name, _meta, handler) => { captured = handler; },
+        registerTool: (_name, meta, handler) => {
+            registration = meta;
+            captured = handler;
+        },
     };
-    return { server, get: () => captured };
+    return {
+        server,
+        get: () => captured,
+        getInputSchema: () => registration?.inputSchema,
+    };
 }
 
 function mkCtx(repoDir, sessionId) {
@@ -67,6 +75,30 @@ describe('stashRestore — registration', () => {
             const mod = await importStashRestore();
             mod.register(server, ctx);
             expect(get()).toBeDefined();
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects unknown fields at every object boundary', async () => {
+        vi.resetModules();
+        const dir = mkTmpGitRepo();
+        try {
+            const ctx = mkCtx(dir);
+            const { server, getInputSchema } = captureHandler();
+            const mod = await importStashRestore();
+            mod.register(server, ctx);
+            const inputSchema = getInputSchema();
+
+            expect(inputSchema.safeParse({ mode: 'list', unknown: true }).success).toBe(false);
+            expect(inputSchema.safeParse({
+                mode: 'apply',
+                corrections: [{ index: 1, unknown: true }],
+            }).success).toBe(false);
+            expect(inputSchema.safeParse({
+                mode: 'apply',
+                corrections: [{ index: 1, startLine: 2, nearLine: 3 }],
+            }).success).toBe(true);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
